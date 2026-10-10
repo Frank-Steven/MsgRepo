@@ -17,7 +17,9 @@ class InboxPage extends StatefulWidget {
 
 class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
   List<RawMessage> _messages = [];
+  List<SourceApp> _sources = [];
   String _filter = 'all'; // all | pending | processed | archived
+  String? _appFilter; // null = 全部应用，否则为 packageName
   bool _listenerEnabled = true;
   bool _syncing = false;
   StreamSubscription<int>? _sub;
@@ -59,9 +61,21 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
   }
 
   Future<void> _reload() async {
-    final messages = await AppDatabase.instance.getRawMessages(
-        status: _filter == 'all' ? null : _filter);
-    if (mounted) setState(() => _messages = messages);
+    final db = AppDatabase.instance;
+    final messages = await db.getRawMessages(
+        status: _filter == 'all' ? null : _filter, packageName: _appFilter);
+    final sources = await db.getDistinctSources();
+    if (mounted) {
+      setState(() {
+        _messages = messages;
+        _sources = sources;
+        // 所选应用的消息可能已不存在，回退到全部
+        if (_appFilter != null &&
+            !_sources.any((s) => s.packageName == _appFilter)) {
+          _appFilter = null;
+        }
+      });
+    }
   }
 
   Future<void> _sync() async {
@@ -145,6 +159,26 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
                       selected: _filter == entry.key,
                       onSelected: (_) {
                         setState(() => _filter = entry.key);
+                        _reload();
+                      },
+                    ),
+                  ),
+                if (_sources.isNotEmpty)
+                  DropdownButtonHideUnderline(
+                    child: DropdownButton<String?>(
+                      value: _appFilter,
+                      hint: const Text('全部应用'),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                            value: null, child: Text('全部应用')),
+                        for (final s in _sources)
+                          DropdownMenuItem<String?>(
+                            value: s.packageName,
+                            child: Text(s.displayName),
+                          ),
+                      ],
+                      onChanged: (v) {
+                        setState(() => _appFilter = v);
                         _reload();
                       },
                     ),

@@ -32,6 +32,12 @@ class MainActivity : FlutterActivity() {
                     "getQueueDir" ->
                         result.success(File(filesDir, "queue").absolutePath)
 
+                    // 已见应用列表（NotificationCaptureService 维护），返回文件内容
+                    "getSeenApps" -> {
+                        val file = File(filesDir, "seen_apps.json")
+                        result.success(if (file.exists()) file.readText() else null)
+                    }
+
                     // 打开附件访问方式：http(s) 链接、content://、应用 deeplink 均可
                     "openDeeplink" -> {
                         val url = call.argument<String>("url")

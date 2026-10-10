@@ -48,7 +48,22 @@ SQLite 库会产生并发冲突。因此采用**文件队列 + 轮询**：
 - Dart `NotificationBridge` 每 10s 轮询队列目录，解析入库（计算
   `contentHash = sha256(packageName|title|body|postedAt)` 去重）后删除文件；
 - MethodChannel `dev.msgrepo.mobile/bridge` 只承担授权检查/跳转、deeplink 拉起、
-  队列目录路径查询。
+  队列目录路径查询、seen apps 读取。
+
+### 应用采集过滤
+
+在「我的 → 应用采集过滤」可选择只收集指定应用的通知：
+
+- 配置存 SharedPreferences（JSON 字符串），Dart 与 Kotlin 共享。**过滤发生在
+  Kotlin 采集层**：不允许的应用直接丢弃，不进队列、不入库；
+- 「仅指定应用」模式下列表为空 = 什么都不收集，设置页会有明显提示；
+- 手动添加的消息（packageName 为 `manual`）永远不受此设置影响；
+- 收件箱列表支持按来源应用筛选（基于本地消息的 distinct 查询）。
+
+**已见应用（seen apps）**：Kotlin 端无论是否放行，都会把
+`{packageName, appName, lastSeenAt}` 更新到 `filesDir/seen_apps.json`
+（原子写 tmp+rename），设置页的「添加应用」据此列出发过通知的应用（含当前被拦截的）
+供勾选，支持搜索；未发过通知的应用不在其中，可手动输入包名添加。
 
 ### 数据流
 

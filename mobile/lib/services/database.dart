@@ -5,6 +5,17 @@ import 'package:sqflite/sqflite.dart';
 
 import '../models.dart';
 
+/// 收件箱按应用筛选用的来源应用项。
+class SourceApp {
+  final String packageName;
+  final String? appName;
+
+  const SourceApp(this.packageName, this.appName);
+
+  String get displayName =>
+      (appName != null && appName!.isNotEmpty) ? appName! : packageName;
+}
+
 /// 本地 SQLite 存储：raw_messages（原始消息）与 structured_items（结构化结果）。
 class AppDatabase {
   AppDatabase._();
@@ -124,16 +135,39 @@ class AppDatabase {
     return true;
   }
 
-  Future<List<RawMessage>> getRawMessages({String? status, int limit = 500}) async {
+  Future<List<RawMessage>> getRawMessages(
+      {String? status, String? packageName, int limit = 500}) async {
     final db = await database;
+    final wheres = <String>[];
+    final args = <Object?>[];
+    if (status != null) {
+      wheres.add('status = ?');
+      args.add(status);
+    }
+    if (packageName != null) {
+      wheres.add('package_name = ?');
+      args.add(packageName);
+    }
     final rows = await db.query(
       'raw_messages',
-      where: status == null ? null : 'status = ?',
-      whereArgs: status == null ? null : [status],
+      where: wheres.isEmpty ? null : wheres.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
       orderBy: 'posted_at DESC',
       limit: limit,
     );
     return rows.map(_rowToRawMessage).toList();
+  }
+
+  /// 收件箱按应用筛选：distinct 来源应用，按最近消息时间降序。
+  Future<List<SourceApp>> getDistinctSources() async {
+    final db = await database;
+    final rows = await db.rawQuery(
+        'SELECT package_name, app_name FROM raw_messages '
+        'GROUP BY package_name ORDER BY MAX(posted_at) DESC');
+    return rows
+        .map((r) =>
+            SourceApp(r['package_name'] as String, r['app_name'] as String?))
+        .toList();
   }
 
   Future<List<RawMessage>> getRawMessagesByIds(List<String> ids) async {
