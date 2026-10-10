@@ -49,11 +49,20 @@ adb forward tcp:8765 tcp:8765
 - 之后手机端每个请求携带 `Authorization: Bearer <token>`；
 - 电脑端只绑定 `127.0.0.1`，不经 ADB forward 无法到达，token 是第二道防线。
 
+## 采集过滤（按应用）
+
+用户可配置只收集指定应用的通知，拦截发生在**采集层**——Kotlin 监听服务在写入队列文件前判断，被拦截应用的通知不落盘、不入库、不参与同步：
+
+- 配置为手机端本地设置（shared_preferences，Dart 与 Kotlin 共享），结构：`{"mode": "all" | "allowlist", "packages": [...]}`。`all` 为默认（收集全部，向后兼容）；`allowlist` 时只收集列出的应用，**列表为空 = 不收集任何通知**；手动添加的消息不受限。
+- Kotlin 端另维护"已见应用"记录（无论是否放行都登记 packageName/appName），供设置页勾选来源；从未发过通知的应用可手动输入 packageName 加入。
+- 与分类注册表的分工：应用过滤回答"**收不收**"（采集前），注册表分类回答"**算什么**"（采集后）。被过滤掉的通知电脑端永远看不到。
+
 ## 数据流向
 
 ```
 采集：Android 系统 ─▶ NotificationCaptureService(Kotlin)
-        ─▶ 队列文件(原子写) ─▶ Dart 轮询 ─▶ sqflite(raw_messages, pending)
+        ─▶ 应用过滤(all/allowlist) ─▶ 队列文件(原子写)
+        ─▶ Dart 轮询 ─▶ sqflite(raw_messages, pending)
 
 同步：sqflite pending ─▶ SyncClient ─▶ POST /v1/sync
         ─▶ 电脑端管线 ─▶ StructuredItem[]

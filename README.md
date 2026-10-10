@@ -40,7 +40,7 @@ npm run demo         # 在 desktop/ 下跑端到端演示
 
 ## 数据设计一分钟速览
 
-- **RawMessage**：原始消息，附件只存访问方式（路径/URI/小程序路径），`contentHash` 去重
+- **RawMessage**：原始消息，附件只存访问方式（路径/URI/小程序路径），`contentHash` 去重；采集层支持按应用过滤（全部 / 仅指定应用）
 - **StructuredItem**：统一信封（`category` / `priority` P0–P3 / `confidence` / 统一时间结构 `time`）+ 分类 `payload`；手机端提醒只读 `time`
 - **CategoryRegistry**：分类注册表，声明式 JSON，同步时发给电脑作为 AI 分类依据；`schedule`/`todo`/`note` 为特殊化结构，其余分类走通用 `fields` 键值表结构，**新增分类零代码改动**
 - AI 输出经注册表 schema 校验，失败自动降级为 `generic` 且信息不丢
