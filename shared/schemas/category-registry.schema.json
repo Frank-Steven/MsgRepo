@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://msgrepo.dev/schemas/category-registry.schema.json",
+  "title": "CategoryRegistry",
+  "description": "分类注册表——可扩展性核心。只含结构与描述，不含任何消息内容。同步时由手机发给电脑，作为 AI 分类的依据。",
+  "type": "object",
+  "required": ["version", "categories"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "注册表语义化版本，如 1.2.0。两端以此协商一致性"
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["key", "displayName", "description", "baseKind", "defaultPriority", "payloadSchema"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "description": "分类唯一 key，如 schedule / todo / note / generic / express"
+          },
+          "displayName": { "type": "string" },
+          "description": {
+            "type": "string",
+            "description": "给 AI 看的分类说明，应包含典型样例措辞，直接影响分类准确率"
+          },
+          "baseKind": {
+            "type": "string",
+            "enum": ["specialized", "generic"],
+            "description": "specialized=内置固定结构(schedule/todo/note)；generic=基于通用 fields 结构的轻量分类"
+          },
+          "defaultPriority": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"],
+            "description": "AI 未给出明确优先级时的兜底值"
+          },
+          "priorityHints": {
+            "type": "string",
+            "description": "给 AI 的优先级判定提示，如『含截止时间且临近则 P0/P1』"
+          },
+          "timeHints": {
+            "type": "string",
+            "description": "给 AI 的时间语义提示，如『通常有开始时间，提醒提前 30 分钟』"
+          },
+          "payloadSchema": {
+            "type": "object",
+            "description": "该分类 payload 的 JSON Schema；generic 类分类使用通用 fields 结构"
+          }
+        }
+      }
+    }
+  }
+}

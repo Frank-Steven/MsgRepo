@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://msgrepo.dev/schemas/raw-message.schema.json",
+  "title": "RawMessage",
+  "description": "手机端采集的原始消息。通知自动采集或用户手动添加，附件只存访问方式不存内容。",
+  "type": "object",
+  "required": ["id", "source", "title", "body", "postedAt", "captureType", "contentHash", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "手机端生成的 UUID v4，全局唯一"
+    },
+    "source": {
+      "type": "object",
+      "required": ["packageName"],
+      "properties": {
+        "packageName": { "type": "string", "description": "来源应用包名，手动添加时为 manual" },
+        "appName": { "type": "string", "description": "来源应用显示名" },
+        "channelId": { "type": "string", "description": "Android 通知渠道 ID" },
+        "conversationTitle": { "type": "string", "description": "会话标题（群名/联系人）" },
+        "sender": { "type": "string", "description": "发送者" }
+      }
+    },
+    "title": { "type": "string", "description": "通知标题或手动输入标题" },
+    "body": { "type": "string", "description": "通知正文或手动输入内容" },
+    "postedAt": { "type": "integer", "description": "消息发出的 Unix 毫秒时间戳，是 AI 解析相对时间的基准" },
+    "captureType": {
+      "type": "string",
+      "enum": ["notification", "manual"],
+      "description": "notification=系统自动采集；manual=用户手动添加"
+    },
+    "attachments": {
+      "type": "array",
+      "description": "手动添加的附件。只存访问方式（路径/URI/链接），不存文件内容本身",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "access"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "kind": {
+            "type": "string",
+            "enum": ["image", "file", "miniprogram", "link", "other"]
+          },
+          "label": { "type": "string", "description": "用户给的说明文字" },
+          "access": {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["local_path", "content_uri", "url", "app_deeplink", "miniprogram_path"],
+                "description": "访问方式：本地路径 / Android content:// / 网页链接 / 应用内跳转 / 小程序路径"
+              },
+              "value": { "type": "string", "description": "访问方式对应的值" },
+              "mimeType": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "contentHash": {
+      "type": "string",
+      "description": "SHA-256(packageName|title|body|postedAt) 的十六进制，用于两端去重"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "processed", "archived"],
+      "description": "pending=待同步处理；processed=电脑端已返回结果；archived=不再处理"
+    }
+  }
+}

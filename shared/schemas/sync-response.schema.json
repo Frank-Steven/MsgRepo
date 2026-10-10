@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://msgrepo.dev/schemas/sync-response.schema.json",
+  "title": "SyncResponse",
+  "description": "POST /v1/sync 响应体。电脑返回结构化结果与被成功处理的消息 ID。",
+  "type": "object",
+  "required": ["registryVersion", "results", "processedMessageIds"],
+  "properties": {
+    "registryVersion": {
+      "type": "string",
+      "description": "电脑端实际使用的注册表版本，手机端据此判断是否需要更新本地注册表"
+    },
+    "results": {
+      "type": "array",
+      "items": { "$ref": "structured-item.schema.json" },
+      "description": "结构化结果，已通过注册表 payloadSchema 校验（或降级为 generic）"
+    },
+    "processedMessageIds": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" },
+      "description": "本轮成功处理的消息 ID，手机端将其 status 置为 processed"
+    },
+    "failedMessageIds": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" },
+      "description": "处理失败的消息 ID，手机端保持 pending 等待下轮重试"
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "非致命问题说明，如『3 条结果校验失败已降级为 generic』"
+    }
+  }
+}

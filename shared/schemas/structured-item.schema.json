@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://msgrepo.dev/schemas/structured-item.schema.json",
+  "title": "StructuredItem",
+  "description": "电脑端 AI 处理产出的统一结构化结果：统一信封 + 按分类注册的 payload。手机端提醒只依赖 time 字段。",
+  "type": "object",
+  "required": ["id", "rawMessageIds", "category", "schemaVersion", "title", "summary", "priority", "confidence", "time", "payload", "processedBy"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid", "description": "电脑端生成的 UUID v4" },
+    "rawMessageIds": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" },
+      "minItems": 1,
+      "description": "来源原始消息 ID 列表，多条同类通知可归并为一条结果"
+    },
+    "category": {
+      "type": "string",
+      "description": "分类 key，必须存在于同步时协商一致的 CategoryRegistry 中"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "description": "本信封结构的版本，如 1.0.0；与注册表版本独立"
+    },
+    "title": { "type": "string", "description": "AI 提炼的短标题" },
+    "summary": { "type": "string", "description": "AI 提炼的一两句话摘要" },
+    "priority": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2", "P3"],
+      "description": "P0=紧急且时间敏感(立即提醒)；P1=重要；P2=普通(默认)；P3=低价值可归档(营销等)"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "AI 对分类与抽取的置信度，低于阈值时手机端 UI 应提示人工确认"
+    },
+    "time": {
+      "type": "object",
+      "required": ["kind"],
+      "description": "统一时间语义。任何分类的时间信息都归一到这里，手机端提醒调度只读取本字段",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["none", "point", "range", "deadline", "recurring"],
+          "description": "none=无时间；point=某一时刻；range=起止区间；deadline=截止时间；recurring=周期重复"
+        },
+        "startAt": { "type": "integer", "description": "point/range 的开始时间，Unix 毫秒" },
+        "endAt": { "type": "integer", "description": "range 的结束时间，Unix 毫秒" },
+        "deadline": { "type": "integer", "description": "deadline 的截止时间，Unix 毫秒" },
+        "rrule": { "type": "string", "description": "recurring 的 RFC 5545 RRULE 字符串" },
+        "reminderOffsets": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "提醒提前量（分钟）列表，如 [30, 5] 表示提前 30 分钟和 5 分钟各提醒一次；空数组不提醒"
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "description": "分类载荷，按 CategoryRegistry 中该 category 的 payloadSchema 校验；校验失败降级为 generic"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "processedBy": {
+      "type": "object",
+      "required": ["provider", "pipelineVersion"],
+      "properties": {
+        "provider": { "type": "string", "description": "AI 适配器名，如 ollama / openai-compatible / mock" },
+        "model": { "type": "string" },
+        "pipelineVersion": { "type": "string", "description": "管线版本，便于结果追溯" }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://msgrepo.dev/schemas/sync-request.schema.json",
+  "title": "SyncRequest",
+  "description": "POST /v1/sync 请求体。手机把待处理原始消息 + 当前注册表（仅结构，无内容）发给电脑。",
+  "type": "object",
+  "required": ["deviceId", "registryVersion", "messages"],
+  "properties": {
+    "deviceId": { "type": "string", "description": "设备唯一标识，配对时确定" },
+    "registryVersion": { "type": "string", "description": "手机端当前注册表版本" },
+    "registry": {
+      "$ref": "category-registry.schema.json",
+      "description": "完整注册表。仅当电脑端版本不一致时携带，否则省略以减小请求"
+    },
+    "messages": {
+      "type": "array",
+      "items": { "$ref": "raw-message.schema.json" },
+      "description": "status=pending 的原始消息，按 postedAt 升序"
+    }
+  }
+}
