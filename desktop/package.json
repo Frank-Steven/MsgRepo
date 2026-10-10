@@ -1,0 +1,21 @@
+{
+  "name": "msgrepo-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MsgRepo 电脑端：接收手机通知，用本地 AI 结构化为日程/待办/笔记",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts start",
+    "pair": "tsx src/index.ts pair",
+    "demo": "tsx src/index.ts demo"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}
