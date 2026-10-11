@@ -23,7 +23,9 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
   String? _appFilter; // null = 全部应用，否则为 packageName
   bool _listenerEnabled = true;
   bool _syncing = false;
+  String _syncProgress = '';
   StreamSubscription<int>? _sub;
+  StreamSubscription<(int, int)>? _syncSub;
 
   static const _filters = {
     'all': '全部',
@@ -39,12 +41,19 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
     _reload();
     _checkListener();
     _sub = NotificationBridge.instance.onNewMessages.listen((_) => _reload());
+    // 流式同步：每处理完一条即时刷新列表，并在标题栏显示进度
+    _syncSub = SyncClient.instance.onProgress.listen((p) {
+      if (!mounted) return;
+      setState(() => _syncProgress = '已处理 ${p.$1} 条 · 产出 ${p.$2} 条');
+      _reload();
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
+    _syncSub?.cancel();
     super.dispose();
   }
 
@@ -81,13 +90,17 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
 
   Future<void> _sync() async {
     if (_syncing) return;
-    setState(() => _syncing = true);
+    setState(() {
+      _syncing = true;
+      _syncProgress = '';
+    });
     try {
       final outcome = await SyncClient.instance.sync();
       if (!mounted) return;
       final text = outcome.sent == 0
           ? '没有待处理消息'
-          : '已同步 ${outcome.sent} 条，处理 ${outcome.processed} 条，'
+          : '已同步 ${outcome.sent} 条，处理 ${outcome.processed} 条'
+              '${outcome.failed > 0 ? '，失败 ${outcome.failed} 条' : ''}，'
               '新增结构化结果 ${outcome.results} 条'
               '${outcome.warnings.isEmpty ? '' : '；警告：${outcome.warnings.join('；')}'}';
       ScaffoldMessenger.of(context)
@@ -97,7 +110,12 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('$e')));
     } finally {
-      if (mounted) setState(() => _syncing = false);
+      if (mounted) {
+        setState(() {
+          _syncing = false;
+          _syncProgress = '';
+        });
+      }
       await _reload();
     }
   }
@@ -154,7 +172,10 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('收件箱'),
+        title: _syncing && _syncProgress.isNotEmpty
+            ? Text('收件箱 · $_syncProgress',
+                style: const TextStyle(fontSize: 14))
+            : const Text('收件箱'),
         actions: [
           IconButton(
             tooltip: '立即同步',

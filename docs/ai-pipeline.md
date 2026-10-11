@@ -4,12 +4,19 @@
 
 ## 管线总览
 
+管线**逐条处理、逐条落盘、逐条回调**（流式，见 `docs/protocol.md`）：每条消息独立走完
+2–6 步后立即写入 `items.jsonl` 并触发 `onProgress`（流式同步时逐条下发给手机），
+连接中断只丢失正在处理的那一条。
+
 ```
 RawMessage[]
   │
-  ├─ 1. 预处理        contentHash 去重；空内容/纯表情等规则过滤
+  ├─ 1. 预处理        双重去重：contentHash（含 postedAt）+ 内容键
+  │                    sha256(packageName|title|body)（不含时间，应用重投/
+  │                    折叠更新的同内容消息直接命中）；重复消息通过 hash→条目
+  │                    映射找回既有结果立即返回，不再调用模型
   │
-  ├─ 2. 分类+抽取      AIProvider.process(messages, registry)
+  ├─ 2. 分类+抽取      AIProvider.process([msg], registry)（逐条调用）
   │     │              提示词由注册表动态生成（见下）
   │     │              输出 generic 时自动发起第二次强势分类（见下）
   │     ▼
@@ -21,11 +28,12 @@ RawMessage[]
   ├─ 5. 校验与降级     payload 过注册表 payloadSchema（ajv）
   │                    失败 → category=generic + 平铺 fields + warning
   │
-  └─ 6. 归并          同事件多条通知合并为一条 StructuredItem
-                     （rawMessageIds 保留全部来源）
+  └─ 6. 归并          并入本批已累计结果：要求**标题相似度 ≥0.8 且
+                     内容摘要相似度 ≥0.5**（折叠通知拆开后标题都是群名，
+                     只看标题会把不相关消息绑在一起）
   │
   ▼
-StructuredItem[]
+StructuredItem[]（每条产出时即落盘 + onProgress 回调）
 ```
 
 ## 提示词策略

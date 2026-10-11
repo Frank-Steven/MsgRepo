@@ -30,7 +30,7 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 2,
+      version: 3,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -41,6 +41,46 @@ class AppDatabase {
     if (oldVersion < 2) {
       await db.execute(
           'ALTER TABLE raw_messages ADD COLUMN needs_reprocess INTEGER NOT NULL DEFAULT 0');
+    }
+    if (oldVersion < 3) {
+      await _splitFoldedMessages(db);
+    }
+  }
+
+  /// 拆分系统折叠通知留下的存量消息：body 形如 "[5条]周辰羽: 。"、
+  /// 标题形如 "26软工班长们的窝(3条新消息)"。折叠层里被盖住的历史消息无法找回，
+  /// 这里把每条快照还原成它携带的最新一条（去前缀、解析 sender、重算 content_hash）。
+  Future<void> _splitFoldedMessages(Database db) async {
+    final foldBody = RegExp(r'^\[(\d+)条\]');
+    final foldTitle = RegExp(r'\(\d+条新消息\)$');
+    final senderPrefix = RegExp(r'^([^:：\n]{1,30})[:：]\s*');
+    final rows = await db.query('raw_messages',
+        columns: ['id', 'package_name', 'title', 'body', 'posted_at', 'sender'],
+        where: "body LIKE '[%条]%' OR title LIKE '%(%条新消息)'");
+    for (final row in rows) {
+      var title = row['title'] as String;
+      var body = row['body'] as String;
+      String? sender = row['sender'] as String?;
+      final newTitle = title.replaceFirst(foldTitle, '');
+      var newBody = body.replaceFirst(foldBody, '');
+      if (sender == null) {
+        final m = senderPrefix.firstMatch(newBody);
+        if (m != null) sender = m.group(1);
+      }
+      if (newTitle == title && newBody == body) continue;
+      await db.update(
+        'raw_messages',
+        {
+          'title': newTitle,
+          'body': newBody,
+          'sender': sender,
+          'content_hash': computeContentHash(row['package_name'] as String,
+              newTitle, newBody, row['posted_at'] as int),
+        },
+        where: 'id = ?',
+        whereArgs: [row['id']],
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
     }
   }
 

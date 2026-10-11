@@ -143,6 +143,7 @@ class NotificationBridge {
         appName: map['appName'] as String?,
         channelId: map['channelId'] as String?,
         conversationTitle: map['conversationTitle'] as String?,
+        sender: map['sender'] as String?,
       ),
       title: title,
       body: body,

@@ -474,6 +474,9 @@ class SyncRequest {
   /// 强制重处理的消息 ID（回退的消息），电脑端跳过 contentHash 去重。可选。
   final List<String>? reprocessMessageIds;
 
+  /// true 时请求电脑端以 NDJSON 流式逐条返回结果。
+  final bool stream;
+
   final List<RawMessage> messages;
 
   const SyncRequest({
@@ -482,6 +485,7 @@ class SyncRequest {
     this.registry,
     this.customPrompt,
     this.reprocessMessageIds,
+    this.stream = false,
     required this.messages,
   });
 
@@ -493,6 +497,7 @@ class SyncRequest {
           'customPrompt': customPrompt,
         if (reprocessMessageIds != null && reprocessMessageIds!.isNotEmpty)
           'reprocessMessageIds': reprocessMessageIds,
+        if (stream) 'stream': true,
         'messages': messages.map((e) => e.toJson()).toList(),
       };
 }

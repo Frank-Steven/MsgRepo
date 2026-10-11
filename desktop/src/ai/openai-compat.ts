@@ -71,9 +71,9 @@ export class OpenAICompatProvider implements AIProvider {
       });
 
     // 部分本地服务（如 llama.cpp 旧版）不支持 response_format，400 时降级为纯 prompt 约束
+    const fetchInit = { method: "POST", headers, signal: AbortSignal.timeout(180_000) } as const;
     let res = await fetch(`${this.opts.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
+      ...fetchInit,
       body: makeBody(true),
     });
     if (!res.ok) {
@@ -82,8 +82,7 @@ export class OpenAICompatProvider implements AIProvider {
         res.status === 400 && /response_format|structured output/i.test(errText);
       if (!formatUnsupported) throw new Error(`OpenAI 兼容接口返回 ${res.status}: ${errText}`);
       res = await fetch(`${this.opts.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers,
+        ...fetchInit,
         body: makeBody(false),
       });
       if (!res.ok) throw new Error(`OpenAI 兼容接口返回 ${res.status}: ${await res.text()}`);

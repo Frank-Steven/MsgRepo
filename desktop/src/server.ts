@@ -200,12 +200,52 @@ export function createServer(opts: ServerOptions): http.Server {
           });
         }
         const syncReq = parsed as SyncRequest;
+        const startedAt = Date.now();
+        console.log(`[sync] 收到 ${syncReq.messages.length} 条消息（stream=${syncReq.stream === true}），开始处理…`);
         const current = loadRegistry(opts.dataDir);
         const { registry, warnings: regWarnings } = negotiateRegistry(syncReq, current, opts.dataDir);
+
+        // 流式模式：NDJSON 逐条下发进度，每条结果在管线内已即时落盘
+        if (syncReq.stream === true) {
+          res.writeHead(200, {
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-cache",
+          });
+          const send = (obj: unknown) => {
+            try {
+              res.write(JSON.stringify(obj) + "\n");
+            } catch {
+              // 客户端已断开：忽略写入错误，管线继续落盘
+            }
+          };
+          for (const w of regWarnings) send({ type: "warning", message: w });
+          const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store, {
+            customPrompt: syncReq.customPrompt,
+            reprocessMessageIds: syncReq.reprocessMessageIds,
+            onProgress: (ev) => send({ type: "progress", ...ev }),
+          });
+          console.log(
+            `[sync] 完成：${result.processedMessageIds.length} 处理 / ${result.failedMessageIds.length} 失败 / ` +
+              `${result.results.length} 条结果，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+          );
+          send({
+            type: "done",
+            registryVersion: registry.version,
+            failedMessageIds: result.failedMessageIds,
+            warnings: result.warnings,
+          });
+          res.end();
+          return;
+        }
+
         const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store, {
           customPrompt: syncReq.customPrompt,
           reprocessMessageIds: syncReq.reprocessMessageIds,
         });
+        console.log(
+          `[sync] 完成：${result.processedMessageIds.length} 处理 / ${result.failedMessageIds.length} 失败 / ` +
+            `${result.results.length} 条结果，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+        );
         const response: SyncResponse = {
           registryVersion: registry.version,
           results: result.results,

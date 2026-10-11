@@ -41,6 +41,7 @@ Authorization: Bearer <pairing-token>
   "registry": { "...完整注册表，可选..." },
   "customPrompt": "把直播开播提醒都当作营销处理",
   "reprocessMessageIds": ["uuid-9"],
+  "stream": true,
   "messages": [ { "...RawMessage..." } ]
 }
 ```
@@ -50,10 +51,24 @@ Authorization: Bearer <pairing-token>
 1. `messages` 只含 `status=pending` 的消息，按 `postedAt` 升序；单次建议不超过 200 条，超出由手机端分批
 2. `registry` 仅当手机端发现两端版本不一致（health 或上一次 sync 响应得知）时携带；电脑端收到后**采用手机端的注册表**并持久化（手机是权威来源）
 3. `customPrompt`（可选）：用户在手机端维护的自定义提示词，电脑端追加到 AI 系统提示词末尾，用于调整分类/优先级表现而不改注册表
-4. `reprocessMessageIds`（可选）：用户回退（processed→pending）的消息 id，电脑端对这些消息**跳过 contentHash 去重**强制重新处理；手机端同步成功后清除本地的 needs_reprocess 标记
-5. 空 `messages` 合法——退化为"注册表协商 + 心跳"
+4. `reprocessMessageIds`（可选）：用户回退（processed→pending）的消息 id，电脑端对这些消息**跳过去重**强制重新处理；手机端同步成功后清除本地的 needs_reprocess 标记
+5. `stream`（可选）：为 `true` 时电脑端以 **NDJSON 流式响应**（`Content-Type: application/x-ndjson`），逐条下发处理进度；缺省为一次性 JSON 响应
+6. 空 `messages` 合法——退化为"注册表协商 + 心跳"
 
-响应体（sync-response.schema.json）：
+**流式响应**（`stream: true`）：每行一个 JSON 事件——
+
+```jsonl
+{"type":"warning","message":"注册表版本不一致…"}
+{"type":"progress","item":{"...StructuredItem..."},"processedMessageIds":["uuid-1"],"warnings":["..."]}
+{"type":"progress","processedMessageIds":["uuid-2"]}
+{"type":"done","registryVersion":"1.1.1","failedMessageIds":["uuid-3"],"warnings":["..."]}
+```
+
+- 每条消息处理完电脑端**立即落盘并发出一个 progress 事件**；`item` 为该消息产出（或去重找回、归并后更新）的条目，重复消息可能不带 `item`
+- 手机端每收到一个事件就入库/置状态/调度提醒并刷新 UI；连接中断时已完成的部分不丢，剩余消息保持 `pending` 等下次同步
+- 手机端对流应用**空闲超时**（240s 无新事件视为断流），而非整体超时——大批量处理总时长不受限
+
+普通响应体（sync-response.schema.json）：
 
 ```json
 {
@@ -98,9 +113,9 @@ Authorization: Bearer <pairing-token>
 
 ## 幂等与重试
 
-- 手机端重发同一条消息是安全的：电脑端按 `contentHash` 去重，已处理过的哈希直接归入 `processedMessageIds` 返回
-- 手机端只有在收到 200 后才把消息置 `processed`；中途断线消息保持 `pending`，下次重发
-- 电脑端结果持久化为 append-only 的 `items.jsonl`，重复处理同一哈希不会产生重复结果
+- 手机端重发同一条消息是安全的：电脑端按 `contentHash` + 内容键（`sha256(packageName|title|body)`，不含 postedAt）双重去重——应用重投/折叠更新产生的"只有时间不同"的重复内容也能命中；已处理过的消息直接归入 `processedMessageIds` 并**找回既有结构化结果**一并返回
+- 电脑端逐条处理、逐条落盘（append-only 的 `items.jsonl`）；流式模式下每处理完一条立即下发，中途断线时两端已完成的进度都不丢，未处理的消息保持 `pending` 下次继续
+- 重复处理同一哈希不会产生重复结果（找回机制复用原条目）
 
 ## 版本兼容
 

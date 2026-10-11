@@ -67,7 +67,45 @@ class NotificationCaptureService : NotificationListenerService() {
         // 采集层拦截：不允许的应用不进队列、不入库
         if (!isAllowed(packageName)) return
 
-        val dedupKey = "$packageName|$title|$text|$postedAt"
+        val conversationTitle =
+            extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()
+
+        // 系统折叠机制会把同一应用的多次通知合并成一条（EXTRA_TEXT 形如
+        // "[5条]某某: …"）。MessagingStyle 通知在 EXTRA_MESSAGES 里携带逐条
+        // 原始消息，拆开后逐条入库，避免不相关内容被绑在一起处理。
+        val bundled = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+        if (bundled != null && bundled.isNotEmpty()) {
+            for (m in bundled) {
+                if (m !is android.os.Bundle) continue
+                val sender = m.getCharSequence("sender")?.toString().orEmpty()
+                val mText = m.getCharSequence("text")?.toString().orEmpty()
+                if (mText.isBlank()) continue
+                val mTime = m.getLong("time").let { if (it > 0) it else postedAt }
+                emit(
+                    packageName, appName, notification.channelId, conversationTitle,
+                    title, mText, mTime, sender
+                )
+            }
+            return
+        }
+        emit(
+            packageName, appName, notification.channelId, conversationTitle,
+            title, text, postedAt, null
+        )
+    }
+
+    /** 去重后把一条（拆分后的）消息原子写入队列目录。 */
+    private fun emit(
+        packageName: String,
+        appName: String,
+        channelId: String?,
+        conversationTitle: String?,
+        title: String,
+        text: String,
+        postedAt: Long,
+        sender: String?,
+    ) {
+        val dedupKey = "$packageName|$title|$sender|$text|$postedAt"
         synchronized(recentKeys) {
             if (!recentKeys.add(dedupKey)) return
             if (recentKeys.size > 512) {
@@ -78,12 +116,9 @@ class NotificationCaptureService : NotificationListenerService() {
         val obj = JSONObject()
         obj.put("packageName", packageName)
         obj.put("appName", appName)
-        obj.put("channelId", notification.channelId ?: JSONObject.NULL)
-        obj.put(
-            "conversationTitle",
-            extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()
-                ?: JSONObject.NULL
-        )
+        obj.put("channelId", channelId ?: JSONObject.NULL)
+        obj.put("conversationTitle", conversationTitle ?: JSONObject.NULL)
+        obj.put("sender", sender ?: JSONObject.NULL)
         obj.put("title", title)
         obj.put("text", text)
         obj.put("postedTime", postedAt)

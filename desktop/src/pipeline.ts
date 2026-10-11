@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import type { AIProvider } from "./ai/provider.js";
@@ -67,20 +68,19 @@ function similarity(a: string, b: string): number {
   return (2 * inter) / (A.size + B.size);
 }
 
-function mergeSimilar(items: StructuredItem[], warnings: string[]): StructuredItem[] {
-  const out: StructuredItem[] = [];
-  for (const item of items) {
-    const existing = out.find(
-      (o) => o.category === item.category && similarity(o.title, item.title) >= 0.8,
-    );
-    if (existing) {
-      existing.rawMessageIds = [...new Set([...existing.rawMessageIds, ...item.rawMessageIds])];
-      warnings.push(`已归并相似消息：「${item.title}」并入「${existing.title}」（${item.category}）`);
-    } else {
-      out.push(item);
-    }
-  }
-  return out;
+/** 归并到已累计结果：仅当标题与内容都高度相似才归并（群聊折叠通知拆开后
+ *  标题都是群名，只看标题会把毫不相关的消息绑在一起）。命中返回 true。 */
+function mergeInto(accumulated: StructuredItem[], item: StructuredItem, warnings: string[]): StructuredItem | null {
+  const existing = accumulated.find(
+    (o) =>
+      o.category === item.category &&
+      similarity(o.title, item.title) >= 0.8 &&
+      similarity(o.summary ?? "", item.summary ?? "") >= 0.5,
+  );
+  if (!existing) return null;
+  existing.rawMessageIds = [...new Set([...existing.rawMessageIds, ...item.rawMessageIds])];
+  warnings.push(`已归并相似消息：「${item.title}」并入「${existing.title}」（${item.category}）`);
+  return existing;
 }
 
 // ---- 管线 ----
@@ -95,14 +95,36 @@ export interface PipelineResult {
 export interface PipelineOptions {
   /** 用户自定义提示词，透传给 AI provider */
   customPrompt?: string;
-  /** 强制重新处理的消息 ID：这些消息跳过 contentHash 去重 */
+  /** 强制重新处理的消息 ID：这些消息跳过去重 */
   reprocessMessageIds?: string[];
+  /** 每条消息处理完（或找回/失败）立即回调一次，供流式响应与增量落盘 */
+  onProgress?: (event: ProgressEvent) => void;
+}
+
+/** 每条消息处理完（或找回/失败）立即回调一次，供流式响应与增量落盘。 */
+export interface ProgressEvent {
+  item?: StructuredItem;
+  processedMessageIds: string[];
+  failedMessageIds?: string[];
+  warnings?: string[];
+}
+
+/** 内容去重键：不含 postedAt，应用重投/折叠产生的同内容消息可直接找回既有结果。 */
+function contentKey(msg: RawMessage): string {
+  return createHash("sha256")
+    .update(`${msg.source.packageName}|${msg.title}|${msg.body}`)
+    .digest("hex");
+}
+
+function dedupKeys(msg: RawMessage): string[] {
+  return [msg.contentHash, contentKey(msg)];
 }
 
 /**
- * 1. contentHash 去重（reprocessMessageIds 中的消息豁免）；2. provider 分类+抽取；
- * 3.（provider 内）相对时间→绝对毫秒；4. 优先级缺省回退注册表 defaultPriority；
- * 5. ajv 校验 payload，失败降级 generic；6. 相似消息归并。
+ * 逐条处理、逐条落盘、逐条回调（流式）：
+ * 1. 去重（contentHash + 内容键；reprocessMessageIds 豁免），重复消息找回既有结果立即返回；
+ * 2. 每条消息独立调 provider 分类+抽取，随后优先级回退、payload 校验降级、归并进已累计结果；
+ * 3. 每条处理完立即写入 store 并触发 onProgress——连接中断只丢失正在处理的那一条。
  */
 export async function runPipeline(
   messages: RawMessage[],
@@ -112,102 +134,136 @@ export async function runPipeline(
   options: PipelineOptions = {},
 ): Promise<PipelineResult> {
   const warnings: string[] = [];
+  const emit = options.onProgress ?? (() => undefined);
 
-  // 1. 去重（本批内 + 历史已处理；reprocessMessageIds 豁免，处理后仍记 hash 保持幂等）。
-  //    关键：重复消息不直接丢弃——通过 hash→条目 映射找回之前生成的结果一并返回，
-  //    否则"手机超时重试"场景下手机标记已处理却永远拿不到结构化结果。
+  // 1. 去重（本批内 + 历史已处理）。重复消息不直接丢弃——通过 hash→条目 映射找回之前
+  //    生成的结果一并返回，否则"手机超时重试"场景下手机标记已处理却永远拿不到结构化结果。
   const reprocess = new Set(options.reprocessMessageIds ?? []);
   const fresh: RawMessage[] = [];
-  const dupIds: string[] = [];
+  const processedIds: string[] = [];
+  const failedIds: string[] = [];
   const recovered: StructuredItem[] = [];
-  const recoveredIds = new Set<string>();
   const seen = new Set<string>();
+  let dupCount = 0;
   for (const msg of messages) {
-    if (!reprocess.has(msg.id) && (seen.has(msg.contentHash) || store?.hasHash(msg.contentHash))) {
-      dupIds.push(msg.id);
-      if (store) {
-        for (const item of store.findItemsByHash(msg.contentHash)) {
-          if (!recoveredIds.has(item.id)) {
-            recoveredIds.add(item.id);
-            recovered.push(item);
-          }
-        }
+    const keys = dedupKeys(msg);
+    const isDup =
+      keys.some((k) => seen.has(k)) || (store ? keys.some((k) => store.hasHash(k)) : false);
+    if (!reprocess.has(msg.id) && isDup) {
+      dupCount++;
+      processedIds.push(msg.id);
+      const found = store
+        ? [
+            ...new Map(
+              keys.flatMap((k) => store.findItemsByHash(k)).map((i) => [i.id, i] as const),
+            ).values(),
+          ]
+        : [];
+      for (const item of found) {
+        if (!recovered.some((r) => r.id === item.id)) recovered.push(item);
+        emit({ item, processedMessageIds: [msg.id] });
       }
+      if (found.length === 0) emit({ processedMessageIds: [msg.id] });
       continue;
     }
-    seen.add(msg.contentHash);
+    for (const k of keys) seen.add(k);
     fresh.push(msg);
   }
-  if (dupIds.length > 0)
+  if (dupCount > 0)
     warnings.push(
-      `${dupIds.length} 条消息 contentHash 重复，已按已处理跳过` +
+      `${dupCount} 条消息内容重复，已按已处理跳过` +
         (recovered.length > 0 ? `（找回既有结果 ${recovered.length} 条）` : ""),
     );
 
-  // 2. AI 分类 + 抽取
-  let items: StructuredItem[];
-  try {
-    items = await provider.process(fresh, registry, { customPrompt: options.customPrompt });
-  } catch (err) {
-    return {
-      results: recovered,
-      processedMessageIds: [...dupIds],
-      failedMessageIds: fresh.map((m) => m.id),
-      warnings: [...warnings, `AI provider (${provider.name}) 处理失败：${String(err)}`],
-    };
-  }
-
-  const covered = new Set(items.flatMap((i) => i.rawMessageIds));
-  const failedMessageIds = fresh.filter((m) => !covered.has(m.id)).map((m) => m.id);
-
-  // 4 + 5. 优先级回退 / payload 校验降级
-  let degraded = 0;
-  for (const item of items) {
-    const catDef = registry.categories.find((c) => c.key === item.category);
-    if (!PRIORITIES.has(item.priority as string)) {
-      item.priority = (catDef?.defaultPriority ?? "P2") as Priority;
-      warnings.push(`「${item.title}」缺少有效优先级，已用注册表默认值 ${item.priority}`);
+  // 2. 逐条 AI 处理 + 后处理 + 落盘 + 回调
+  const accumulated: StructuredItem[] = [];
+  for (const msg of fresh) {
+    let items: StructuredItem[];
+    try {
+      items = await provider.process([msg], registry, { customPrompt: options.customPrompt });
+    } catch (err) {
+      failedIds.push(msg.id);
+      const w = `AI provider (${provider.name}) 处理失败：${String(err)}`;
+      warnings.push(w);
+      emit({ processedMessageIds: [], failedMessageIds: [msg.id], warnings: [w] });
+      continue;
     }
-    const validator = catDef ? getPayloadValidator(registry, item.category) : null;
-    const valid = validator ? validator(item.payload) : false;
-    if (!valid) {
-      const reason = validator ? ajv.errorsText(validator.errors) : `未知分类 ${item.category}`;
-      degraded++;
-      const originalCategory = item.category;
-      item.payload = {
-        fields: [
-          ...flattenToFields(item.payload),
-          { key: "原始分类", value: originalCategory, valueType: "string" },
-        ],
-      };
-      item.category = "generic";
-      warnings.push(`「${item.title}」payload 校验失败（${reason}），已降级为 generic`);
-    }
-  }
-  if (degraded > 0) warnings.push(`${degraded} 条结果校验失败已降级为 generic`);
 
-  // 6. 相似消息归并
-  const results = mergeSimilar(items, warnings);
-
-  if (store) {
-    // 记录 消息 contentHash → 条目 id 映射（重处理时整体替换为新条目），供去重找回
-    const hashByMsgId = new Map(messages.map((m) => [m.id, m.contentHash]));
-    const pairs: Array<{ hash: string; itemId: string }> = [];
-    for (const item of results) {
-      for (const mid of item.rawMessageIds) {
-        const h = hashByMsgId.get(mid);
-        if (h) pairs.push({ hash: h, itemId: item.id });
+    const msgWarnings: string[] = [];
+    const produced: StructuredItem[] = [];
+    const newItems: StructuredItem[] = [];
+    for (const item of items) {
+      // 优先级回退
+      const catDef = registry.categories.find((c) => c.key === item.category);
+      if (!PRIORITIES.has(item.priority as string)) {
+        item.priority = (catDef?.defaultPriority ?? "P2") as Priority;
+        msgWarnings.push(`「${item.title}」缺少有效优先级，已用注册表默认值 ${item.priority}`);
+      }
+      // payload 校验，失败降级 generic
+      const validator = catDef ? getPayloadValidator(registry, item.category) : null;
+      const valid = validator ? validator(item.payload) : false;
+      if (!valid) {
+        const reason = validator ? ajv.errorsText(validator.errors) : `未知分类 ${item.category}`;
+        const originalCategory = item.category;
+        item.payload = {
+          fields: [
+            ...flattenToFields(item.payload),
+            { key: "原始分类", value: originalCategory, valueType: "string" },
+          ],
+        };
+        item.category = "generic";
+        msgWarnings.push(`「${item.title}」payload 校验失败（${reason}），已降级为 generic`);
+      }
+      // 归并进已累计结果（标题+内容双相似）
+      const merged = mergeInto(accumulated, item, msgWarnings);
+      if (merged) {
+        produced.push(merged); // 并入既有条目：不重复落盘，但把更新后的既有条目随事件送出
+      } else {
+        accumulated.push(item);
+        newItems.push(item);
+        produced.push(item);
       }
     }
-    store.recordHashItems(pairs);
-    store.addHashes(fresh.map((m) => m.contentHash));
-    store.appendItems(results);
+    warnings.push(...msgWarnings);
+
+    const covered = items.some((i) => i.rawMessageIds.includes(msg.id));
+    const ids = covered ? [msg.id] : [];
+    if (covered) processedIds.push(msg.id);
+    else failedIds.push(msg.id);
+
+    // 每条处理完立即落盘：连接中断时已完成的部分不丢
+    if (store) {
+      const pairs: Array<{ hash: string; itemId: string }> = [];
+      for (const item of produced) {
+        for (const k of dedupKeys(msg)) pairs.push({ hash: k, itemId: item.id });
+      }
+      store.recordHashItems(pairs);
+      store.addHashes(dedupKeys(msg));
+      store.appendItems(newItems);
+    }
+
+    if (produced.length === 0) {
+      emit({
+        processedMessageIds: ids,
+        failedMessageIds: covered ? [] : [msg.id],
+        warnings: msgWarnings,
+      });
+    } else {
+      produced.forEach((item, idx) =>
+        emit({
+          item,
+          processedMessageIds: idx === 0 ? ids : [],
+          failedMessageIds: idx === 0 && !covered ? [msg.id] : [],
+          warnings: idx === 0 ? msgWarnings : [],
+        }),
+      );
+    }
   }
 
   return {
-    results: [...recovered, ...results],
-    processedMessageIds: [...dupIds, ...fresh.filter((m) => covered.has(m.id)).map((m) => m.id)],
-    failedMessageIds,
+    results: [...recovered, ...accumulated],
+    processedMessageIds: processedIds,
+    failedMessageIds: failedIds,
     warnings,
   };
 }

@@ -101,7 +101,20 @@ export interface SyncRequest {
   registry?: CategoryRegistry;
   customPrompt?: string;
   reprocessMessageIds?: string[];
+  /** true 时以 application/x-ndjson 流式返回逐条进度 */
+  stream?: boolean;
   messages: RawMessage[];
+}
+
+/** 流式同步的 NDJSON 事件：progress 每条消息一个（可多个，item 可选），done 收尾。 */
+export interface SyncStreamEvent {
+  type: "progress" | "warning" | "done";
+  item?: StructuredItem;
+  processedMessageIds?: string[];
+  failedMessageIds?: string[];
+  warnings?: string[];
+  message?: string;
+  registryVersion?: string;
 }
 
 export interface SyncResponse {
