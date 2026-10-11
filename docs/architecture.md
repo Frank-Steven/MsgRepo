@@ -39,6 +39,8 @@ MsgRepo 是一个"通知消化"系统：手机端无差别收集通知，电脑�
 adb reverse tcp:8765 tcp:8765
 ```
 
+日常使用中以上两步（起服务 + 建通道）由 `npm run connect` 一条命令完成，并带 5 秒看护循环：服务退出自动拉起、通道丢失自动重建（`desktop/src/connect.ts`）。
+
 此后手机上的 `http://127.0.0.1:8765` 即电脑的 8765 端口。通道是 USB 本地的，不经过任何网络，天然满足"安全稳定优先"。
 
 传输层在手机端抽象为 `SyncClient`（host/port 可配）、电脑端只监听 loopback。后续扩展无线 ADB（`adb connect <ip>` 后同样 `adb reverse`）或局域网直连时，业务代码不变，只改连接建立方式——见 `docs/extensibility.md`。

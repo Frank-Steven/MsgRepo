@@ -137,6 +137,10 @@ class RawMessage {
   final String contentHash;
   String status;
 
+  /// 本地标记（不属于 schema）：从已处理回退时置 1，
+  /// 下次同步放入 reprocessMessageIds 让电脑端跳过去重。
+  bool needsReprocess;
+
   RawMessage({
     required this.id,
     required this.source,
@@ -147,6 +151,7 @@ class RawMessage {
     this.attachments = const [],
     required this.contentHash,
     this.status = statusPending,
+    this.needsReprocess = false,
   });
 
   factory RawMessage.fromJson(Map<String, dynamic> json) => RawMessage(
@@ -221,6 +226,23 @@ class ItemTime {
         if (rrule != null) 'rrule': rrule,
         'reminderOffsets': reminderOffsets,
       };
+
+  ItemTime copyWith({
+    String? kind,
+    int? Function()? startAt,
+    int? Function()? endAt,
+    int? Function()? deadline,
+    String? Function()? rrule,
+    List<int>? reminderOffsets,
+  }) =>
+      ItemTime(
+        kind: kind ?? this.kind,
+        startAt: startAt != null ? startAt() : this.startAt,
+        endAt: endAt != null ? endAt() : this.endAt,
+        deadline: deadline != null ? deadline() : this.deadline,
+        rrule: rrule != null ? rrule() : this.rrule,
+        reminderOffsets: reminderOffsets ?? this.reminderOffsets,
+      );
 
   /// 用于提醒调度的基准时刻。
   int? get baseTime {
@@ -321,6 +343,26 @@ class StructuredItem {
         'tags': tags,
         'processedBy': processedBy.toJson(),
       };
+
+  StructuredItem copyWith({
+    String? title,
+    ItemTime? time,
+    Map<String, dynamic>? payload,
+  }) =>
+      StructuredItem(
+        id: id,
+        rawMessageIds: rawMessageIds,
+        category: category,
+        schemaVersion: schemaVersion,
+        title: title ?? this.title,
+        summary: summary,
+        priority: priority,
+        confidence: confidence,
+        time: time ?? this.time,
+        payload: payload ?? this.payload,
+        tags: tags,
+        processedBy: processedBy,
+      );
 }
 
 class CategoryDefinition {
@@ -399,17 +441,47 @@ class CategoryRegistry {
   String displayNameOf(String key) => byKey(key)?.displayName ?? key;
 }
 
+/// 实际类别标签：todo 按时间语义细分（普通/时间点/时间段任务），
+/// schedule 区分时间点/时间段，其余分类用注册表 displayName。
+String itemKindLabel(StructuredItem item, CategoryRegistry? registry) {
+  if (item.category == 'todo') {
+    return switch (item.time.kind) {
+      ItemTime.kindNone => '普通任务',
+      ItemTime.kindPoint => '时间点任务',
+      ItemTime.kindRange => '时间段任务',
+      _ => '任务',
+    };
+  }
+  if (item.category == 'schedule') {
+    return switch (item.time.kind) {
+      ItemTime.kindPoint => '时间点',
+      ItemTime.kindRange => '时间段',
+      _ => registry?.displayNameOf(item.category) ?? item.category,
+    };
+  }
+  return registry?.displayNameOf(item.category) ?? item.category;
+}
+
 /// POST /v1/sync 请求体，对齐 sync-request.schema.json。
 class SyncRequest {
   final String deviceId;
   final String registryVersion;
   final CategoryRegistry? registry;
+
+  /// 用户自定义提示词，电脑端追加到 AI 系统提示词末尾。可选。
+  final String? customPrompt;
+
+  /// 强制重处理的消息 ID（回退的消息），电脑端跳过 contentHash 去重。可选。
+  final List<String>? reprocessMessageIds;
+
   final List<RawMessage> messages;
 
   const SyncRequest({
     required this.deviceId,
     required this.registryVersion,
     this.registry,
+    this.customPrompt,
+    this.reprocessMessageIds,
     required this.messages,
   });
 
@@ -417,6 +489,10 @@ class SyncRequest {
         'deviceId': deviceId,
         'registryVersion': registryVersion,
         if (registry != null) 'registry': registry!.toJson(),
+        if (customPrompt != null && customPrompt!.isNotEmpty)
+          'customPrompt': customPrompt,
+        if (reprocessMessageIds != null && reprocessMessageIds!.isNotEmpty)
+          'reprocessMessageIds': reprocessMessageIds,
         'messages': messages.map((e) => e.toJson()).toList(),
       };
 }

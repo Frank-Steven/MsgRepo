@@ -11,6 +11,7 @@ RawMessage[]
   │
   ├─ 2. 分类+抽取      AIProvider.process(messages, registry)
   │     │              提示词由注册表动态生成（见下）
+  │     │              输出 generic 时自动发起第二次强势分类（见下）
   │     ▼
   ├─ 3. 时间归一       相对时间 → 绝对毫秒（基准 = 消息的 postedAt）
   │                    填入统一的 time 结构
@@ -38,6 +39,14 @@ AI 分类准确的根本手段是：**提示词由注册表动态生成，而不
 3. **时间基准**：每条消息的 `postedAt` 换算成可读时间随消息一起给出，要求模型把"明天下午三点"这类表达直接输出为 Unix 毫秒；
 4. **输出约束**：结构化输出（Ollama 的 `format` 参数 / OpenAI 兼容的 `response_format`），schema 即 StructuredItem 信封 + 各分类 payload 的并集；
 5. **降级指引**：拿不准就输出 `generic`，并给低 confidence，禁止编造。
+
+### generic 二次分类
+
+`generic` 是兜底而非首选。openai-compatible provider 在首次输出为 `generic` 时会自动发起第二次请求：提示词强调"generic 是最后手段，必须在具体分类中选最贴近的一个"。二次仍返回 generic 才接受，并把 confidence 压到 ≤0.4，由手机端 UI 标记"待确认"。实测这能把本地小模型的"惰性兜底"（稍模糊就往 generic 放）减少大半。
+
+### payloadSchema 的 $ref 必须内联
+
+发给模型的 payloadSchema 若含 `"$ref": "#/definitions/genericField"`，**必须把注册表的 `definitions` 一并附进提示词**——模型看不到引用目标时只能猜字段名（实测猜成 `name` 而非 `key`，导致 payload 校验失败降级）。代码中由 provider 序列化 schema 时自动内联，注册表作者无需关心。
 
 因此**写好注册表里的 description/hints 就是调优分类质量的主要手段**，无需改代码。新增分类后提示词自动包含它。
 

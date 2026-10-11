@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DESKTOP_ROOT, loadRegistry } from "./registry.js";
@@ -6,40 +5,14 @@ import { loadOrCreatePairing } from "./auth.js";
 import { Store } from "./store.js";
 import { createServer } from "./server.js";
 import { runPipeline } from "./pipeline.js";
+import { loadConfig, type Config } from "./config.js";
 import type { AIProvider } from "./ai/provider.js";
 import { MockProvider } from "./ai/mock.js";
 import { OllamaProvider } from "./ai/ollama.js";
 import { OpenAICompatProvider } from "./ai/openai-compat.js";
 import type { RawMessage, StructuredItem } from "./types.js";
 
-interface Config {
-  host: string;
-  port: number;
-  provider: string;
-  ollama: { baseUrl: string; model: string };
-  openai: { baseUrl: string; model: string; apiKeyEnv: string };
-}
-
 const DATA_DIR = path.join(DESKTOP_ROOT, "data");
-
-/** 加载 config/default.json，并用 config/local.json（git 忽略）做浅合并覆盖。 */
-function loadConfig(): Config {
-  const cfg = JSON.parse(
-    readFileSync(path.join(DESKTOP_ROOT, "config/default.json"), "utf8"),
-  ) as Config;
-  const localPath = path.join(DESKTOP_ROOT, "config/local.json");
-  if (existsSync(localPath)) {
-    const local = JSON.parse(readFileSync(localPath, "utf8")) as Record<string, unknown>;
-    for (const [k, v] of Object.entries(local)) {
-      if (v && typeof v === "object" && !Array.isArray(v) && typeof cfg[k as keyof Config] === "object") {
-        Object.assign(cfg[k as keyof Config] as object, v);
-      } else {
-        (cfg as unknown as Record<string, unknown>)[k] = v;
-      }
-    }
-  }
-  return cfg;
-}
 
 function createProvider(cfg: Config): AIProvider {
   switch (cfg.provider) {

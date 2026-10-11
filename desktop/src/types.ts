@@ -99,6 +99,8 @@ export interface SyncRequest {
   deviceId: string;
   registryVersion: string;
   registry?: CategoryRegistry;
+  customPrompt?: string;
+  reprocessMessageIds?: string[];
   messages: RawMessage[];
 }
 

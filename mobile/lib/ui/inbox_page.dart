@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../services/database.dart';
 import '../services/notification_bridge.dart';
+import '../services/reminder_service.dart';
 import '../services/sync_client.dart';
 import 'add_message_page.dart';
 
@@ -101,6 +102,54 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
     }
   }
 
+  /// 右滑：待处理/已处理 → 归档；已归档 → 恢复为已处理。纯本地操作。
+  /// 返回是否真正从列表移除该条目（"全部"视图下归档后仍可见，滑块弹回）。
+  Future<bool> _swipeMessage(RawMessage m) async {
+    final archiving = m.status != RawMessage.statusArchived;
+    final newStatus =
+        archiving ? RawMessage.statusArchived : RawMessage.statusProcessed;
+    final staysVisible = _filter == 'all';
+    await AppDatabase.instance.updateRawMessageStatus([m.id], newStatus);
+    if (!mounted) return false;
+    setState(() {
+      if (staysVisible) {
+        final i = _messages.indexWhere((e) => e.id == m.id);
+        if (i >= 0) _messages[i].status = newStatus;
+      } else {
+        _messages.removeWhere((e) => e.id == m.id);
+      }
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(archiving ? '已归档' : '已恢复为已处理')));
+    return !staysVisible;
+  }
+
+  /// 左滑回退（仅已处理）：回 pending + needs_reprocess=1，
+  /// 删除关联结构化条目并取消其提醒。
+  Future<bool> _revertMessage(RawMessage m) async {
+    if (m.status != RawMessage.statusProcessed) return false;
+    final affected =
+        await AppDatabase.instance.revertMessageToPending(m.id);
+    for (final item in affected) {
+      await ReminderService.instance.cancelForItem(item);
+    }
+    if (!mounted) return false;
+    setState(() {
+      if (_filter == 'all') {
+        final i = _messages.indexWhere((e) => e.id == m.id);
+        if (i >= 0) {
+          _messages[i].status = RawMessage.statusPending;
+          _messages[i].needsReprocess = true;
+        }
+      } else {
+        _messages.removeWhere((e) => e.id == m.id);
+      }
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已回退，下次同步将重新处理')));
+    return _filter != 'all';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -146,41 +195,47 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
               ],
             ),
           SizedBox(
-            height: 48,
+            height: 52,
             child: ListView(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
               children: [
                 for (final entry in _filters.entries)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(entry.value),
-                      selected: _filter == entry.key,
-                      onSelected: (_) {
-                        setState(() => _filter = entry.key);
-                        _reload();
-                      },
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: FilterChip(
+                        label: Text(entry.value),
+                        labelPadding:
+                            const EdgeInsets.symmetric(horizontal: 4),
+                        selected: _filter == entry.key,
+                        onSelected: (_) {
+                          setState(() => _filter = entry.key);
+                          _reload();
+                        },
+                      ),
                     ),
                   ),
                 if (_sources.isNotEmpty)
-                  DropdownButtonHideUnderline(
-                    child: DropdownButton<String?>(
-                      value: _appFilter,
-                      hint: const Text('全部应用'),
-                      items: [
-                        const DropdownMenuItem<String?>(
-                            value: null, child: Text('全部应用')),
-                        for (final s in _sources)
-                          DropdownMenuItem<String?>(
-                            value: s.packageName,
-                            child: Text(s.displayName),
-                          ),
-                      ],
-                      onChanged: (v) {
-                        setState(() => _appFilter = v);
-                        _reload();
-                      },
+                  Center(
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String?>(
+                        value: _appFilter,
+                        hint: const Text('全部应用'),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                              value: null, child: Text('全部应用')),
+                          for (final s in _sources)
+                            DropdownMenuItem<String?>(
+                              value: s.packageName,
+                              child: Text(s.displayName),
+                            ),
+                        ],
+                        onChanged: (v) {
+                          setState(() => _appFilter = v);
+                          _reload();
+                        },
+                      ),
                     ),
                   ),
               ],
@@ -200,8 +255,11 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
                   : ListView.builder(
                       physics: const AlwaysScrollableScrollPhysics(),
                       itemCount: _messages.length,
-                      itemBuilder: (context, i) =>
-                          _MessageTile(message: _messages[i]),
+                      itemBuilder: (context, i) => _MessageTile(
+                        message: _messages[i],
+                        onArchive: () => _swipeMessage(_messages[i]),
+                        onRevert: () => _revertMessage(_messages[i]),
+                      ),
                     ),
             ),
           ),
@@ -214,11 +272,23 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
 class _MessageTile extends StatelessWidget {
   final RawMessage message;
 
-  const _MessageTile({required this.message});
+  /// 右滑确认回调：执行归档/恢复，返回是否将条目从列表移除。
+  final Future<bool> Function() onArchive;
+
+  /// 左滑确认回调：已处理 → 回退待处理，返回是否将条目从列表移除。
+  final Future<bool> Function() onRevert;
+
+  const _MessageTile({
+    required this.message,
+    required this.onArchive,
+    required this.onRevert,
+  });
 
   @override
   Widget build(BuildContext context) {
     final m = message;
+    final archived = m.status == RawMessage.statusArchived;
+    final canRevert = m.status == RawMessage.statusProcessed;
     final statusColor = switch (m.status) {
       RawMessage.statusPending => Colors.orange,
       RawMessage.statusProcessed => Colors.green,
@@ -229,28 +299,66 @@ class _MessageTile extends StatelessWidget {
       RawMessage.statusProcessed => '已处理',
       _ => '已归档',
     };
-    return ListTile(
-      leading: Icon(m.captureType == RawMessage.captureNotification
-          ? Icons.notifications_outlined
-          : Icons.edit_note),
-      title: Text(
-        m.title.isEmpty ? '(无标题)' : m.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+    return Dismissible(
+      key: ValueKey(m.id),
+      direction: canRevert
+          ? DismissDirection.horizontal
+          : DismissDirection.startToEnd, // 右滑归档；已处理可左滑回退
+      background: Container(
+        color: archived ? Colors.green : Colors.blueGrey,
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: Row(
+          children: [
+            Icon(
+              archived ? Icons.unarchive_outlined : Icons.archive_outlined,
+              color: Colors.white,
+            ),
+            const SizedBox(width: 8),
+            Text(archived ? '恢复' : '归档',
+                style: const TextStyle(color: Colors.white)),
+          ],
+        ),
       ),
-      subtitle: Text(
-        '${m.source.appName ?? m.source.packageName}'
-        '${m.source.conversationTitle != null ? ' · ${m.source.conversationTitle}' : ''}'
-        ' · ${formatMillis(m.postedAt)}\n${m.body}',
-        maxLines: 3,
-        overflow: TextOverflow.ellipsis,
+      secondaryBackground: Container(
+        color: Colors.orange,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Text('回退', style: TextStyle(color: Colors.white)),
+            SizedBox(width: 8),
+            Icon(Icons.undo, color: Colors.white),
+          ],
+        ),
       ),
-      isThreeLine: true,
-      trailing: Chip(
-        label: Text(statusLabel, style: const TextStyle(fontSize: 11)),
-        backgroundColor: statusColor.withOpacity(0.15),
-        side: BorderSide.none,
-        visualDensity: VisualDensity.compact,
+      confirmDismiss: (direction) => direction == DismissDirection.startToEnd
+          ? onArchive()
+          : onRevert(),
+      child: ListTile(
+        leading: Icon(m.captureType == RawMessage.captureNotification
+            ? Icons.notifications_outlined
+            : Icons.edit_note),
+        title: Text(
+          m.title.isEmpty ? '(无标题)' : m.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          '${m.source.appName ?? m.source.packageName}'
+          '${m.source.conversationTitle != null ? ' · ${m.source.conversationTitle}' : ''}'
+          ' · ${formatMillis(m.postedAt)}\n${m.body}',
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+        ),
+        isThreeLine: true,
+        trailing: Chip(
+          label: Text(statusLabel, style: const TextStyle(fontSize: 11)),
+          backgroundColor: statusColor.withOpacity(0.15),
+          side: BorderSide.none,
+          visualDensity: VisualDensity.compact,
+        ),
       ),
     );
   }

@@ -18,6 +18,9 @@ flutter run          # 连接 Android 设备（minSdk 26 / Android 8.0+）
 
 ## 连接电脑端
 
+推荐在电脑端 `desktop/` 下运行 `npm run connect`（自动起服务 + adb reverse + 断线看护重连）。
+手动方式则是：
+
 ```bash
 adb reverse tcp:8765 tcp:8765
 ```

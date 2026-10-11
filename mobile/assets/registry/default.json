@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.1",
   "categories": [
     {
       "key": "schedule",
@@ -28,7 +28,7 @@
       "baseKind": "specialized",
       "defaultPriority": "P2",
       "priorityHints": "有截止时间且临近则 P0/P1；无明确时间 P2；可做可不做 P3",
-      "timeHints": "有截止时间用 time.kind=deadline；无时间用 none；reminderOffsets 默认 [120]",
+      "timeHints": "有开始和截止时间用 time.kind=range（startAt=开始，endAt=截止）；只有截止用 deadline；只有单一时刻（如『明早8点交』）用 point；无时间用 none；reminderOffsets 默认 [120]",
       "payloadSchema": {
         "type": "object",
         "required": ["task"],

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../main.dart' show themeModeNotifier, themeModeFromString;
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/registry_service.dart';
@@ -16,6 +18,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   final _tokenController = TextEditingController();
   final _baseUrlController = TextEditingController();
+  final _promptController = TextEditingController();
 
   String _deviceId = '';
   String _localRegistryVersion = '-';
@@ -23,6 +26,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _listenerEnabled = false;
   bool _testing = false;
   bool? _healthOk;
+  String _themeMode = 'system';
   AppFilterConfig _filterConfig = const AppFilterConfig();
   Map<String, String?> _knownAppNames = {};
 
@@ -36,6 +40,7 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _tokenController.dispose();
     _baseUrlController.dispose();
+    _promptController.dispose();
     super.dispose();
   }
 
@@ -50,6 +55,7 @@ class _SettingsPageState extends State<SettingsPage> {
         await NotificationBridge.instance.isListenerEnabled();
     final filterConfig = await AppFilterService.instance.load();
     final seenApps = await AppFilterService.instance.getSeenApps();
+    final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
       _tokenController.text = token;
@@ -60,7 +66,25 @@ class _SettingsPageState extends State<SettingsPage> {
       _listenerEnabled = listenerEnabled;
       _filterConfig = filterConfig;
       _knownAppNames = {for (final a in seenApps) a.packageName: a.appName};
+      _themeMode = prefs.getString('theme_mode') ?? 'system';
+      _promptController.text = prefs.getString('custom_prompt') ?? '';
     });
+  }
+
+  Future<void> _setThemeMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('theme_mode', mode);
+    themeModeNotifier.value = themeModeFromString(mode);
+    if (mounted) setState(() => _themeMode = mode);
+  }
+
+  Future<void> _savePrompt() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('custom_prompt', _promptController.text.trim());
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('提示词已保存，下次同步生效')));
+    }
   }
 
   Future<void> _saveFilter(AppFilterConfig config) async {
@@ -176,6 +200,40 @@ class _SettingsPageState extends State<SettingsPage> {
                       color: _healthOk! ? Colors.green : Colors.red),
                 ),
             ],
+          ),
+          const Divider(height: 32),
+          Text('外观', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'system', label: Text('跟随系统')),
+              ButtonSegment(value: 'light', label: Text('浅色')),
+              ButtonSegment(value: 'dark', label: Text('深色')),
+            ],
+            selected: {_themeMode},
+            onSelectionChanged: (v) => _setThemeMode(v.first),
+          ),
+          const Divider(height: 32),
+          Text('AI 处理', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _promptController,
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(
+              labelText: '自定义提示词（调整 AI 分类表现）',
+              alignLabelWithHint: true,
+              hintText: '例：把直播开播提醒都当作营销处理；工作消息优先级调高',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.tonal(
+              onPressed: _savePrompt,
+              child: const Text('保存提示词'),
+            ),
           ),
           const Divider(height: 32),
           Text('设备', style: Theme.of(context).textTheme.titleMedium),

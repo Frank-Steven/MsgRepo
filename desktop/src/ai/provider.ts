@@ -1,10 +1,28 @@
 import type { CategoryRegistry, RawMessage, StructuredItem, TimeInfo } from "../types.js";
 
+export interface ProcessOptions {
+  /** 用户自定义提示词（手机端设置页维护），追加到 AI 系统提示词末尾 */
+  customPrompt?: string;
+}
+
 /** AI 适配器接口：对一批原始消息做分类 + 抽取，产出结构化结果。 */
 export interface AIProvider {
   readonly name: string;
   readonly model?: string;
-  process(messages: RawMessage[], registry: CategoryRegistry): Promise<StructuredItem[]>;
+  process(
+    messages: RawMessage[],
+    registry: CategoryRegistry,
+    options?: ProcessOptions,
+  ): Promise<StructuredItem[]>;
+}
+
+/** 把用户自定义提示词追加到系统提示词末尾。 */
+export function appendCustomPrompt(system: string, customPrompt?: string): string {
+  if (!customPrompt || !customPrompt.trim()) return system;
+  return (
+    system +
+    `\n用户附加要求（优先级高于默认规则，但不违反输出 JSON 格式）：\n${customPrompt.trim()}`
+  );
 }
 
 /** 规整 AI 返回的 time 字段：非法/缺省时回退 { kind: "none" }。

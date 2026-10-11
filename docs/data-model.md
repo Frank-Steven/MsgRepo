@@ -41,6 +41,40 @@ CategoryRegistry（元数据层，描述"有哪些分类、各自什么结构"�
 | `contentHash` | `SHA-256(packageName\|title\|body\|postedAt)`，两端去重的依据 |
 | `status` | `pending` → `processed` →（可选）`archived` |
 
+`archived` 是手机端本地的终态：用户在收件箱右滑归档，表示"不再处理/不再关心"。归档消息不参与后续同步（同步只取 `pending`），在"已归档"过滤下可恢复。
+
+### 消息状态机（含回退通道）
+
+**消息是状态的唯一事实源，结构化内容是派生物。** 完整状态流：
+
+```
+            同步成功                任务勾选完成
+ pending ───────────▶ processed ──────────────▶ archived
+   ▲                     │                         ▲
+   │   回退（左滑/撤销处理） │                  右滑归档 │
+   └─────────────────────┘                    ────┘
+        删除关联 StructuredItem
+        取消其提醒、置 needs_reprocess=1
+```
+
+- **pending → processed**：同步成功，产生/更新结构化条目并调度提醒。
+- **processed → pending（回退）**：收件箱左滑或详情页"撤销处理"。联动动作：删除所有关联的 StructuredItem、取消其本地提醒、消息置 `needs_reprocess=1`。下次同步时这些消息的 id 放进 `SyncRequest.reprocessMessageIds`，电脑端对其**跳过 contentHash 去重**强制重新处理（否则会被历史哈希吞掉，永远拿不回结果）。
+- **processed → archived（完成）**：任务类条目勾选完成时，其全部关联消息**自动归档**；取消勾选则恢复到 processed。任务清单、日程表日视图、详情页的勾选走同一公共方法，保证联动一致。
+
+### 五种实际类别（派生视图）
+
+信封不新增字段，UI 从 `(category, time.kind)` 派生五种实际类别：
+
+| 派生类别 | 判定 | 典型 |
+|---|---|---|
+| 时间点 | 非任务 + point | 直播开始、抢购票开售 |
+| 时间点任务 | 任务 + point | "明早8点交材料" |
+| 时间段 | 非任务 + range | 会议、航班 |
+| 时间段任务 | 任务 + range | "本周内完成季度总结" |
+| 普通任务 | 任务 + none | "记得回邮件" |
+
+任务判定：`category == todo`。这五个标签出现在任务清单、日程表日视图和详情页，帮助用户一眼区分"只是发生"与"要我做"。
+
 设计要点：
 
 - **采集前过滤**：是否收集某应用的通知由手机端应用过滤器（`all` / `allowlist` 模式）在采集层决定，被拦截的通知不会成为 RawMessage。过滤回答"收不收"，注册表分类回答"算什么"，两者正交。
@@ -80,7 +114,7 @@ CategoryRegistry（元数据层，描述"有哪些分类、各自什么结构"�
 |---|---|---|---|
 | `none` | 无时间信息 | — | 不调度 |
 | `point` | 某一时刻发生 | `startAt` | `startAt` |
-| `range` | 起止区间（会议、航班） | `startAt`, `endAt` | `startAt` |
+| `range` | 起止区间（会议、航班）；**待办的开始+截止也用 range**（startAt=开始，endAt=截止） | `startAt`, `endAt` | `startAt`（待办视图同时展示两端） |
 | `deadline` | 截止时刻（缴费、取件） | `deadline` | `deadline` |
 | `recurring` | 周期重复 | `rrule`（RFC 5545） | 按 rrule 展开（骨架版仅提示不支持调度） |
 

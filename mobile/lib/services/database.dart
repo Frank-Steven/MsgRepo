@@ -30,10 +30,18 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
     return _db!;
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute(
+          'ALTER TABLE raw_messages ADD COLUMN needs_reprocess INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -52,6 +60,7 @@ class AppDatabase {
         attachments TEXT NOT NULL DEFAULT '[]',
         content_hash TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL DEFAULT 'pending',
+        needs_reprocess INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       )
     ''');
@@ -94,6 +103,7 @@ class AppDatabase {
         'attachments': jsonEncode(m.attachments.map((e) => e.toJson()).toList()),
         'content_hash': m.contentHash,
         'status': m.status,
+        'needs_reprocess': m.needsReprocess ? 1 : 0,
         'created_at': DateTime.now().millisecondsSinceEpoch,
       };
 
@@ -115,6 +125,7 @@ class AppDatabase {
             .toList(),
         contentHash: row['content_hash'] as String,
         status: row['status'] as String,
+        needsReprocess: (row['needs_reprocess'] as num? ?? 0) != 0,
       );
 
   Future<bool> existsByContentHash(String contentHash) async {
@@ -187,6 +198,78 @@ class AppDatabase {
         where: 'id IN ($placeholders)', whereArgs: ids);
   }
 
+  // ---- 消息状态机：pending ⇄ processed → archived ----
+
+  /// 回退一条消息为 pending 并标记 needs_reprocess=1，同时删除所有
+  /// rawMessageIds 含该消息的结构化条目。返回被删除的条目（调用方取消提醒）。
+  Future<List<StructuredItem>> revertMessageToPending(String messageId) async {
+    final db = await database;
+    await db.update(
+      'raw_messages',
+      {'status': RawMessage.statusPending, 'needs_reprocess': 1},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    final affected = (await getStructuredItems())
+        .where((e) => e.rawMessageIds.contains(messageId))
+        .toList();
+    if (affected.isNotEmpty) {
+      final placeholders = List.filled(affected.length, '?').join(',');
+      await db.delete('structured_items',
+          where: 'id IN ($placeholders)',
+          whereArgs: affected.map((e) => e.id).toList());
+    }
+    return affected;
+  }
+
+  /// 撤销处理：条目全部关联消息回退 pending + needs_reprocess=1，删除条目本身。
+  /// （取消提醒由调用方负责）
+  Future<void> revertStructuredItem(StructuredItem item) async {
+    final db = await database;
+    if (item.rawMessageIds.isNotEmpty) {
+      final placeholders = List.filled(item.rawMessageIds.length, '?').join(',');
+      await db.update(
+        'raw_messages',
+        {'status': RawMessage.statusPending, 'needs_reprocess': 1},
+        where: 'id IN ($placeholders)',
+        whereArgs: item.rawMessageIds,
+      );
+    }
+    await db.delete('structured_items', where: 'id = ?', whereArgs: [item.id]);
+  }
+
+  /// todo 勾选联动：更新 payload.status，并把关联原始消息
+  /// done → archived（已完成自动归档）/ 取消 → processed。
+  /// 返回更新后的条目。
+  Future<StructuredItem> setTodoDone(StructuredItem item, bool done) async {
+    final payload = Map<String, dynamic>.of(item.payload);
+    payload['status'] = done ? 'done' : 'open';
+    final updated = item.copyWith(payload: payload);
+    await updateStructuredItem(updated);
+    await updateRawMessageStatus(
+      item.rawMessageIds,
+      done ? RawMessage.statusArchived : RawMessage.statusProcessed,
+    );
+    return updated;
+  }
+
+  /// needs_reprocess=1 的消息 ID（同步时放入 reprocessMessageIds）。
+  Future<List<String>> getNeedsReprocessIds() async {
+    final db = await database;
+    final rows = await db.query('raw_messages',
+        columns: ['id'], where: 'needs_reprocess = 1');
+    return rows.map((r) => r['id'] as String).toList();
+  }
+
+  /// 同步成功后清除重处理标记。
+  Future<void> clearNeedsReprocess(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final db = await database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.update('raw_messages', {'needs_reprocess': 0},
+        where: 'id IN ($placeholders)', whereArgs: ids);
+  }
+
   // ---- structured_items ----
 
   Map<String, Object?> _itemToRow(StructuredItem item) => {
@@ -233,6 +316,21 @@ class AppDatabase {
           conflictAlgorithm: ConflictAlgorithm.replace);
     }
     await batch.commit(noResult: true);
+  }
+
+  /// 更新可编辑字段（标题/时间/payload，todo 勾选状态存在 payload.status 里）。
+  Future<void> updateStructuredItem(StructuredItem item) async {
+    final db = await database;
+    await db.update(
+      'structured_items',
+      {
+        'title': item.title,
+        'time': jsonEncode(item.time.toJson()),
+        'payload': jsonEncode(item.payload),
+      },
+      where: 'id = ?',
+      whereArgs: [item.id],
+    );
   }
 
   Future<List<StructuredItem>> getStructuredItems({int limit = 500}) async {

@@ -19,6 +19,7 @@ export class MockProvider implements AIProvider {
   readonly name = "mock";
 
   async process(messages: RawMessage[], registry: CategoryRegistry): Promise<StructuredItem[]> {
+    // 规则引擎无提示词概念，options.customPrompt 接受但忽略
     return messages.map((msg) => this.buildItem(msg, registry));
   }
 

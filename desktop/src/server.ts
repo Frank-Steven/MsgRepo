@@ -202,7 +202,10 @@ export function createServer(opts: ServerOptions): http.Server {
         const syncReq = parsed as SyncRequest;
         const current = loadRegistry(opts.dataDir);
         const { registry, warnings: regWarnings } = negotiateRegistry(syncReq, current, opts.dataDir);
-        const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store);
+        const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store, {
+          customPrompt: syncReq.customPrompt,
+          reprocessMessageIds: syncReq.reprocessMessageIds,
+        });
         const response: SyncResponse = {
           registryVersion: registry.version,
           results: result.results,

@@ -37,8 +37,10 @@ Authorization: Bearer <pairing-token>
 ```json
 {
   "deviceId": "pixel-7-abc123",
-  "registryVersion": "1.0.0",
+  "registryVersion": "1.1.1",
   "registry": { "...完整注册表，可选..." },
+  "customPrompt": "把直播开播提醒都当作营销处理",
+  "reprocessMessageIds": ["uuid-9"],
   "messages": [ { "...RawMessage..." } ]
 }
 ```
@@ -47,7 +49,9 @@ Authorization: Bearer <pairing-token>
 
 1. `messages` 只含 `status=pending` 的消息，按 `postedAt` 升序；单次建议不超过 200 条，超出由手机端分批
 2. `registry` 仅当手机端发现两端版本不一致（health 或上一次 sync 响应得知）时携带；电脑端收到后**采用手机端的注册表**并持久化（手机是权威来源）
-3. 空 `messages` 合法——退化为"注册表协商 + 心跳"
+3. `customPrompt`（可选）：用户在手机端维护的自定义提示词，电脑端追加到 AI 系统提示词末尾，用于调整分类/优先级表现而不改注册表
+4. `reprocessMessageIds`（可选）：用户回退（processed→pending）的消息 id，电脑端对这些消息**跳过 contentHash 去重**强制重新处理；手机端同步成功后清除本地的 needs_reprocess 标记
+5. 空 `messages` 合法——退化为"注册表协商 + 心跳"
 
 响应体（sync-response.schema.json）：
 
@@ -84,11 +88,13 @@ Authorization: Bearer <pairing-token>
 ## 配对流程（首次使用）
 
 ```
-1. 电脑端 npm start → 控制台打印 token（或 npm run pair 查看）
-2. 手机 USB 连接，adb reverse tcp:8765 tcp:8765
+1. 电脑端 npm run connect → 自动拉起服务并建立 adb reverse，控制台打印 token（或 npm run pair 查看）
+2. 手机 USB 连接（connect 会等待 USB 调试授权；手动方式则是 npm start + adb reverse tcp:8765 tcp:8765）
 3. 手机端设置页输入 token → 点"连接测试"（GET /v1/health + 一次空 sync 验证 token）
 4. 配对完成，之后每次同步自动携带
 ```
+
+连接看护：`npm run connect` 启动后每 5 秒检查一次——服务未运行则拉起（已在运行则复用）、adb reverse 通道丢失则重建，适合长时间挂机使用。
 
 ## 幂等与重试
 

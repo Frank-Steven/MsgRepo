@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts start",
+    "connect": "tsx src/connect.ts",
     "pair": "tsx src/index.ts pair",
     "demo": "tsx src/index.ts demo"
   },

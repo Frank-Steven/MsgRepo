@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { buildDateHints, normalizeTime, type AIProvider } from "./provider.js";
+import {
+  appendCustomPrompt,
+  buildDateHints,
+  normalizeTime,
+  type AIProvider,
+  type ProcessOptions,
+} from "./provider.js";
 import {
   PIPELINE_VERSION,
   SCHEMA_VERSION,
@@ -29,10 +35,14 @@ export class OllamaProvider implements AIProvider {
     this.model = opts.model;
   }
 
-  async process(messages: RawMessage[], registry: CategoryRegistry): Promise<StructuredItem[]> {
+  async process(
+    messages: RawMessage[],
+    registry: CategoryRegistry,
+    options?: ProcessOptions,
+  ): Promise<StructuredItem[]> {
     const results: StructuredItem[] = [];
     for (const msg of messages) {
-      results.push(await this.processOne(msg, registry));
+      results.push(await this.processOne(msg, registry, options));
     }
     return results;
   }
@@ -53,7 +63,11 @@ export class OllamaProvider implements AIProvider {
     return data.message?.content ?? "";
   }
 
-  private async processOne(msg: RawMessage, registry: CategoryRegistry): Promise<StructuredItem> {
+  private async processOne(
+    msg: RawMessage,
+    registry: CategoryRegistry,
+    options?: ProcessOptions,
+  ): Promise<StructuredItem> {
     const catList = registry.categories
       .map(
         (c) =>
@@ -91,12 +105,14 @@ export class OllamaProvider implements AIProvider {
       [
         {
           role: "system",
-          content:
+          content: appendCustomPrompt(
             `你是消息结构化助手。从下列分类中为消息选择最合适的一个，提炼标题、一句话摘要、优先级、置信度和时间。\n` +
-            `分类列表：\n${catList}\n` +
-            `时间字段 startAt/endAt/deadline 用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），` +
-            `相对日期查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间，` +
-            `若字面日期标注了"已过去"，顺延到下一个未来的同名日期（如"本周五"已过则取"下周五"）。只输出 JSON。`,
+              `分类列表：\n${catList}\n` +
+              `时间字段 startAt/endAt/deadline 用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），` +
+              `相对日期查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间，` +
+              `若字面日期标注了"已过去"，顺延到下一个未来的同名日期（如"本周五"已过则取"下周五"）。只输出 JSON。`,
+            options?.customPrompt,
+          ),
         },
         {
           role: "user",
@@ -140,7 +156,10 @@ export class OllamaProvider implements AIProvider {
       [
         {
           role: "system",
-          content: `按给定 JSON Schema 抽取「${catDef.displayName}」分类的 payload。只输出符合 schema 的 JSON。`,
+          content: appendCustomPrompt(
+            `按给定 JSON Schema 抽取「${catDef.displayName}」分类的 payload。只输出符合 schema 的 JSON。`,
+            options?.customPrompt,
+          ),
         },
         {
           role: "user",

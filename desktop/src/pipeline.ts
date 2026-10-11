@@ -92,40 +92,65 @@ export interface PipelineResult {
   warnings: string[];
 }
 
+export interface PipelineOptions {
+  /** 用户自定义提示词，透传给 AI provider */
+  customPrompt?: string;
+  /** 强制重新处理的消息 ID：这些消息跳过 contentHash 去重 */
+  reprocessMessageIds?: string[];
+}
+
 /**
- * 1. contentHash 去重；2. provider 分类+抽取；3.（provider 内）相对时间→绝对毫秒；
- * 4. 优先级缺省回退注册表 defaultPriority；5. ajv 校验 payload，失败降级 generic；
- * 6. 相似消息归并。
+ * 1. contentHash 去重（reprocessMessageIds 中的消息豁免）；2. provider 分类+抽取；
+ * 3.（provider 内）相对时间→绝对毫秒；4. 优先级缺省回退注册表 defaultPriority；
+ * 5. ajv 校验 payload，失败降级 generic；6. 相似消息归并。
  */
 export async function runPipeline(
   messages: RawMessage[],
   registry: CategoryRegistry,
   provider: AIProvider,
   store?: Store,
+  options: PipelineOptions = {},
 ): Promise<PipelineResult> {
   const warnings: string[] = [];
 
-  // 1. 去重（本批内 + 历史已处理）
+  // 1. 去重（本批内 + 历史已处理；reprocessMessageIds 豁免，处理后仍记 hash 保持幂等）。
+  //    关键：重复消息不直接丢弃——通过 hash→条目 映射找回之前生成的结果一并返回，
+  //    否则"手机超时重试"场景下手机标记已处理却永远拿不到结构化结果。
+  const reprocess = new Set(options.reprocessMessageIds ?? []);
   const fresh: RawMessage[] = [];
   const dupIds: string[] = [];
+  const recovered: StructuredItem[] = [];
+  const recoveredIds = new Set<string>();
   const seen = new Set<string>();
   for (const msg of messages) {
-    if (seen.has(msg.contentHash) || store?.hasHash(msg.contentHash)) {
+    if (!reprocess.has(msg.id) && (seen.has(msg.contentHash) || store?.hasHash(msg.contentHash))) {
       dupIds.push(msg.id);
+      if (store) {
+        for (const item of store.findItemsByHash(msg.contentHash)) {
+          if (!recoveredIds.has(item.id)) {
+            recoveredIds.add(item.id);
+            recovered.push(item);
+          }
+        }
+      }
       continue;
     }
     seen.add(msg.contentHash);
     fresh.push(msg);
   }
-  if (dupIds.length > 0) warnings.push(`${dupIds.length} 条消息 contentHash 重复，已按已处理跳过`);
+  if (dupIds.length > 0)
+    warnings.push(
+      `${dupIds.length} 条消息 contentHash 重复，已按已处理跳过` +
+        (recovered.length > 0 ? `（找回既有结果 ${recovered.length} 条）` : ""),
+    );
 
   // 2. AI 分类 + 抽取
   let items: StructuredItem[];
   try {
-    items = await provider.process(fresh, registry);
+    items = await provider.process(fresh, registry, { customPrompt: options.customPrompt });
   } catch (err) {
     return {
-      results: [],
+      results: recovered,
       processedMessageIds: [...dupIds],
       failedMessageIds: fresh.map((m) => m.id),
       warnings: [...warnings, `AI provider (${provider.name}) 处理失败：${String(err)}`],
@@ -165,12 +190,22 @@ export async function runPipeline(
   const results = mergeSimilar(items, warnings);
 
   if (store) {
+    // 记录 消息 contentHash → 条目 id 映射（重处理时整体替换为新条目），供去重找回
+    const hashByMsgId = new Map(messages.map((m) => [m.id, m.contentHash]));
+    const pairs: Array<{ hash: string; itemId: string }> = [];
+    for (const item of results) {
+      for (const mid of item.rawMessageIds) {
+        const h = hashByMsgId.get(mid);
+        if (h) pairs.push({ hash: h, itemId: item.id });
+      }
+    }
+    store.recordHashItems(pairs);
     store.addHashes(fresh.map((m) => m.contentHash));
     store.appendItems(results);
   }
 
   return {
-    results,
+    results: [...recovered, ...results],
     processedMessageIds: [...dupIds, ...fresh.filter((m) => covered.has(m.id)).map((m) => m.id)],
     failedMessageIds,
     warnings,

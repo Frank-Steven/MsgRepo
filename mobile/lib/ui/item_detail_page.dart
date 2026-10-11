@@ -4,6 +4,7 @@ import '../models.dart';
 import '../services/database.dart';
 import '../services/notification_bridge.dart';
 import '../services/registry_service.dart';
+import '../services/reminder_service.dart';
 import 'items_page.dart' show priorityColor, confidenceThreshold;
 
 class ItemDetailPage extends StatefulWidget {
@@ -16,10 +17,11 @@ class ItemDetailPage extends StatefulWidget {
 }
 
 class _ItemDetailPageState extends State<ItemDetailPage> {
+  late StructuredItem _item = widget.item;
   List<RawMessage> _sources = [];
   CategoryRegistry? _registry;
 
-  StructuredItem get item => widget.item;
+  StructuredItem get item => _item;
 
   @override
   void initState() {
@@ -39,11 +41,74 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
     }
   }
 
+  /// 编辑提醒时间：更新数据库，先取消旧调度再按新 time 重新调度。
+  Future<void> _editReminder() async {
+    final updated = await showDialog<ItemTime>(
+      context: context,
+      builder: (_) => _ReminderEditDialog(initial: item.time),
+    );
+    if (updated == null) return;
+    await ReminderService.instance.cancelForItem(item);
+    final newItem = item.copyWith(time: updated);
+    await AppDatabase.instance.updateStructuredItem(newItem);
+    await ReminderService.instance.scheduleForItem(newItem);
+    if (mounted) {
+      setState(() => _item = newItem);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('提醒已更新')));
+    }
+  }
+
+  /// 撤销处理：删除条目、关联消息回退 pending + needs_reprocess、取消提醒。
+  Future<void> _revertItem() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('撤销处理'),
+        content: const Text('将删除该结构化结果，关联消息回退为待处理，下次同步时强制重新处理。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('撤销'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ReminderService.instance.cancelForItem(item);
+    await AppDatabase.instance.revertStructuredItem(item);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  /// todo 勾选联动：payload.status 切换 + 关联消息 归档/恢复。
+  Future<void> _toggleTodo(bool done) async {
+    final updated = await AppDatabase.instance.setTodoDone(item, done);
+    if (mounted) setState(() => _item = updated);
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = priorityColor(item.priority);
     return Scaffold(
-      appBar: AppBar(title: Text(_registry?.displayNameOf(item.category) ?? item.category)),
+      appBar: AppBar(
+        title: Text(_registry?.displayNameOf(item.category) ?? item.category),
+        actions: [
+          IconButton(
+            tooltip: '撤销处理',
+            icon: const Icon(Icons.undo),
+            onPressed: _revertItem,
+          ),
+          IconButton(
+            tooltip: '编辑提醒',
+            icon: const Icon(Icons.edit_notifications_outlined),
+            onPressed: _editReminder,
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -53,6 +118,13 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
                 label: Text(item.priority),
                 backgroundColor: color.withOpacity(0.15),
                 side: BorderSide.none,
+              ),
+              const SizedBox(width: 8),
+              Chip(
+                label: Text(itemKindLabel(item, _registry),
+                    style: const TextStyle(fontSize: 12)),
+                side: BorderSide.none,
+                visualDensity: VisualDensity.compact,
               ),
               const SizedBox(width: 8),
               Text('置信度 ${(item.confidence * 100).toStringAsFixed(0)}%'),
@@ -66,6 +138,15 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
               ],
             ],
           ),
+          if (item.category == 'todo')
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: item.payload['status'] == 'done',
+              onChanged: (v) => _toggleTodo(v ?? false),
+              title: const Text('已完成'),
+              subtitle: const Text('勾选后关联消息自动归档'),
+            ),
           const SizedBox(height: 8),
           Text(item.title, style: Theme.of(context).textTheme.headlineSmall),
           const SizedBox(height: 8),
@@ -242,6 +323,243 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
             },
             child: const Text('打开'),
           ),
+      ],
+    );
+  }
+}
+
+/// 编辑提醒对话框：时间类型（无/时刻/截止/区间）+ 日期时间选择 + 提醒提前量。
+/// 保存后返回新的 ItemTime，由详情页负责写库与重新调度。
+class _ReminderEditDialog extends StatefulWidget {
+  final ItemTime initial;
+
+  const _ReminderEditDialog({required this.initial});
+
+  @override
+  State<_ReminderEditDialog> createState() => _ReminderEditDialogState();
+}
+
+class _ReminderEditDialogState extends State<_ReminderEditDialog> {
+  static const _presetOffsets = {10: '10分钟', 30: '30分钟', 120: '2小时', 1440: '1天'};
+
+  static const _kinds = {
+    ItemTime.kindNone: '无',
+    ItemTime.kindPoint: '时刻',
+    ItemTime.kindDeadline: '截止',
+    ItemTime.kindRange: '区间',
+  };
+
+  late String _kind = _kinds.containsKey(widget.initial.kind)
+      ? widget.initial.kind
+      : ItemTime.kindNone;
+  DateTime? _start;
+  DateTime? _end;
+  DateTime? _deadline;
+  late final Set<int> _offsets = widget.initial.reminderOffsets.toSet();
+  final _customOffsetController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.initial;
+    if (t.startAt != null) {
+      _start = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
+    }
+    if (t.endAt != null) {
+      _end = DateTime.fromMillisecondsSinceEpoch(t.endAt!);
+    }
+    if (t.deadline != null) {
+      _deadline = DateTime.fromMillisecondsSinceEpoch(t.deadline!);
+    }
+  }
+
+  @override
+  void dispose() {
+    _customOffsetController.dispose();
+    super.dispose();
+  }
+
+  Future<DateTime?> _pickDateTime(DateTime? current) async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: current ?? now,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2035),
+    );
+    if (date == null || !mounted) return null;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(current ?? now),
+    );
+    if (time == null) return null;
+    return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+  }
+
+  String _fmt(DateTime? d) =>
+      d == null ? '点击选择' : formatMillis(d.millisecondsSinceEpoch);
+
+  void _addCustomOffset() {
+    final minutes = int.tryParse(_customOffsetController.text.trim());
+    if (minutes == null || minutes < 0) return;
+    setState(() {
+      _offsets.add(minutes);
+      _customOffsetController.clear();
+    });
+  }
+
+  void _save() {
+    final offsets = _offsets.toList()..sort();
+    switch (_kind) {
+      case ItemTime.kindNone:
+        Navigator.of(context)
+            .pop(const ItemTime(kind: ItemTime.kindNone));
+      case ItemTime.kindPoint:
+        if (_start == null) return _warn('请选择时间');
+        Navigator.of(context).pop(ItemTime(
+          kind: ItemTime.kindPoint,
+          startAt: _start!.millisecondsSinceEpoch,
+          reminderOffsets: offsets,
+        ));
+      case ItemTime.kindDeadline:
+        if (_deadline == null) return _warn('请选择截止时间');
+        Navigator.of(context).pop(ItemTime(
+          kind: ItemTime.kindDeadline,
+          deadline: _deadline!.millisecondsSinceEpoch,
+          reminderOffsets: offsets,
+        ));
+      case ItemTime.kindRange:
+        if (_start == null || _end == null) return _warn('请选择开始和结束时间');
+        if (!_end!.isAfter(_start!)) return _warn('结束时间需晚于开始时间');
+        Navigator.of(context).pop(ItemTime(
+          kind: ItemTime.kindRange,
+          startAt: _start!.millisecondsSinceEpoch,
+          endAt: _end!.millisecondsSinceEpoch,
+          reminderOffsets: offsets,
+        ));
+    }
+  }
+
+  void _warn(String text) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('编辑提醒'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            DropdownButtonFormField<String>(
+              initialValue: _kind,
+              decoration: const InputDecoration(
+                  labelText: '时间类型', border: OutlineInputBorder()),
+              items: [
+                for (final entry in _kinds.entries)
+                  DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+              ],
+              onChanged: (v) => setState(() => _kind = v!),
+            ),
+            const SizedBox(height: 12),
+            if (_kind == ItemTime.kindPoint)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('时间'),
+                subtitle: Text(_fmt(_start)),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final d = await _pickDateTime(_start);
+                  if (d != null) setState(() => _start = d);
+                },
+              ),
+            if (_kind == ItemTime.kindDeadline)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('截止时间'),
+                subtitle: Text(_fmt(_deadline)),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final d = await _pickDateTime(_deadline);
+                  if (d != null) setState(() => _deadline = d);
+                },
+              ),
+            if (_kind == ItemTime.kindRange) ...[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('开始时间'),
+                subtitle: Text(_fmt(_start)),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final d = await _pickDateTime(_start);
+                  if (d != null) setState(() => _start = d);
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('结束时间'),
+                subtitle: Text(_fmt(_end)),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final d = await _pickDateTime(_end);
+                  if (d != null) setState(() => _end = d);
+                },
+              ),
+            ],
+            if (_kind != ItemTime.kindNone) ...[
+              const SizedBox(height: 8),
+              Text('提醒提前量', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final entry in _presetOffsets.entries)
+                    FilterChip(
+                      label: Text(entry.value),
+                      selected: _offsets.contains(entry.key),
+                      onSelected: (v) => setState(() => v
+                          ? _offsets.add(entry.key)
+                          : _offsets.remove(entry.key)),
+                    ),
+                  for (final o in _offsets.where((e) => !_presetOffsets.containsKey(e)))
+                    InputChip(
+                      label: Text('$o分钟'),
+                      onDeleted: () => setState(() => _offsets.remove(o)),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _customOffsetController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '自定义（分钟）',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                      onPressed: _addCustomOffset, child: const Text('添加')),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: _save, child: const Text('保存')),
       ],
     );
   }

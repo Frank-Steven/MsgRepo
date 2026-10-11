@@ -17,11 +17,14 @@ npm install
 npm run demo    # 不启服务，用 MockProvider 跑 6 条示例消息，端到端演示管线
 npm run pair    # 查看/生成配对 token
 npm start       # 启动 HTTP 服务（默认 127.0.0.1:8765）
+npm run connect # 一键连接：拉起/复用服务 + adb reverse + 5 秒看护自动重连（推荐日常使用）
 ```
+
+`npm run connect` 会检测服务是否已在运行（在则复用，不再起第二个）、等待手机 USB 调试授权、建立 `adb reverse`，随后每 5 秒看护：通道掉了自动重建、服务进程退出自动拉起。控制台持续打印配对 token 与仪表盘地址。
 
 首次启动会自动生成配对 token 打印到控制台并写入 `data/pairing.json`。之后可用 `npm run pair` 再查看。
 
-手机端连接：
+手机端连接（手动分步方式）：
 
 ```bash
 adb reverse tcp:8765 tcp:8765
@@ -34,7 +37,7 @@ adb reverse tcp:8765 tcp:8765
 | 方法 | 路径 | 认证 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/v1/health` | 免 | 健康检查 |
-| POST | `/v1/sync` | Bearer | 请求/响应体遵循 `shared/schemas/sync-request.schema.json` / `sync-response.schema.json` |
+| POST | `/v1/sync` | Bearer | 请求/响应体遵循 `shared/schemas/sync-request.schema.json` / `sync-response.schema.json`；支持可选 `customPrompt`（追加到 AI 系统提示词末尾）与 `reprocessMessageIds`（跳过 contentHash 去重强制重处理） |
 | GET | `/dashboard` | 免 | Web 仪表盘（页面内输入 token 后拉取数据） |
 | GET | `/api/items?category=&priority=` | Bearer | 查询已处理的 StructuredItem |
 
@@ -44,7 +47,7 @@ adb reverse tcp:8765 tcp:8765
 
 - **mock**（默认）：内置规则引擎，关键词分类 + 正则抽取（验证码/取件码/金额/中文相对时间），无需任何模型即可端到端跑通。
 - **ollama**：`"provider": "ollama"`，配置 `ollama.baseUrl`（默认 `http://127.0.0.1:11434`）与 `ollama.model`。调 `/api/chat`，payload 抽取步骤把该分类的 `payloadSchema` 作为 `format` 约束 JSON 输出。
-- **openai-compatible**：`"provider": "openai-compatible"`，配置 `openai.baseUrl` / `openai.model`，API key 从 `openai.apiKeyEnv` 指定的环境变量读取（默认 `OPENAI_API_KEY`）。使用 `response_format=json_object`。
+- **openai-compatible**：`"provider": "openai-compatible"`，配置 `openai.baseUrl` / `openai.model`，API key 从 `openai.apiKeyEnv` 指定的环境变量读取（默认 `OPENAI_API_KEY`）。使用 `response_format=json_object`（端点不支持时 400 自动降级为纯 prompt 约束）。首次分类落到 generic 时会自动发起第二次更强势的分类请求，逼模型在具体分类中选最贴近的；二次仍 generic 则接受并把 confidence 压到 ≤0.4，让手机端标记"待确认"。
 
 ## 处理管线
 
@@ -55,7 +58,7 @@ adb reverse tcp:8765 tcp:8765
 ```
 config/default.json   默认配置（config/local.json 可覆盖）
 data/                 运行期数据（pairing.json / items.jsonl / hashes.json / registry.json，git 忽略）
-src/                  index.ts(CLI) server.ts auth.ts registry.ts pipeline.ts store.ts types.ts ai/
+src/                  index.ts(CLI) connect.ts(一键连接看护) config.ts(共享配置加载) server.ts auth.ts registry.ts pipeline.ts store.ts types.ts ai/
 ```
 
 ## 已知限制

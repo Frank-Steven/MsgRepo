@@ -12,6 +12,15 @@
       "$ref": "category-registry.schema.json",
       "description": "完整注册表。仅当电脑端版本不一致时携带，否则省略以减小请求"
     },
+    "customPrompt": {
+      "type": "string",
+      "description": "用户自定义提示词（手机端设置页维护），电脑端追加到 AI 系统提示词末尾以调整分类/优先级表现。可选"
+    },
+    "reprocessMessageIds": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" },
+      "description": "强制重新处理的消息 ID（用户从已处理回退到待处理的消息）：电脑端对这些消息跳过 contentHash 去重。可选"
+    },
     "messages": {
       "type": "array",
       "items": { "$ref": "raw-message.schema.json" },

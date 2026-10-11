@@ -101,10 +101,15 @@ class SyncClient {
     // 协议：电脑端版本与本地一致时省略 registry 以减小请求
     final includeRegistry =
         desktopVersion == null || desktopVersion != registry.version;
+    final prefs = await SharedPreferences.getInstance();
+    final customPrompt = prefs.getString('custom_prompt')?.trim() ?? '';
+    final reprocessIds = await db.getNeedsReprocessIds();
     final request = SyncRequest(
       deviceId: await getDeviceId(),
       registryVersion: registry.version,
       registry: includeRegistry ? registry : null,
+      customPrompt: customPrompt.isEmpty ? null : customPrompt,
+      reprocessMessageIds: reprocessIds.isEmpty ? null : reprocessIds,
       messages: pending,
     );
 
@@ -121,7 +126,7 @@ class SyncClient {
             },
             body: jsonEncode(request.toJson()),
           )
-          .timeout(const Duration(seconds: 120));
+          .timeout(const Duration(seconds: 600)); // 本地模型逐条处理较慢，批量同步可能数分钟
     } catch (e) {
       throw SyncException('无法连接电脑端，请确认 USB 已连接并执行 adb reverse：$e');
     }
@@ -136,6 +141,7 @@ class SyncClient {
     if (parsed.processedMessageIds.isNotEmpty) {
       await db.updateRawMessageStatus(
           parsed.processedMessageIds, RawMessage.statusProcessed);
+      await db.clearNeedsReprocess(parsed.processedMessageIds);
     }
     await db.insertStructuredItems(parsed.results);
     await RegistryService.instance.noteDesktopVersion(parsed.registryVersion);

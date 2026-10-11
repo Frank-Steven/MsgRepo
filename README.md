@@ -9,15 +9,12 @@
 ## 快速开始
 
 ```bash
-# 1. 电脑端
+# 1. 电脑端（一条命令完成：拉起服务 + adb reverse + 断线自动重连看护）
 cd desktop
 npm install
-npm start            # 首次启动会打印配对 token
+npm run connect      # 控制台会打印配对 token 与仪表盘地址
 
-# 2. 连接手机（开启 USB 调试）
-adb reverse tcp:8765 tcp:8765
-
-# 3. 手机端（需要 Flutter SDK）
+# 2. 手机端（需要 Flutter SDK）
 cd mobile
 flutter pub get
 flutter run          # 安装后：授予通知读取权限 → 设置页输入 token → 连接测试
@@ -25,6 +22,8 @@ flutter run          # 安装后：授予通知读取权限 → 设置页输入 
 # 无 AI 模型也能体验：默认 provider=mock（规则引擎）
 npm run demo         # 在 desktop/ 下跑端到端演示
 ```
+
+`npm run connect` 会检测电脑服务是否已在运行（在则复用）、等待手机 USB 调试授权、建立 `adb reverse tcp:8765 tcp:8765`，之后每 5 秒看护一次：通道掉了自动重建、服务挂了自动拉起。也可以手动分步执行：`npm start`（起服务）+ `adb reverse tcp:8765 tcp:8765`（建通道）。
 
 电脑端仪表盘：`http://127.0.0.1:8765/dashboard`
 
