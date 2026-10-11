@@ -150,7 +150,7 @@ AI 输出的 `payload` 必须通过该分类的 `payloadSchema` 校验。失败�
 [手机] 银行 App 通知：「您本期信用卡账单 ¥1,280.50，最后还款日 10月25日」
   → RawMessage { source: {packageName: "com.bank.app"}, title: "账单提醒",
                  body: "...", postedAt: 1760054400000, status: "pending" }
-  → adb forward 建立连接，POST /v1/sync（附注册表 v1.0.0）
+  → adb reverse 建立连接，POST /v1/sync（附注册表 v1.0.0）
 [电脑] 管线：去重 → Mock/Ollama 分类为 bill → 抽取金额与日期
   → 时间解析：「10月25日」以 postedAt 为基准 → deadline: 1761321599000
   → 优先级：priorityHints「临近最后期限 P0」→ 距今 14 天 → P1

@@ -7,7 +7,8 @@ export interface AIProvider {
   process(messages: RawMessage[], registry: CategoryRegistry): Promise<StructuredItem[]>;
 }
 
-/** 规整 AI 返回的 time 字段：非法/缺省时回退 { kind: "none" }。 */
+/** 规整 AI 返回的 time 字段：非法/缺省时回退 { kind: "none" }。
+ *  startAt/endAt/deadline 接受毫秒数字，或本地时间字符串 "YYYY-MM-DDTHH:mm"（由代码换算成毫秒）。 */
 export function normalizeTime(t: unknown): TimeInfo {
   if (!t || typeof t !== "object") return { kind: "none" };
   const o = t as Record<string, unknown>;
@@ -15,11 +16,37 @@ export function normalizeTime(t: unknown): TimeInfo {
   if (typeof o.kind !== "string" || !kinds.has(o.kind)) return { kind: "none" };
   const time: TimeInfo = { kind: o.kind as TimeInfo["kind"] };
   for (const k of ["startAt", "endAt", "deadline"] as const) {
-    if (typeof o[k] === "number") time[k] = o[k] as number;
+    const v = o[k];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      time[k] = v;
+    } else if (typeof v === "string") {
+      const ms = new Date(v.trim().replace(" ", "T")).getTime();
+      if (!Number.isNaN(ms)) time[k] = ms;
+    }
   }
   if (typeof o.rrule === "string") time.rrule = o.rrule;
   if (Array.isArray(o.reminderOffsets)) {
     time.reminderOffsets = o.reminderOffsets.filter((n): n is number => typeof n === "number");
   }
   return time;
+}
+
+/** 生成日期对照表，放进 prompt 让模型查表而不是做日期算术（周一为一周第一天）。 */
+export function buildDateHints(postedAt: number): string {
+  const base = new Date(postedAt);
+  const weekChars = "日一二三四五六";
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（周${weekChars[d.getDay()]}）`;
+  const day = (offset: number) => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + offset);
+    return d;
+  };
+  const lines = [`今天=${fmt(day(0))}`, `明天=${fmt(day(1))}`, `后天=${fmt(day(2))}`];
+  const dow = (base.getDay() + 6) % 7;
+  const names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const past = (offset: number) => (offset < 0 ? "（已过去）" : "");
+  for (let i = 0; i < 7; i++) lines.push(`本${names[i]}=${fmt(day(i - dow))}${past(i - dow)}`);
+  for (let i = 0; i < 7; i++) lines.push(`下${names[i]}=${fmt(day(i - dow + 7))}`);
+  return lines.join("\n");
 }

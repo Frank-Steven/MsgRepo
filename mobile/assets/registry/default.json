@@ -98,7 +98,7 @@
     {
       "key": "coupon",
       "displayName": "优惠营销",
-      "description": "优惠券、促销、活动推送。多为低价值信息，但限时大额优惠可能值得保留。",
+      "description": "优惠券、促销、活动推送、直播开播提醒等营销类通知。多为低价值信息，但限时大额优惠可能值得保留。典型措辞：『你关注的主播正在直播』『全场满300减50』。",
       "baseKind": "generic",
       "defaultPriority": "P3",
       "priorityHints": "几乎总是 P3；用户常关注的品牌且有明确截止时间可 P2",

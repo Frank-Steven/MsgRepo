@@ -5,7 +5,7 @@
 ## 传输层
 
 - 电脑端 HTTP 服务绑定 `127.0.0.1:8765`（端口可在 `desktop/config/default.json` 配置）
-- 手机通过 `adb forward tcp:8765 tcp:8765` 访问 `http://127.0.0.1:8765`
+- 手机通过 `adb reverse tcp:8765 tcp:8765` 访问 `http://127.0.0.1:8765`
 - 请求体/响应体均为 JSON，`Content-Type: application/json; charset=utf-8`
 
 ## 认证
@@ -85,7 +85,7 @@ Authorization: Bearer <pairing-token>
 
 ```
 1. 电脑端 npm start → 控制台打印 token（或 npm run pair 查看）
-2. 手机 USB 连接，adb forward tcp:8765 tcp:8765
+2. 手机 USB 连接，adb reverse tcp:8765 tcp:8765
 3. 手机端设置页输入 token → 点"连接测试"（GET /v1/health + 一次空 sync 验证 token）
 4. 配对完成，之后每次同步自动携带
 ```

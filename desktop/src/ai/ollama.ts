@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { normalizeTime, type AIProvider } from "./provider.js";
+import { buildDateHints, normalizeTime, type AIProvider } from "./provider.js";
 import {
   PIPELINE_VERSION,
   SCHEMA_VERSION,
@@ -75,9 +75,9 @@ export class OllamaProvider implements AIProvider {
           type: "object",
           properties: {
             kind: { type: "string", enum: ["none", "point", "range", "deadline", "recurring"] },
-            startAt: { type: "integer" },
-            endAt: { type: "integer" },
-            deadline: { type: "integer" },
+            startAt: { type: "string", description: "本地时间 YYYY-MM-DDTHH:mm" },
+            endAt: { type: "string", description: "本地时间 YYYY-MM-DDTHH:mm" },
+            deadline: { type: "string", description: "本地时间 YYYY-MM-DDTHH:mm" },
             rrule: { type: "string" },
             reminderOffsets: { type: "array", items: { type: "integer" } },
           },
@@ -94,13 +94,23 @@ export class OllamaProvider implements AIProvider {
           content:
             `你是消息结构化助手。从下列分类中为消息选择最合适的一个，提炼标题、一句话摘要、优先级、置信度和时间。\n` +
             `分类列表：\n${catList}\n` +
-            `所有相对时间以给出的基准时间为准，输出 Unix 毫秒绝对时间戳。只输出 JSON。`,
+            `时间字段 startAt/endAt/deadline 用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），` +
+            `相对日期查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间，` +
+            `若字面日期标注了"已过去"，顺延到下一个未来的同名日期（如"本周五"已过则取"下周五"）。只输出 JSON。`,
         },
         {
           role: "user",
           content: JSON.stringify({
-            基准时间: new Date(msg.postedAt).toISOString(),
-            基准时间戳: msg.postedAt,
+            基准时间: new Date(msg.postedAt).toLocaleString("zh-CN", {
+              weekday: "long",
+              year: "numeric",
+              month: "numeric",
+              day: "numeric",
+              hour: "numeric",
+              minute: "numeric",
+              hour12: false,
+            }),
+            日期对照表: buildDateHints(msg.postedAt),
             标题: msg.title,
             正文: msg.body,
           }),

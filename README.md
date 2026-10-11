@@ -15,7 +15,7 @@ npm install
 npm start            # 首次启动会打印配对 token
 
 # 2. 连接手机（开启 USB 调试）
-adb forward tcp:8765 tcp:8765
+adb reverse tcp:8765 tcp:8765
 
 # 3. 手机端（需要 Flutter SDK）
 cd mobile

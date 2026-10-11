@@ -1,6 +1,6 @@
 # MsgRepo Mobile（Flutter / 仅 Android）
 
-MsgRepo 手机端：自动采集 Android 通知 + 手动添加带附件的消息，通过 USB + adb forward
+MsgRepo 手机端：自动采集 Android 通知 + 手动添加带附件的消息，通过 USB + adb reverse
 把待处理消息发给电脑端本地 AI，接收结构化结果（日程/待办/笔记等），展示并调度本地提醒。
 
 ## 构建与运行
@@ -19,7 +19,7 @@ flutter run          # 连接 Android 设备（minSdk 26 / Android 8.0+）
 ## 连接电脑端
 
 ```bash
-adb forward tcp:8765 tcp:8765
+adb reverse tcp:8765 tcp:8765
 ```
 
 手机 App 默认访问 `http://127.0.0.1:8765`（可在「我的」页修改）。同步前请先在
@@ -33,7 +33,7 @@ adb forward tcp:8765 tcp:8765
 | POST_NOTIFICATIONS | Android 13+ 弹出本地提醒 | 首次启动时弹窗请求 |
 | SCHEDULE_EXACT_ALARM | 精确时刻提醒 | 安装即授予（Android 12 起默认允许，用户可撤销） |
 | RECEIVE_BOOT_COMPLETED | 开机后由 flutter_local_notifications 重新调度提醒 | 安装即授予 |
-| INTERNET + 明文 HTTP | 经 adb forward 访问 127.0.0.1 | manifest 中 usesCleartextTraffic="true" |
+| INTERNET + 明文 HTTP | 经 adb reverse 访问 127.0.0.1 | manifest 中 usesCleartextTraffic="true" |
 
 ## 架构说明
 

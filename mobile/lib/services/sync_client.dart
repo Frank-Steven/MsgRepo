@@ -32,7 +32,7 @@ class SyncOutcome {
   });
 }
 
-/// 经 adb forward 与电脑端通信：POST /v1/sync 上传待处理消息并接收结构化结果。
+/// 经 adb reverse 与电脑端通信：POST /v1/sync 上传待处理消息并接收结构化结果。
 class SyncClient {
   SyncClient._();
 
@@ -123,7 +123,7 @@ class SyncClient {
           )
           .timeout(const Duration(seconds: 120));
     } catch (e) {
-      throw SyncException('无法连接电脑端，请确认 USB 已连接并执行 adb forward：$e');
+      throw SyncException('无法连接电脑端，请确认 USB 已连接并执行 adb reverse：$e');
     }
     if (resp.statusCode != 200) {
       throw SyncException('同步失败 HTTP ${resp.statusCode}：${resp.body}');

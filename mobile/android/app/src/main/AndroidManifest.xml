@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- adb forward 后访问 http://127.0.0.1:8765 -->
+    <!-- adb reverse 后访问 http://127.0.0.1:8765 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Android 13+ 本地提醒通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>

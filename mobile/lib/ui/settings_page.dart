@@ -141,7 +141,7 @@ class _SettingsPageState extends State<SettingsPage> {
             decoration: const InputDecoration(
               labelText: '服务地址',
               hintText: SyncClient.defaultBaseUrl,
-              helperText: 'USB 连接后执行 adb forward tcp:8765 tcp:8765',
+              helperText: 'USB 连接后执行 adb reverse tcp:8765 tcp:8765',
               border: OutlineInputBorder(),
             ),
           ),

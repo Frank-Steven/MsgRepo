@@ -1,6 +1,6 @@
 name: msgrepo_mobile
 description: >-
-  MsgRepo 手机端：采集 Android 通知与手动消息，经 adb forward 同步给电脑端 AI，
+  MsgRepo 手机端：采集 Android 通知与手动消息，经 adb reverse 同步给电脑端 AI，
   展示结构化结果并调度本地提醒。
 publish_to: "none"
 version: 0.1.0+1

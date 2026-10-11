@@ -7,7 +7,7 @@ MsgRepo 是一个"通知消化"系统：手机端无差别收集通知，电脑�
 ## 职责划分
 
 ```
-┌─────────────────────┐   adb forward    ┌─────────────────────┐
+┌─────────────────────┐   adb reverse    ┌─────────────────────┐
 │   手机端 (Flutter)   │  tcp:8765 ════  │  电脑端 (TS/Node)    │
 │                     │ ◀══ HTTP/JSON ══ │                     │
 │ · 通知监听采集        │   （USB 有线）   │ · HTTP 服务          │
@@ -36,12 +36,12 @@ MsgRepo 是一个"通知消化"系统：手机端无差别收集通知，电脑�
 电脑端在 `127.0.0.1:8765` 起 HTTP 服务。USB 连接后执行：
 
 ```bash
-adb forward tcp:8765 tcp:8765
+adb reverse tcp:8765 tcp:8765
 ```
 
 此后手机上的 `http://127.0.0.1:8765` 即电脑的 8765 端口。通道是 USB 本地的，不经过任何网络，天然满足"安全稳定优先"。
 
-传输层在手机端抽象为 `SyncClient`（host/port 可配）、电脑端只监听 loopback。后续扩展无线 ADB（`adb connect <ip>` 后同样 `adb forward`）或局域网直连时，业务代码不变，只改连接建立方式——见 `docs/extensibility.md`。
+传输层在手机端抽象为 `SyncClient`（host/port 可配）、电脑端只监听 loopback。后续扩展无线 ADB（`adb connect <ip>` 后同样 `adb reverse`）或局域网直连时，业务代码不变，只改连接建立方式——见 `docs/extensibility.md`。
 
 ## 信任与认证
 

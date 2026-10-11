@@ -1,6 +1,6 @@
 # MsgRepo Desktop（电脑端）
 
-手机（Flutter）采集 Android 通知，经 `adb forward` 访问电脑端 HTTP 服务；电脑端用本地 AI（Ollama / OpenAI 兼容 API / 内置 mock 规则引擎）把原始消息结构化为日程/待办/笔记等 StructuredItem 返回手机，并附带一个 Web 仪表盘。
+手机（Flutter）采集 Android 通知，经 `adb reverse` 访问电脑端 HTTP 服务；电脑端用本地 AI（Ollama / OpenAI 兼容 API / 内置 mock 规则引擎）把原始消息结构化为日程/待办/笔记等 StructuredItem 返回手机，并附带一个 Web 仪表盘。
 
 ## 安装
 
@@ -24,7 +24,7 @@ npm start       # 启动 HTTP 服务（默认 127.0.0.1:8765）
 手机端连接：
 
 ```bash
-adb forward tcp:8765 tcp:8765
+adb reverse tcp:8765 tcp:8765
 # 手机端请求 http://127.0.0.1:8765，带请求头：
 # Authorization: Bearer <token>
 ```
