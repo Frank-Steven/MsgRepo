@@ -18,10 +18,10 @@ class ItemsPage extends StatefulWidget {
   const ItemsPage({super.key});
 
   @override
-  State<ItemsPage> createState() => _ItemsPageState();
+  State<ItemsPage> createState() => ItemsPageState();
 }
 
-class _ItemsPageState extends State<ItemsPage> {
+class ItemsPageState extends State<ItemsPage> {
   List<StructuredItem> _items = [];
   CategoryRegistry? _registry;
   String _categoryFilter = 'all';
@@ -31,6 +31,9 @@ class _ItemsPageState extends State<ItemsPage> {
     super.initState();
     _reload();
   }
+
+  /// 供外部（如底部导航切页）触发的公开刷新入口
+  Future<void> reload() => _reload();
 
   Future<void> _reload() async {
     final items = await AppDatabase.instance.getStructuredItems();

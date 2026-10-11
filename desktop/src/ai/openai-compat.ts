@@ -39,8 +39,15 @@ export class OpenAICompatProvider implements AIProvider {
           `${c.timeHints ? ` 时间提示：${c.timeHints}` : ""}`,
       )
       .join("\n");
+    // payloadSchema 内含 "$ref": "#/definitions/genericField"，必须把 definitions
+    // 一并附进 prompt，否则模型无法解析引用、只能猜测字段名（实测会输出 name 而非 key）
     const payloadSchemas = Object.fromEntries(
-      registry.categories.map((c) => [c.key, c.payloadSchema]),
+      registry.categories.map((c) => [
+        c.key,
+        registry.definitions
+          ? { ...c.payloadSchema, definitions: registry.definitions }
+          : c.payloadSchema,
+      ]),
     );
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };

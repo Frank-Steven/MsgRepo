@@ -91,6 +91,8 @@ class ReminderService {
         tz.TZDateTime.fromMillisecondsSinceEpoch(tz.local, at),
         _details,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
         payload: item.id,
       );
     }

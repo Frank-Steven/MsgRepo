@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -33,7 +35,7 @@ class RegistryService {
   }
 
   Map<String, dynamic> _decode(String json) =>
-      (const JsonDecoder().convert(json) as Map).cast<String, dynamic>();
+      (jsonDecode(json) as Map).cast<String, dynamic>();
 
   /// 记录电脑端实际使用的注册表版本。响应只带版本号不带内容，
   /// 本地继续使用当前注册表；下次同步请求若版本不一致会携带完整注册表。

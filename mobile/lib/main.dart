@@ -42,7 +42,14 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
-  final _pages = const [InboxPage(), ItemsPage(), SettingsPage()];
+  // IndexedStack 保活页面不会随切页重跑 initState，切到结构化页时主动刷新
+  final _itemsKey = GlobalKey<ItemsPageState>();
+
+  late final _pages = [
+    const InboxPage(),
+    ItemsPage(key: _itemsKey),
+    const SettingsPage(),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +57,10 @@ class _HomeShellState extends State<HomeShell> {
       body: IndexedStack(index: _index, children: _pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: (i) {
+          setState(() => _index = i);
+          if (i == 1) _itemsKey.currentState?.reload();
+        },
         destinations: const [
           NavigationDestination(icon: Icon(Icons.inbox_outlined), label: '收件箱'),
           NavigationDestination(
