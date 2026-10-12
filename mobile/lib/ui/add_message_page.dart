@@ -4,6 +4,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models.dart';
+import '../models/message.dart';
 import '../services/database.dart';
 
 /// 手动添加消息：附件只存访问方式（本地路径 / content URI / 链接 / 小程序路径），
@@ -147,6 +148,21 @@ class _AddMessagePageState extends State<AddMessagePage> {
       contentHash: computeContentHash('manual', title, body, postedAt),
     );
     await AppDatabase.instance.insertRawMessageIfNew(message);
+    // v2 双写：同 id/同 contentHash 写入 messages 表
+    await AppDatabase.instance.insertMessageIfNew(Message(
+      id: message.id,
+      packageName: 'manual',
+      appName: '手动添加',
+      title: title,
+      body: body,
+      postedAt: postedAt,
+      captureType: RawMessage.captureManual,
+      attachments: List.of(_attachments),
+      contentHash: message.contentHash,
+      status: MessageStatus.pending,
+      priority: MessagePriority.none,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+    ));
     if (mounted) Navigator.of(context).pop(true);
   }
 
