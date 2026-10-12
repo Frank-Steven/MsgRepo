@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
-import type { AIProvider } from "./provider.js";
+import type { AIProvider, EvaluateOptions } from "./provider.js";
 import {
   PIPELINE_VERSION,
   SCHEMA_VERSION,
   type CategoryRegistry,
+  type EvalPriority,
+  type EvalResult,
   type GenericField,
   type Priority,
+  type ProcessInputMessage,
   type RawMessage,
   type StructuredItem,
+  type TaskDraft,
   type TimeInfo,
 } from "../types.js";
 
@@ -21,6 +25,49 @@ export class MockProvider implements AIProvider {
   async process(messages: RawMessage[], registry: CategoryRegistry): Promise<StructuredItem[]> {
     // 规则引擎无提示词概念，options.customPrompt 接受但忽略
     return messages.map((msg) => this.buildItem(msg, registry));
+  }
+
+  /** v2 流式评估的规则版：按关键词分类映射优先级，并模拟逐段 token 输出。 */
+  async evaluateStreaming(
+    message: ProcessInputMessage,
+    _registry: CategoryRegistry,
+    options: EvaluateOptions,
+  ): Promise<EvalResult> {
+    const text = `${message.title}\n${message.body}`;
+    const category = classify(text);
+    const timeMs = extractTimeMs(text, message.postedAt);
+
+    const priority: EvalPriority =
+      category === "coupon"
+        ? "junk"
+        : category === "verification"
+          ? "red"
+          : category === "generic"
+            ? "green"
+            : "yellow";
+    let taskDraft: TaskDraft | null = null;
+    if ((category === "schedule" || category === "todo") && timeMs) {
+      const d = new Date(timeMs);
+      const two = (n: number) => String(n).padStart(2, "0");
+      taskDraft = {
+        title: message.title || message.body.slice(0, 20),
+        kind: "point",
+        startAt: `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}`,
+        priority: category === "schedule" ? "important" : "normal",
+      };
+    }
+    const result: EvalResult = {
+      priority,
+      reason: `规则引擎命中分类 ${category}`,
+      taskDraft,
+    };
+    // 模拟流式：把结果 JSON 分段回调，便于无模型时验证 token 透传链路
+    const raw = JSON.stringify(result);
+    for (let i = 0; i < raw.length; i += 16) {
+      options.onToken?.(raw.slice(i, i + 16));
+      await new Promise((r) => setImmediate(r));
+    }
+    return result;
   }
 
   private buildItem(msg: RawMessage, registry: CategoryRegistry): StructuredItem {

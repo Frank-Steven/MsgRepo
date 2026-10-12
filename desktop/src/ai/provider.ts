@@ -1,8 +1,24 @@
-import type { CategoryRegistry, RawMessage, StructuredItem, TimeInfo } from "../types.js";
+import type {
+  CategoryRegistry,
+  EvalResult,
+  ProcessInputMessage,
+  RawMessage,
+  StructuredItem,
+  TimeInfo,
+} from "../types.js";
 
 export interface ProcessOptions {
   /** 用户自定义提示词（手机端设置页维护），追加到 AI 系统提示词末尾 */
   customPrompt?: string;
+}
+
+/** v2 流式评估选项（设计 §8.3）。 */
+export interface EvaluateOptions {
+  customPrompt?: string;
+  /** 手机端"现在"（毫秒），日期对照表与"已过去顺延"的基准 */
+  now: number;
+  /** 每生成一段 delta 回调一次，供 /v1/process 透传 token 事件 */
+  onToken?: (delta: string) => void;
 }
 
 /** AI 适配器接口：对一批原始消息做分类 + 抽取，产出结构化结果。 */
@@ -14,6 +30,12 @@ export interface AIProvider {
     registry: CategoryRegistry,
     options?: ProcessOptions,
   ): Promise<StructuredItem[]>;
+  /** v2 流式评估（可选实现）：对单条消息产出 priority + reason + 可选任务草稿。 */
+  evaluateStreaming?(
+    message: ProcessInputMessage,
+    registry: CategoryRegistry,
+    options: EvaluateOptions,
+  ): Promise<EvalResult>;
 }
 
 /** 把用户自定义提示词追加到系统提示词末尾。 */

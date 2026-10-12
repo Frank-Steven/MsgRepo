@@ -31,3 +31,28 @@ export function loadOrCreatePairing(dataDir: string): { pairing: Pairing; create
 export function isAuthorized(req: IncomingMessage, token: string): boolean {
   return req.headers.authorization === `Bearer ${token}`;
 }
+
+/** 配对 token 的运行期持有者：支持 /v1/pair 的 reset 重新签发并落盘。 */
+export class PairingManager {
+  private current: Pairing;
+  readonly created: boolean;
+
+  constructor(private readonly dataDir: string) {
+    const { pairing, created } = loadOrCreatePairing(dataDir);
+    this.current = pairing;
+    this.created = created;
+  }
+
+  get token(): string {
+    return this.current.token;
+  }
+
+  /** 重新签发 token 并落盘（0600）。 */
+  reset(): Pairing {
+    this.current = { token: randomBytes(24).toString("base64url"), createdAt: Date.now() };
+    writeFileSync(path.join(this.dataDir, "pairing.json"), JSON.stringify(this.current, null, 2), {
+      mode: 0o600,
+    });
+    return this.current;
+  }
+}

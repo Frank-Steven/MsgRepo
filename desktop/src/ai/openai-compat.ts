@@ -4,13 +4,17 @@ import {
   buildDateHints,
   normalizeTime,
   type AIProvider,
+  type EvaluateOptions,
   type ProcessOptions,
 } from "./provider.js";
+import { buildEvalSystemPrompt, buildEvalUserContent, parseEvalOutput } from "./evaluate.js";
 import {
   PIPELINE_VERSION,
   SCHEMA_VERSION,
   type CategoryRegistry,
+  type EvalResult,
   type Priority,
+  type ProcessInputMessage,
   type RawMessage,
   type StructuredItem,
 } from "../types.js";
@@ -94,6 +98,73 @@ export class OpenAICompatProvider implements AIProvider {
     const end = content.lastIndexOf("}");
     if (start === -1 || end <= start) throw new Error(`模型未返回 JSON: ${content.slice(0, 200)}`);
     return JSON.parse(content.slice(start, end + 1)) as ModelOutput;
+  }
+
+  /**
+   * v2 流式评估：stream=true 调 /chat/completions，SSE 逐行解析 choices[0].delta.content
+   * 回调 onToken，同时累积全文，结束后解析出精简评估结果（设计 §8.2/§8.3）。
+   */
+  async evaluateStreaming(
+    message: ProcessInputMessage,
+    registry: CategoryRegistry,
+    options: EvaluateOptions,
+  ): Promise<EvalResult> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.opts.apiKey) headers.Authorization = `Bearer ${this.opts.apiKey}`;
+
+    const res = await fetch(`${this.opts.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(180_000),
+      body: JSON.stringify({
+        model: this.opts.model,
+        temperature: 0,
+        stream: true,
+        messages: [
+          { role: "system", content: buildEvalSystemPrompt(registry, options.customPrompt) },
+          { role: "user", content: buildEvalUserContent(message, options.now) },
+        ],
+      }),
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`OpenAI 兼容接口返回 ${res.status}: ${await res.text()}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let full = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl = buf.indexOf("\n");
+        while (nl >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          nl = buf.indexOf("\n");
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") continue;
+          try {
+            const json = JSON.parse(data) as {
+              choices?: Array<{ delta?: { content?: string } }>;
+            };
+            const delta = json.choices?.[0]?.delta?.content;
+            if (typeof delta === "string" && delta.length > 0) {
+              full += delta;
+              options.onToken?.(delta);
+            }
+          } catch {
+            // 忽略不完整的 JSON 行/保活注释
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return parseEvalOutput(full);
   }
 
   private async processOne(

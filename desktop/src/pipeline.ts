@@ -7,6 +7,8 @@ import type {
   CategoryRegistry,
   GenericField,
   Priority,
+  ProcessEvent,
+  ProcessInputMessage,
   RawMessage,
   StructuredItem,
 } from "./types.js";
@@ -266,4 +268,51 @@ export async function runPipeline(
     failedMessageIds: failedIds,
     warnings,
   };
+}
+
+// ---- v2 流式评估（设计 §8.3，/v1/process 的管线） ----
+
+export interface ProcessStreamingOptions {
+  customPrompt?: string;
+  /** 手机端"现在"（毫秒），日期对照表基准 */
+  now: number;
+  /** 每个事件（token/result/error）立即回调，由 server 逐行写入 NDJSON 流 */
+  onEvent?: (event: ProcessEvent) => void;
+}
+
+/**
+ * 逐条流式评估：每条消息独立调 provider.evaluateStreaming，token 逐段透传、
+ * 结果/失败逐条回调；单条失败不影响后续消息。不落盘（电脑端无业务数据，设计 §11）。
+ */
+export async function processStreaming(
+  messages: ProcessInputMessage[],
+  registry: CategoryRegistry,
+  provider: AIProvider,
+  options: ProcessStreamingOptions,
+): Promise<{ total: number; failed: number }> {
+  const emit = options.onEvent ?? (() => undefined);
+  let failed = 0;
+  for (const msg of messages) {
+    if (typeof provider.evaluateStreaming !== "function") {
+      failed++;
+      emit({
+        type: "error",
+        messageId: msg.id,
+        error: `AI provider (${provider.name}) 不支持流式评估`,
+      });
+      continue;
+    }
+    try {
+      const result = await provider.evaluateStreaming(msg, registry, {
+        customPrompt: options.customPrompt,
+        now: options.now,
+        onToken: (delta) => emit({ type: "token", messageId: msg.id, delta }),
+      });
+      emit({ type: "result", messageId: msg.id, ...result });
+    } catch (err) {
+      failed++;
+      emit({ type: "error", messageId: msg.id, error: String(err) });
+    }
+  }
+  return { total: messages.length, failed };
 }

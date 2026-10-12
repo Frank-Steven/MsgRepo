@@ -7,7 +7,9 @@ import '../../models/task.dart';
 import '../../services/database.dart';
 import '../../services/notification_bridge.dart';
 import '../../services/undo_service.dart';
+import '../add_message_page.dart';
 import '../tasks/task_editor.dart';
+import 'ai_panel.dart';
 import 'archived_page.dart';
 import 'message_widgets.dart';
 
@@ -83,12 +85,23 @@ class MessagesPageState extends State<MessagesPage> {
     return map;
   }
 
-  // ---- AI 处理占位（阶段 6 替换为真实接入）----
+  // ---- AI 处理（设计 §8：路由 + 流式面板）----
 
-  void _processWithAi(List<String> ids) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('AI 处理将在后续阶段接入')));
+  Future<void> _processWithAi(List<String> ids) async {
+    final msgs = await _db.getMessagesByIds(ids);
+    if (msgs.isEmpty || !mounted) return;
+    // 保持传入顺序（多选时为用户点选顺序）
+    final order = {for (var i = 0; i < ids.length; i++) ids[i]: i};
+    msgs.sort(
+        (a, b) => (order[a.id] ?? ids.length).compareTo(order[b.id] ?? ids.length));
+    await showAiProcessPanel(context, msgs, onChanged: reload);
+    await reload();
+  }
+
+  Future<void> _addManually() async {
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const AddMessagePage()));
+    await reload();
   }
 
   // ---- 单条/批量操作（成功后注册撤销，见设计 §6）----
@@ -338,6 +351,11 @@ class MessagesPageState extends State<MessagesPage> {
     return AppBar(
       title: const Text('消息'),
       actions: [
+        IconButton(
+          tooltip: '手动添加',
+          icon: const Icon(Icons.add),
+          onPressed: _addManually,
+        ),
         IconButton(
           tooltip: '导入',
           icon: const Icon(Icons.file_upload_outlined),

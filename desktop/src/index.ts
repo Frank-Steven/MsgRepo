@@ -1,7 +1,7 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DESKTOP_ROOT, loadRegistry } from "./registry.js";
-import { loadOrCreatePairing } from "./auth.js";
+import { loadOrCreatePairing, PairingManager } from "./auth.js";
 import { Store } from "./store.js";
 import { createServer } from "./server.js";
 import { runPipeline } from "./pipeline.js";
@@ -131,12 +131,12 @@ async function main(): Promise<void> {
 
   const cfg = loadConfig();
   const provider = createProvider(cfg);
-  const { pairing, created } = loadOrCreatePairing(DATA_DIR);
+  const pairing = new PairingManager(DATA_DIR);
   const store = new Store(DATA_DIR);
   const server = createServer({
     host: cfg.host,
     port: cfg.port,
-    token: pairing.token,
+    pairing,
     provider,
     store,
     dataDir: DATA_DIR,
@@ -144,7 +144,7 @@ async function main(): Promise<void> {
   server.listen(cfg.port, cfg.host, () => {
     console.log(`MsgRepo desktop 已启动: http://${cfg.host}:${cfg.port}`);
     console.log(`AI provider: ${provider.name}${provider.model ? ` (${provider.model})` : ""}`);
-    if (created) {
+    if (pairing.created) {
       console.log(`\n首次启动，已生成配对 token: ${pairing.token}`);
       console.log(`手机端请使用请求头: Authorization: Bearer ${pairing.token}\n`);
     } else {

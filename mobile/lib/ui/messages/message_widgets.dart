@@ -177,28 +177,32 @@ class _SwipeActionRowState extends State<SwipeActionRow>
     return ClipRect(
       child: Stack(
         children: [
-          Positioned(
-            right: 0,
-            top: 0,
-            bottom: 0,
-            child: Row(
-              children: [
-                for (final a in widget.actions)
-                  _ActionBlock(
-                    action: a,
-                    width: _actionWidth,
-                    onTap: () {
-                      _snap(0);
-                      a.onTap();
-                    },
-                  ),
-              ],
-            ),
-          ),
           Transform.translate(
             offset: Offset(-_drag, 0),
             child: content,
           ),
+          // 动作块必须叠在内容之上：Transform 命中测试按原始位置逆变换，
+          // 若内容在上层，露出的动作条区域仍会被内容的手势吞掉。
+          // 关闭时（_drag == 0）不挂载，避免遮挡内容。
+          if (_drag > 0)
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              child: Row(
+                children: [
+                  for (final a in widget.actions)
+                    _ActionBlock(
+                      action: a,
+                      width: _actionWidth,
+                      onTap: () {
+                        _snap(0);
+                        a.onTap();
+                      },
+                    ),
+                ],
+              ),
+            ),
         ],
       ),
     );
