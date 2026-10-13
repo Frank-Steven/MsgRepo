@@ -59,7 +59,7 @@ String formatMessageTime(int ms) {
   return '${two(d.month)}-${two(d.day)} $hm';
 }
 
-/// 操作成功后的撤销 SnackBar（设计 §6，v2.1）：「{label} · 撤销」，
+/// 操作成功后的撤销 SnackBar（设计 §6，v2.1）：「{label}」+ 撤销按钮，
 /// 时长 4 秒、不排队（先收起当前条）。撤销注册由调用方在调用本函数前完成。
 void showUndoSnackBar(BuildContext context, String label,
     {VoidCallback? onUndone}) {
@@ -67,7 +67,7 @@ void showUndoSnackBar(BuildContext context, String label,
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: Text('$label · 撤销'),
+        content: Text(label),
         duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',

@@ -6,7 +6,7 @@ import '../../services/database.dart';
 import '../../services/undo_service.dart';
 import 'chapters_page.dart';
 
-/// 撤销统一入口（设计 §6，v2.1）：逆操作入队 + SnackBar 提示（「{label} · 撤销」，
+/// 撤销统一入口（设计 §6，v2.1）：逆操作入队 + SnackBar 提示（「{label}」+ 撤销按钮，
 /// 4 秒、不排队），「撤销」按钮弹栈执行。
 void showUndoSnackBar(
     BuildContext context, String label, Future<void> Function() undo) {
@@ -15,7 +15,7 @@ void showUndoSnackBar(
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: Text('$label · 撤销'),
+        content: Text(label),
         duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',

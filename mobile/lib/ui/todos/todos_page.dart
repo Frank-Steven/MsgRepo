@@ -93,7 +93,7 @@ class TodosPageState extends State<TodosPage> {
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
-        content: Text('$label · 撤销'),
+        content: Text(label),
         duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',
