@@ -104,6 +104,35 @@ class _LaneEntry {
   });
 }
 
+/// 日视图刻度档位（设计 §2.3，v2.1 修订）。
+///
+/// 返回 (主刻度间隔分钟, 次刻度间隔分钟?, 时间标注隔几个显示)：
+/// - 主刻度 = 候选 5/15/30/60/120 中「相邻标注间距 ≥ [labelSpacingPx]」的最密档，
+///   都不满足时取 120 分钟；
+/// - 次刻度 = 下一更密档，间距不足 [minorSpacingPx] 时省略（null）；
+/// - 标注按 2 的幂隔一个显示（stride=1 即每个主刻度都标），保证实际标注
+///   间距 ≥ [labelSpacingPx]。
+(int, int?, int) dayTickInterval(
+  double pxPerMinute, {
+  double labelSpacingPx = 64,
+  double minorSpacingPx = 6,
+}) {
+  final ppm = math.max(pxPerMinute, 1e-6);
+  const candidates = [5, 15, 30, 60, 120];
+  var majorIdx = candidates.indexWhere((c) => c * ppm >= labelSpacingPx);
+  if (majorIdx < 0) majorIdx = candidates.length - 1;
+  final major = candidates[majorIdx];
+  final minor = majorIdx > 0 &&
+          candidates[majorIdx - 1] * ppm >= minorSpacingPx
+      ? candidates[majorIdx - 1]
+      : null;
+  var stride = 1;
+  while (major * ppm * stride < labelSpacingPx) {
+    stride *= 2;
+  }
+  return (major, minor, stride);
+}
+
 /// 日视图名称空位分配结果（设计 §2.3 名称层）。
 class DayNameSlot {
   final String taskId;

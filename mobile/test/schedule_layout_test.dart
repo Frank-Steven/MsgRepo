@@ -153,4 +153,37 @@ void main() {
       expect(slots.single.visible, isFalse);
     });
   });
+
+  group('dayTickInterval', () {
+    test('最大缩放（每 5 分钟 48dp）：主刻度 15 分钟 + 5 分钟次刻度', () {
+      final (major, minor, stride) = dayTickInterval(48 / 5);
+      // 5*9.6=48 <64，15*9.6=144 ≥64
+      expect(major, 15);
+      expect(minor, 5);
+      expect(stride, 1);
+    });
+
+    test('中等缩放：选「间距 ≥64dp」的最密档', () {
+      // 15*2.8=42 <64，30*2.8=84 ≥64
+      final (major, minor, stride) = dayTickInterval(2.8);
+      expect(major, 30);
+      expect(minor, 15);
+      expect(stride, 1);
+    });
+
+    test('24h 恰好一屏：主刻度 120 分钟，标注隔一个显示', () {
+      const ppm = 390 / 1440; // 120*ppm≈32.5 <64
+      final (major, minor, stride) = dayTickInterval(ppm);
+      expect(major, 120);
+      expect(minor, 60);
+      expect(stride, 2); // 2 的幂：32.5*2=65 ≥64
+    });
+
+    test('比例尺极小时次刻度省略、标注按 2 的幂继续隔档', () {
+      final (major, minor, stride) = dayTickInterval(0.05);
+      expect(major, 120);
+      expect(minor, isNull); // 60*0.05=3 <6
+      expect(stride, 16); // 120*0.05*16=96 ≥64
+    });
+  });
 }

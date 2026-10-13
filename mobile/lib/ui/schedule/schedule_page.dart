@@ -89,8 +89,8 @@ class SchedulePageState extends State<SchedulePage> {
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
-        content: Text('$label · 10 秒内可撤销'),
-        duration: const Duration(seconds: 10),
+        content: Text('$label · 撤销'),
+        duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',
           onPressed: () async {
@@ -208,10 +208,24 @@ class SchedulePageState extends State<SchedulePage> {
     reload();
   }
 
+  /// AppBar 标题（设计 §2，v2.1）：不显示"日程"，显示当前粒度的时间尺度。
+  String get _title {
+    switch (_granularity) {
+      case 1:
+        return '$_year年$_month月';
+      case 2:
+        const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+        return '${_day.year}年${_day.month}月${_day.day}日'
+            '（${weekdays[_day.weekday - 1]}）';
+      default:
+        return '$_year年';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('日程')),
+      appBar: AppBar(title: Text(_title)),
       body: Column(
         children: [
           SizedBox(

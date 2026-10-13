@@ -132,7 +132,10 @@ class _AddMessagePageState extends State<AddMessagePage> {
     final body = _bodyController.text.trim();
     if (title.isEmpty && body.isEmpty) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('请填写标题或内容')));
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('请填写标题或内容'),
+            duration: Duration(seconds: 2)));
       return;
     }
     setState(() => _saving = true);

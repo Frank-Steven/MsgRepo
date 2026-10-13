@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../models/message.dart';
 import '../../services/undo_service.dart';
@@ -58,16 +59,16 @@ String formatMessageTime(int ms) {
   return '${two(d.month)}-${two(d.day)} $hm';
 }
 
-/// 操作成功后的撤销 SnackBar（设计 §6）：「{label} · 10 秒内可撤销」。
-/// 撤销注册由调用方在调用本函数前完成。
+/// 操作成功后的撤销 SnackBar（设计 §6，v2.1）：「{label} · 撤销」，
+/// 时长 4 秒、不排队（先收起当前条）。撤销注册由调用方在调用本函数前完成。
 void showUndoSnackBar(BuildContext context, String label,
     {VoidCallback? onUndone}) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: Text('$label · 10 秒内可撤销'),
-        duration: const Duration(seconds: 10),
+        content: Text('$label · 撤销'),
+        duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',
           onPressed: () async {
@@ -95,8 +96,12 @@ class SwipeAction {
   });
 }
 
-/// 自实现的左滑块状菜单：手势平移行内容露出右侧圆角色块按钮，
-/// 松手超过阈值吸住，否则弹回。
+/// 左滑块状菜单（设计 §5.1，v2.1 重做）：基于 flutter_slidable。
+/// - 轻扫 ≥40dp 或快速甩动即展开，松手吸附全展/全关（openThreshold 压到
+///   40dp 以内；甩动由库的 OpeningGesture 直接展开）；
+/// - 展开后点动作块必触发（动作块由库渲染在行内容之外的独立层）；
+/// - 展开后点击行内容或反扫收起；
+/// - 不设 groupTag / SlidableAutoCloseBehavior：多行各自独立展开，互不干扰。
 class SwipeActionRow extends StatefulWidget {
   final Widget child;
   final List<SwipeAction> actions;
@@ -119,37 +124,21 @@ class SwipeActionRow extends StatefulWidget {
 
 class _SwipeActionRowState extends State<SwipeActionRow>
     with SingleTickerProviderStateMixin {
-  static const _actionWidth = 68.0;
+  static const _actionWidth = 72.0;
+  static const _openThresholdDp = 40.0;
 
-  late final AnimationController _ctrl = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 180));
-  Animation<double>? _anim;
-  double _drag = 0;
-  double _startDrag = 0;
-
-  double get _maxDrag => widget.actions.length * _actionWidth;
+  late final SlidableController _controller = SlidableController(this);
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
-  void _onAnim() {
-    if (mounted) setState(() => _drag = _anim!.value);
-  }
-
-  void _snap(double target) {
-    _anim?.removeListener(_onAnim);
-    _anim = Tween<double>(begin: _drag, end: target)
-        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
-    _anim!.addListener(_onAnim);
-    _ctrl.forward(from: 0);
-  }
-
   void _handleTap() {
-    if (_drag > 0) {
-      _snap(0);
+    // 展开时点击行内容 = 收起（不触发行点击）；收起时正常行点击
+    if (_controller.ratio != 0) {
+      _controller.close();
     } else {
       widget.onTap?.call();
     }
@@ -162,90 +151,53 @@ class _SwipeActionRowState extends State<SwipeActionRow>
       behavior: HitTestBehavior.opaque,
       onTap: _handleTap,
       onLongPress: widget.onLongPress,
-      onHorizontalDragStart:
-          canSwipe ? (_) => _startDrag = _drag : null,
-      onHorizontalDragUpdate: canSwipe
-          ? (d) => setState(() =>
-              _drag = (_startDrag - d.delta.dx).clamp(0.0, _maxDrag).toDouble())
-          : null,
-      onHorizontalDragEnd: canSwipe
-          ? (_) => _snap(_drag > _maxDrag * 0.35 ? _maxDrag : 0)
-          : null,
       child: widget.child,
     );
     if (!canSwipe) return content;
-    return ClipRect(
-      child: Stack(
+    final width = MediaQuery.sizeOf(context).width;
+    return Slidable(
+      controller: _controller,
+      endActionPane: ActionPane(
+        motion: const BehindMotion(),
+        extentRatio:
+            (widget.actions.length * _actionWidth / width).clamp(0.1, 1.0),
+        openThreshold: (_openThresholdDp / width).clamp(0.05, 0.9),
         children: [
-          Transform.translate(
-            offset: Offset(-_drag, 0),
-            child: content,
-          ),
-          // 动作块必须叠在内容之上：Transform 命中测试按原始位置逆变换，
-          // 若内容在上层，露出的动作条区域仍会被内容的手势吞掉。
-          // 关闭时（_drag == 0）不挂载，避免遮挡内容。
-          if (_drag > 0)
-            Positioned(
-              right: 0,
-              top: 0,
-              bottom: 0,
-              child: Row(
-                children: [
-                  for (final a in widget.actions)
-                    _ActionBlock(
-                      action: a,
-                      width: _actionWidth,
-                      onTap: () {
-                        _snap(0);
-                        a.onTap();
-                      },
-                    ),
-                ],
+          for (final a in widget.actions)
+            CustomSlidableAction(
+              backgroundColor: Colors.transparent,
+              padding: EdgeInsets.zero,
+              onPressed: (_) => a.onTap(),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+                child: Container(
+                  width: double.infinity,
+                  height: double.infinity,
+                  decoration: BoxDecoration(
+                    color: a.color,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(a.icon, color: Colors.white, size: 20),
+                      const SizedBox(height: 4),
+                      Text(
+                        a.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
         ],
       ),
-    );
-  }
-}
-
-class _ActionBlock extends StatelessWidget {
-  final SwipeAction action;
-  final double width;
-  final VoidCallback onTap;
-
-  const _ActionBlock(
-      {required this.action, required this.width, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: width,
-      height: double.infinity,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
-        child: Material(
-          color: action.color,
-          borderRadius: BorderRadius.circular(10),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: onTap,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(action.icon, color: Colors.white, size: 20),
-                const SizedBox(height: 4),
-                Text(
-                  action.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white, fontSize: 11),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      child: content,
     );
   }
 }

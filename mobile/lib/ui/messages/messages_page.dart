@@ -306,8 +306,11 @@ class MessagesPageState extends State<MessagesPage> {
                 title: Text('从$name导入'),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('即将支持')));
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(const SnackBar(
+                        content: Text('即将支持'),
+                        duration: Duration(seconds: 2)));
                 },
               ),
           ],

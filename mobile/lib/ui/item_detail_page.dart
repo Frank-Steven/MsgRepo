@@ -55,7 +55,9 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
     if (mounted) {
       setState(() => _item = newItem);
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('提醒已更新')));
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('提醒已更新'), duration: Duration(seconds: 2)));
     }
   }
 
@@ -317,8 +319,11 @@ class _ItemDetailPageState extends State<ItemDetailPage> {
               final ok =
                   await NotificationBridge.instance.openDeeplink(a.access.value);
               if (!ok && context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('无法打开该附件')));
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(const SnackBar(
+                      content: Text('无法打开该附件'),
+                      duration: Duration(seconds: 2)));
               }
             },
             child: const Text('打开'),
@@ -442,7 +447,9 @@ class _ReminderEditDialogState extends State<_ReminderEditDialog> {
 
   void _warn(String text) {
     ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(text)));
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          content: Text(text), duration: const Duration(seconds: 2)));
   }
 
   @override

@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
+import '../../services/task_scale.dart';
 import '../../services/text_width.dart';
 
 /// 任务编辑器结果：task 为保存后的任务；deleted=true 表示用户在编辑器内删除。
@@ -155,8 +156,11 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       }
     });
     if (clamped) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('年度任务跨度不能超过一年，已自动调整结束时间')));
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('年度任务跨度不能超过一年，已自动调整结束时间'),
+            duration: Duration(seconds: 2)));
     }
   }
 
@@ -262,8 +266,11 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
     } else if (_kind == TaskKind.range) {
       end ??= start.add(const Duration(hours: 1));
       if (!end.isAfter(start)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('结束时间需晚于开始时间')));
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(
+              content: Text('结束时间需晚于开始时间'),
+              duration: Duration(seconds: 2)));
         return;
       }
       if (_isAnnual && end.difference(start) >= _annualLimit) {
@@ -396,6 +403,21 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
                   _ => TaskPriority.normal,
                 };
               }),
+            ),
+            const SizedBox(height: 12),
+            // 尺度（设计 §7，v2.1）：只读展示当前派生时间尺度，随时间选择实时变化
+            Row(
+              children: [
+                Text('尺度', style: Theme.of(context).textTheme.labelLarge),
+                const SizedBox(width: 12),
+                Text(
+                  timeScaleLabel(deriveTimeScale(
+                    _startAt,
+                    _kind == TaskKind.range ? _endAt : null,
+                  )),
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                ),
+              ],
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,

@@ -104,11 +104,15 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
               '新增结构化结果 ${outcome.results} 条'
               '${outcome.warnings.isEmpty ? '' : '；警告：${outcome.warnings.join('；')}'}';
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(text)));
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text(text), duration: const Duration(seconds: 2)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('$e')));
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text('$e'), duration: const Duration(seconds: 2)));
     } finally {
       if (mounted) {
         setState(() {
@@ -137,8 +141,11 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
         _messages.removeWhere((e) => e.id == m.id);
       }
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(archiving ? '已归档' : '已恢复为已处理')));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          content: Text(archiving ? '已归档' : '已恢复为已处理'),
+          duration: const Duration(seconds: 2)));
     return !staysVisible;
   }
 
@@ -163,8 +170,11 @@ class _InboxPageState extends State<InboxPage> with WidgetsBindingObserver {
         _messages.removeWhere((e) => e.id == m.id);
       }
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已回退，下次同步将重新处理')));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+          content: Text('已回退，下次同步将重新处理'),
+          duration: Duration(seconds: 2)));
     return _filter != 'all';
   }
 

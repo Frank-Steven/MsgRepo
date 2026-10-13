@@ -3,11 +3,12 @@ import 'package:flutter/material.dart';
 import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
-import '../../services/date_ranges.dart';
+import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../tasks/task_editor.dart';
 
-/// 待办页（设计 §3）：单页分组列表，分组即全部视图。
+/// 待办页（设计 §3，v2.1：按时间尺度分页）：顶部尺度页签 +
+/// 各尺度 active 任务列表 + 已完成/已归档两个特殊页签。
 class TodosPage extends StatefulWidget {
   const TodosPage({super.key});
 
@@ -19,18 +20,25 @@ class TodosPageState extends State<TodosPage> {
   static const _recentWindow = Duration(hours: 24);
   static const _annualYearCount = 5;
 
+  /// 页签顺序（设计 §3）：年度/季度/月度/整周/整日/定时/不定时/已完成/已归档。
+  static const _scaleTabs = [
+    'yearly',
+    'quarterly',
+    'monthly',
+    'weekly',
+    'daily',
+    'timed',
+  ];
+
+  int _tab = 6; // 默认「不定时」（原"我的待办"）
+
+  /// 六个时间尺度各自的 active 任务（不含 is_annual，按开始时间升序）。
+  final Map<String, List<Task>> _byScale = {for (final s in _scaleTabs) s: []};
   List<Task> _untimed = [];
-  List<Task> _today = [];
-  List<Task> _week = [];
-  List<Task> _month = [];
-  List<Task> _quarter = [];
-  List<Task> _year = [];
   List<Task> _annual = [];
   List<Task> _done = [];
   List<Task> _archived = [];
   bool _loading = true;
-
-  final _collapsed = <String>{};
 
   @override
   void initState() {
@@ -40,43 +48,39 @@ class TodosPageState extends State<TodosPage> {
 
   Future<void> reload() async {
     final db = AppDatabase.instance;
-    final now = DateTime.now();
-    final ranges = [
-      todayRange(now),
-      thisWeekRange(now),
-      thisMonthRange(now),
-      thisQuarterRange(now),
-      thisYearRange(now),
-    ];
     final results = await Future.wait([
+      db.getTasks(status: TaskStatus.active),
       db.getUntimedTasks(),
-      for (final r in ranges) db.getTasksOverlapping(r.startMs, r.endMs),
       db.getAnnualTasks(),
       db.getTasks(status: TaskStatus.done),
       db.getTasks(status: TaskStatus.archived),
     ]);
-    final untimed = results[0];
-    final annual = results[6];
-    final done = results[7]
+    final active = results[0];
+    final untimed = results[1];
+    // 年度任务（is_annual）与派生尺度正交：只在「年度」页签逐年展示
+    final annual = results[2]
+        .where((t) => t.status == TaskStatus.active)
+        .toList();
+    final done = results[3]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final archived = results[4]
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    final archived = results[8]
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    // getTasksOverlapping 无条件包含年度任务，这里按年平移其月日后再判交集
-    final periods = [
-      for (var i = 0; i < ranges.length; i++)
-        results[1 + i]
-            .where((t) =>
-                !t.isAnnual || _annualHits(t, ranges[i].startMs, ranges[i].endMs))
-            .toList(),
-    ];
+    final byScale = {for (final s in _scaleTabs) s: <Task>[]};
+    for (final t in active) {
+      final s = t.startAt;
+      if (s == null || t.isAnnual) continue;
+      final scale = deriveTimeScale(
+        DateTime.fromMillisecondsSinceEpoch(s),
+        t.endAt == null ? null : DateTime.fromMillisecondsSinceEpoch(t.endAt!),
+      );
+      byScale[scale]?.add(t);
+    }
+    // getTasks 已按 start_at 升序，分组内天然有序
     if (!mounted) return;
     setState(() {
+      _byScale
+        ..clear()
+        ..addAll(byScale);
       _untimed = untimed;
-      _today = periods[0];
-      _week = periods[1];
-      _month = periods[2];
-      _quarter = periods[3];
-      _year = periods[4];
       _annual = annual;
       _done = done;
       _archived = archived;
@@ -84,34 +88,13 @@ class TodosPageState extends State<TodosPage> {
     });
   }
 
-  /// 年度任务按 startAt 的月日平移到区间覆盖的每一年，判断是否有交集。
-  bool _annualHits(Task t, int startMs, int endMs) {
-    final s = t.startAt;
-    if (s == null) return false;
-    final start = DateTime.fromMillisecondsSinceEpoch(s);
-    final durationMs = (t.endAt ?? s) - s;
-    final firstYear = DateTime.fromMillisecondsSinceEpoch(startMs).year;
-    final lastYear = DateTime.fromMillisecondsSinceEpoch(endMs - 1).year;
-    for (var y = firstYear; y <= lastYear; y++) {
-      final occ = DateTime(y, start.month, start.day, start.hour, start.minute,
-          start.second, start.millisecond);
-      final occMs = occ.millisecondsSinceEpoch;
-      if (durationMs == 0) {
-        if (occMs >= startMs && occMs < endMs) return true;
-      } else if (occMs < endMs && occMs + durationMs > startMs) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   void _showUndoSnack(String label) {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
-        content: Text('$label · 10 秒内可撤销'),
-        duration: const Duration(seconds: 10),
+        content: Text('$label · 撤销'),
+        duration: const Duration(seconds: 4),
         action: SnackBarAction(
           label: '撤销',
           onPressed: () async {
@@ -231,9 +214,13 @@ class TodosPageState extends State<TodosPage> {
     return list;
   }
 
+  bool _isRecent(Task task) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return now - task.updatedAt < _recentWindow.inMilliseconds;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final currentYear = DateTime.now().year;
     return Scaffold(
       appBar: AppBar(
         title: const Text('待办'),
@@ -245,178 +232,201 @@ class TodosPageState extends State<TodosPage> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: reload,
-        child: CustomScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            if (_loading)
-              const SliverFillRemaining(
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else ...[
-              ..._groupSlivers('mine', '我的待办', _untimed),
-              ..._groupSlivers('today', '今天', _today),
-              ..._groupSlivers('week', '本周', _week),
-              ..._groupSlivers('month', '本月', _month),
-              ..._groupSlivers('quarter', '本季度', _quarter),
-              ..._groupSlivers('year', '本年', _year),
-              ..._annualSlivers(currentYear),
-              ..._groupSlivers('done', '已完成', _done, kind: _GroupKind.done),
-              ..._groupSlivers('archived', '已归档', _archived,
-                  kind: _GroupKind.archived),
-              const SliverToBoxAdapter(child: SizedBox(height: 32)),
-            ],
-          ],
-        ),
+      body: Column(
+        children: [
+          _ScaleTabBar(
+            tabs: const ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档'],
+            selected: _tab,
+            onChanged: (i) => setState(() => _tab = i),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: reload,
+              child: _loading
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: const [
+                        SizedBox(height: 160),
+                        Center(child: CircularProgressIndicator()),
+                      ],
+                    )
+                  : _buildTabBody(),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  List<Widget> _annualSlivers(int currentYear) {
-    final collapsed = _collapsed.contains('annual');
+  Widget _buildTabBody() {
+    switch (_tab) {
+      case 7:
+        return _taskListView(_done, done: true);
+      case 8:
+        return _taskListView(_archived, archived: true);
+      case 6:
+        return _taskListView(_untimed);
+      case 0:
+        return _yearlyTabBody();
+      default:
+        return _taskListView(_byScale[_scaleTabs[_tab]] ?? const []);
+    }
+  }
+
+  Widget _taskListView(List<Task> tasks,
+      {bool done = false, bool archived = false}) {
+    if (tasks.isEmpty) {
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: const [
+          SizedBox(height: 120),
+          Center(child: _EmptyHint()),
+        ],
+      );
+    }
+    return ListView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: tasks.length + 1,
+      itemBuilder: (context, i) {
+        if (i == tasks.length) return const SizedBox(height: 32);
+        final task = tasks[i];
+        return _TaskRow(
+          task: task,
+          archived: archived,
+          recent: done && _isRecent(task),
+          onTap: () => _editTask(task),
+          onToggleDone: archived ? null : () => _toggleDone(task),
+          onUnarchive: archived ? () => _unarchive(task) : null,
+          onShowSource: task.sourceMessageId == null
+              ? null
+              : () => _showSourceMessage(task.sourceMessageId!),
+        );
+      },
+    );
+  }
+
+  /// 「年度」页签（设计 §3）：先列派生尺度=年度的任务，
+  /// 再接 is_annual 逐年分节（今年起 5 年，无任务的年份也显示年份标题）。
+  Widget _yearlyTabBody() {
+    final currentYear = DateTime.now().year;
+    final derived = _byScale['yearly']!;
     final sorted = _annualSorted();
-    return [
-      _headerSliver('annual', '年度任务', _annual.length),
-      if (!collapsed)
-        SliverList.builder(
-          itemCount: _annualYearCount,
-          itemBuilder: (context, i) {
-            final year = currentYear + i;
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(32, 8, 12, 2),
-                  child: Text('$year',
-                      style: Theme.of(context).textTheme.labelLarge),
-                ),
-                // 年度任务按 startAt 的月日在每年重复展示
-                for (final task in sorted)
-                  _TaskRow(
-                    task: task,
-                    onTap: () => _editTask(task),
-                    onToggleDone: () => _toggleDone(task),
-                    onShowSource: task.sourceMessageId == null
-                        ? null
-                        : () => _showSourceMessage(task.sourceMessageId!),
-                  ),
-              ],
-            );
-          },
-        ),
-    ];
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        if (derived.isNotEmpty) ...[
+          _sectionHeader(context, '年度尺度', derived.length),
+          for (final task in derived)
+            _TaskRow(
+              task: task,
+              onTap: () => _editTask(task),
+              onToggleDone: () => _toggleDone(task),
+              onShowSource: task.sourceMessageId == null
+                  ? null
+                  : () => _showSourceMessage(task.sourceMessageId!),
+            ),
+        ],
+        _sectionHeader(context, '年度任务', _annual.length),
+        for (var i = 0; i < _annualYearCount; i++) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(32, 8, 12, 2),
+            child: Text('${currentYear + i}年',
+                style: Theme.of(context).textTheme.labelLarge),
+          ),
+          // 年度任务按 startAt 的月日在每年重复展示
+          for (final task in sorted)
+            _TaskRow(
+              task: task,
+              onTap: () => _editTask(task),
+              onToggleDone: () => _toggleDone(task),
+              onShowSource: task.sourceMessageId == null
+                  ? null
+                  : () => _showSourceMessage(task.sourceMessageId!),
+            ),
+        ],
+        const SizedBox(height: 32),
+      ],
+    );
   }
 
-  List<Widget> _groupSlivers(String key, String title, List<Task> tasks,
-      {_GroupKind kind = _GroupKind.active}) {
-    final collapsed = _collapsed.contains(key);
-    return [
-      _headerSliver(key, title, tasks.length),
-      if (!collapsed)
-        tasks.isEmpty
-            ? const SliverToBoxAdapter(child: _EmptyHint())
-            : SliverList.builder(
-                itemCount: tasks.length,
-                itemBuilder: (context, i) {
-                  final task = tasks[i];
-                  return _TaskRow(
-                    task: task,
-                    archived: kind == _GroupKind.archived,
-                    recent: kind == _GroupKind.done && _isRecent(task),
-                    onTap: () => _editTask(task),
-                    onToggleDone: kind == _GroupKind.archived
-                        ? null
-                        : () => _toggleDone(task),
-                    onUnarchive: kind == _GroupKind.archived
-                        ? () => _unarchive(task)
-                        : null,
-                    onShowSource: task.sourceMessageId == null
-                        ? null
-                        : () => _showSourceMessage(task.sourceMessageId!),
-                  );
-                },
-              ),
-    ];
-  }
-
-  bool _isRecent(Task task) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    return now - task.updatedAt < _recentWindow.inMilliseconds;
-  }
-
-  Widget _headerSliver(String key, String title, int count) {
-    // 不用 pinned: 多个固定吸顶头挤在视口顶部会产生非法 SliverGeometry
-    //（layoutExtent > paintExtent）导致整个视口不绘制；分组头随内容滚动。
-    return SliverPersistentHeader(
-      delegate: _GroupHeaderDelegate(
-        title: title,
-        count: count,
-        collapsed: _collapsed.contains(key),
-        onToggle: () => setState(() {
-          if (!_collapsed.remove(key)) _collapsed.add(key);
-        }),
+  Widget _sectionHeader(BuildContext context, String title, int count) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+      child: Row(
+        children: [
+          Text(title, style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(width: 8),
+          Text('$count',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant)),
+        ],
       ),
     );
   }
 }
 
-enum _GroupKind { active, done, archived }
+/// 尺度页签条（设计 §3 + §10.1）：等宽段、横向可滚动、选中只改底色。
+class _ScaleTabBar extends StatelessWidget {
+  final List<String> tabs;
+  final int selected;
+  final ValueChanged<int> onChanged;
 
-class _GroupHeaderDelegate extends SliverPersistentHeaderDelegate {
-  final String title;
-  final int count;
-  final bool collapsed;
-  final VoidCallback onToggle;
-
-  _GroupHeaderDelegate({
-    required this.title,
-    required this.count,
-    required this.collapsed,
-    required this.onToggle,
+  const _ScaleTabBar({
+    required this.tabs,
+    required this.selected,
+    required this.onChanged,
   });
 
   @override
-  double get minExtent => 44;
-
-  @override
-  double get maxExtent => 44;
-
-  @override
-  Widget build(
-      BuildContext context, double shrinkOffset, bool overlapsContent) {
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surface,
-      child: InkWell(
-        onTap: onToggle,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+    return SizedBox(
+      height: 44,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: scheme.outline),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          clipBehavior: Clip.antiAlias,
           child: Row(
             children: [
-              Icon(
-                collapsed ? Icons.chevron_right : Icons.expand_more,
-                size: 20,
-                color: scheme.onSurfaceVariant,
-              ),
-              const SizedBox(width: 4),
-              Text(title, style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(width: 8),
-              Text('$count',
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(color: scheme.onSurfaceVariant)),
+              for (var i = 0; i < tabs.length; i++) ...[
+                if (i > 0) Container(width: 1, color: scheme.outline),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => onChanged(i),
+                  child: Container(
+                    width: 60,
+                    height: double.infinity,
+                    alignment: Alignment.center,
+                    color: i == selected
+                        ? scheme.secondaryContainer
+                        : Colors.transparent,
+                    child: Text(
+                      tabs[i],
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: i == selected
+                            ? scheme.onSecondaryContainer
+                            : scheme.onSurface,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
       ),
     );
   }
-
-  @override
-  bool shouldRebuild(_GroupHeaderDelegate oldDelegate) => true;
 }
 
 class _EmptyHint extends StatelessWidget {
@@ -425,11 +435,7 @@ class _EmptyHint extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(40, 6, 12, 6),
-      child:
-          Text('无', style: TextStyle(color: scheme.onSurfaceVariant)),
-    );
+    return Text('无', style: TextStyle(color: scheme.onSurfaceVariant));
   }
 }
 
@@ -473,6 +479,30 @@ class _TaskRow extends StatelessWidget {
     this.onUnarchive,
     this.onShowSource,
   });
+
+  /// 行内尺度徽标（设计 §3）：派生尺度小字 chip。
+  Widget _scaleChip(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final scale = deriveTimeScale(
+      task.startAt == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(task.startAt!),
+      task.endAt == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(task.endAt!),
+    );
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        timeScaleLabel(scale),
+        style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -532,6 +562,8 @@ class _TaskRow extends StatelessWidget {
                           ),
                         ),
                       ),
+                      const SizedBox(width: 6),
+                      _scaleChip(context),
                       if (recent) ...[
                         const SizedBox(width: 6),
                         Container(

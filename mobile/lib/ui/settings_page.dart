@@ -91,7 +91,8 @@ class _SettingsPageState extends State<SettingsPage> {
   void _toast(String text) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(text)));
+      ..showSnackBar(SnackBar(
+          content: Text(text), duration: const Duration(seconds: 2)));
   }
 
   // ---- 外观 ----

@@ -9,8 +9,9 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
-/// 日视图（设计 §2.3）：横轴 00:00-24:00，捏合缩放比例尺
-/// （最宽到每 5 分钟一个节点），名称层在甘特上方独立区域 45° 斜排。
+/// 日视图（设计 §2.3，v2.1 修订）：横轴 00:00-24:00，比例尺捏合缩放
+/// 连续跟手（双指焦点对应的时间点为锚），刻度按缩放动态档位，
+/// 时间标注斜 45° 向上；名称层在甘特上方独立区域 45° 斜排。
 ///
 /// 手势合一在一个 scale 识别器里：落在任务上是拖拽（5 分钟吸附），
 /// 落在空白是平移/捏合缩放，避免与横向滚动手势互相抢占。
@@ -39,12 +40,17 @@ class DayView extends StatefulWidget {
 }
 
 class _DayViewState extends State<DayView> {
+  /// 缩放范围（设计 §2.3）：最小 = 24h 恰好铺满可视宽（随宽度动态算），
+  /// 最大 = 每 5 分钟 48dp。
+  static const _maxPpm = 48.0 / 5;
+
+  /// 名称层显示阈值沿用原语义：每 5 分钟一个节点（节点间距 14px）才显示。
   static const _nodeSpacingPx = 14.0;
 
-  /// 当前比例尺：多少分钟一个节点（5 = 最宽）。
-  double _mpn = 30;
+  /// 当前比例尺（px/分钟）；null = 未初始化，首帧按 24h 铺满可视宽。
+  double? _ppm;
   double _scrollX = 0;
-  double _startMpn = 30;
+  double _startPpm = 0;
   double _startScrollX = 0;
   double _startFocalX = 0;
 
@@ -55,8 +61,6 @@ class _DayViewState extends State<DayView> {
   double _origEndMin = 0;
 
   Timer? _nowTimer;
-
-  double get _ppm => _nodeSpacingPx / _mpn;
 
   DateTime get _dayStart =>
       DateTime(widget.day.year, widget.day.month, widget.day.day);
@@ -70,8 +74,7 @@ class _DayViewState extends State<DayView> {
   void initState() {
     super.initState();
     // 当前时间竖线每分钟重绘
-    _nowTimer =
-        Timer.periodic(const Duration(minutes: 1), (_) => _tick());
+    _nowTimer = Timer.periodic(const Duration(minutes: 1), (_) => _tick());
   }
 
   @override
@@ -109,7 +112,7 @@ class _DayViewState extends State<DayView> {
   void _onScaleStart(ScaleStartDetails d, _DayLayout layout) {
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
-    _startMpn = _mpn;
+    _startPpm = layout.ppm;
     _startScrollX = _scrollX;
     if (hit != null) {
       final original = layout.originals[hit.taskId];
@@ -128,7 +131,7 @@ class _DayViewState extends State<DayView> {
 
   void _onScaleUpdate(ScaleUpdateDetails d, _DayLayout layout) {
     if (_dragOriginal != null) {
-      final raw = (d.localFocalPoint.dx - _startFocalX) / _ppm;
+      final raw = (d.localFocalPoint.dx - _startFocalX) / layout.ppm;
       final snapped = (raw / 5).round() * 5.0;
       setState(() {
         switch (_dragMode!) {
@@ -140,16 +143,21 @@ class _DayViewState extends State<DayView> {
             _deltaMin =
                 snapped.clamp(-_origStartMin, _origEndMin - _origStartMin - 5);
           case _DragMode.resizeEnd:
-            _deltaMin =
-                snapped.clamp(_origStartMin - _origEndMin + 5, 1440 - _origEndMin);
+            _deltaMin = snapped.clamp(
+                _origStartMin - _origEndMin + 5, 1440 - _origEndMin);
         }
       });
       return;
     }
+    // 平移 + 无级缩放，以双指焦点对应的时间点为锚（焦点下时间不动）
+    final minPpm = layout.viewW / 1440;
+    final newPpm = (_startPpm * d.scale).clamp(minPpm, _maxPpm);
+    final focalMin = (_startScrollX + _startFocalX) / _startPpm;
+    final newScrollX = focalMin * newPpm - d.localFocalPoint.dx;
     setState(() {
-      _scrollX = (_startScrollX - (d.localFocalPoint.dx - _startFocalX))
-          .clamp(0.0, math.max(0.0, layout.contentW - layout.viewW));
-      _mpn = (_startMpn / d.scale).clamp(5.0, 60.0);
+      _ppm = newPpm;
+      _scrollX = newScrollX.clamp(
+          0.0, math.max(0.0, 1440 * newPpm - layout.viewW));
     });
   }
 
@@ -158,11 +166,12 @@ class _DayViewState extends State<DayView> {
     final mode = _dragMode;
     if (original != null && mode != null && _deltaMin != 0) {
       final deltaMs = (_deltaMin * 60000).round();
-      final newStart = original.startAt! +
-          (mode == _DragMode.resizeEnd ? 0 : deltaMs);
+      final newStart =
+          original.startAt! + (mode == _DragMode.resizeEnd ? 0 : deltaMs);
       final oe = original.endAt;
-      final newEnd =
-          oe == null ? null : oe + (mode == _DragMode.resizeStart ? 0 : deltaMs);
+      final newEnd = oe == null
+          ? null
+          : oe + (mode == _DragMode.resizeStart ? 0 : deltaMs);
       widget.onTaskMoved(original, newStart, newEnd);
     }
     setState(() {
@@ -182,10 +191,10 @@ class _DayViewState extends State<DayView> {
 
   void _onLongPress(LongPressStartDetails d, _DayLayout layout) {
     if (layout.hitTest(d.localPosition) != null) return;
-    final minute = ((d.localPosition.dx + _scrollX) / _ppm / 5).round() * 5;
+    final minute =
+        ((d.localPosition.dx + _scrollX) / layout.ppm / 5).round() * 5;
     if (minute < 0 || minute > 1435) return;
-    widget.onBlankLongPress(
-        _dayStart.millisecondsSinceEpoch + minute * 60000);
+    widget.onBlankLongPress(_dayStart.millisecondsSinceEpoch + minute * 60000);
   }
 
   @override
@@ -201,15 +210,18 @@ class _DayViewState extends State<DayView> {
     final display = _displayTasks();
     return LayoutBuilder(
       builder: (context, constraints) {
+        final minPpm = constraints.maxWidth / 1440;
+        // 未初始化时 24h 恰好铺满；窗口变宽后钳制回合法范围
+        final ppm = (_ppm ?? minPpm).clamp(minPpm, _maxPpm);
         final layout = _DayLayout.build(
           viewW: constraints.maxWidth,
           viewH: constraints.maxHeight,
           day: _dayStart,
           tasks: display,
           originals: {for (final t in widget.tasks) t.id: t},
-          ppm: _ppm,
-          scrollX: _scrollX,
-          mpn: _mpn,
+          ppm: ppm,
+          scrollX: _scrollX.clamp(
+              0.0, math.max(0.0, 1440 * ppm - constraints.maxWidth)),
           scheme: scheme,
           nameStyle: nameStyle,
           measure: measure,
@@ -265,7 +277,8 @@ class _DayItem {
 }
 
 class _DayLayout {
-  static const headerH = 18.0;
+  /// 刻度带高度：容纳斜 45° 向上的时间标注。
+  static const headerH = 44.0;
   static const laneH = 40.0;
   static const nameLayerH = 100.0;
 
@@ -274,8 +287,10 @@ class _DayLayout {
   final double contentW;
   final double ppm;
   final double scrollX;
-  final double mpn;
   final double namesH; // 0 = 名称层整体隐藏
+  final int majorTickMin;
+  final int? minorTickMin;
+  final int labelStride;
   final DateTime day;
   final List<_DayItem> items;
   final Map<String, DayNameSlot> nameSlots;
@@ -292,8 +307,10 @@ class _DayLayout {
     required this.contentW,
     required this.ppm,
     required this.scrollX,
-    required this.mpn,
     required this.namesH,
+    required this.majorTickMin,
+    required this.minorTickMin,
+    required this.labelStride,
     required this.day,
     required this.items,
     required this.nameSlots,
@@ -319,7 +336,6 @@ class _DayLayout {
     required Map<String, Task> originals,
     required double ppm,
     required double scrollX,
-    required double mpn,
     required ColorScheme scheme,
     required TextStyle nameStyle,
     required double Function(String) measure,
@@ -327,8 +343,10 @@ class _DayLayout {
   }) {
     final dayStartMs = day.millisecondsSinceEpoch;
     final contentW = 1440 * ppm;
+    final (majorTickMin, minorTickMin, labelStride) = dayTickInterval(ppm);
 
-    // 名称空位：把任务钳制到当天后交给纯函数分配
+    // 名称空位：把任务钳制到当天后交给纯函数分配；
+    // 阈值沿用原语义——每 5 分钟一个节点（14px/节点 ⇔ ppm ≥ 2.8）才显示
     final clamped = <Task>[];
     for (final t in tasks) {
       final s = t.startAt;
@@ -339,7 +357,8 @@ class _DayLayout {
       clamped.add(t.copyWith(startAt: () => cs, endAt: () => ce));
     }
     final slots = assignDayNames(clamped,
-        minutesPerNode: mpn, measureText: measure);
+        minutesPerNode: _DayViewState._nodeSpacingPx / ppm,
+        measureText: measure);
     final nameSlots = {for (final s in slots) s.taskId: s};
     final anyVisible = slots.any((e) => e.visible);
     final namesH = anyVisible ? nameLayerH : 0.0;
@@ -407,8 +426,10 @@ class _DayLayout {
       contentW: contentW,
       ppm: ppm,
       scrollX: scrollX,
-      mpn: mpn,
       namesH: namesH,
+      majorTickMin: majorTickMin,
+      minorTickMin: minorTickMin,
+      labelStride: labelStride,
       day: day,
       items: items,
       nameSlots: nameSlots,
@@ -447,40 +468,15 @@ class _DayPainter extends CustomPainter {
     // 泳道底色
     for (var i = 0; i < 3; i++) {
       canvas.drawRect(
-        Rect.fromLTWH(0, ganttTop + i * _DayLayout.laneH, size.width,
-            _DayLayout.laneH),
+        Rect.fromLTWH(
+            0, ganttTop + i * _DayLayout.laneH, size.width, _DayLayout.laneH),
         Paint()
           ..color = priorityColor(scheme, _DayLayout._priorities[i])
               .withValues(alpha: 0.05),
       );
     }
 
-    // 刻度：每小时竖格线 + 标签；每 30 分钟一个刻度点（只画可视范围）
-    final labelStyle =
-        TextStyle(fontSize: 10, color: scheme.onSurfaceVariant);
-    final firstHour = math.max(0, (scrollX / ppm / 60).floor());
-    final lastHour = math.min(24, ((scrollX + size.width) / ppm / 60).ceil());
-    final gridPaint = Paint()
-      ..color = scheme.outlineVariant.withValues(alpha: 0.6)
-      ..strokeWidth = 0.5;
-    for (var h = firstHour; h <= lastHour; h++) {
-      final x = h * 60 * ppm - scrollX;
-      canvas.drawLine(
-          Offset(x, top), Offset(x, size.height), gridPaint);
-      final tp = TextPainter(
-        text: TextSpan(text: '$h:00', style: labelStyle),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(x + 2, top + 3));
-    }
-    final firstTick = math.max(0, (scrollX / ppm / 30).floor());
-    final lastTick = math.min(48, ((scrollX + size.width) / ppm / 30).ceil());
-    final tickPaint = Paint()..color = scheme.onSurfaceVariant;
-    for (var t = firstTick; t <= lastTick; t++) {
-      final x = t * 30 * ppm - scrollX;
-      canvas.drawCircle(
-          Offset(x, ganttTop - 4), 1.5, tickPaint);
-    }
+    _drawTicks(canvas, size, top, ganttTop);
 
     // 任务：时间点=节点；时间段=带断点方块的线段
     for (final it in layout.items) {
@@ -558,6 +554,63 @@ class _DayPainter extends CustomPainter {
             ..strokeWidth = 1.5,
         );
       }
+    }
+  }
+
+  /// 动态刻度（设计 §2.3，v2.1）：主刻度 = 长竖格线 + 刻度短线 + 斜 45°
+  /// 时间标注（过挤按 2 的幂隔一个显示）；次刻度 = 短刻度线。
+  void _drawTicks(Canvas canvas, Size size, double top, double ganttTop) {
+    final scheme = layout.scheme;
+    final ppm = layout.ppm;
+    final scrollX = layout.scrollX;
+    final major = layout.majorTickMin;
+    final minor = layout.minorTickMin;
+    final gridPaint = Paint()
+      ..color = scheme.outlineVariant.withValues(alpha: 0.6)
+      ..strokeWidth = 0.5;
+    final tickPaint = Paint()
+      ..color = scheme.onSurfaceVariant
+      ..strokeWidth = 1;
+    final labelStyle =
+        TextStyle(fontSize: 10, color: scheme.onSurfaceVariant);
+
+    // 次刻度短线（只画可视范围，落在主刻度上的跳过）
+    if (minor != null) {
+      final firstMinor =
+          math.max(0, (scrollX / ppm / minor).floor());
+      final lastMinor = math.min(
+          1440 ~/ minor, ((scrollX + size.width) / ppm / minor).ceil());
+      for (var t = firstMinor; t <= lastMinor; t++) {
+        if (t * minor % major == 0) continue;
+        final x = t * minor * ppm - scrollX;
+        canvas.drawLine(
+            Offset(x, ganttTop - 3), Offset(x, ganttTop), tickPaint);
+      }
+    }
+
+    // 主刻度：竖格线 + 刻度短线 + 斜 45° 标注
+    final firstMajor = math.max(0, (scrollX / ppm / major).floor());
+    final lastMajor = math.min(
+        1440 ~/ major, ((scrollX + size.width) / ppm / major).ceil());
+    for (var t = firstMajor; t <= lastMajor; t++) {
+      final minute = t * major;
+      final x = minute * ppm - scrollX;
+      canvas.drawLine(Offset(x, top), Offset(x, size.height), gridPaint);
+      canvas.drawLine(
+          Offset(x, ganttTop - 6), Offset(x, ganttTop), tickPaint);
+      if (t % layout.labelStride != 0) continue;
+      final h = minute ~/ 60;
+      final m = (minute % 60).toString().padLeft(2, '0');
+      final tp = TextPainter(
+        text: TextSpan(text: '$h:$m', style: labelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      // 锚在刻度点，旋转 -45° 向右上延伸
+      canvas.save();
+      canvas.translate(x + 2, ganttTop - 8);
+      canvas.rotate(-math.pi / 4);
+      tp.paint(canvas, Offset(2, -tp.height + 1));
+      canvas.restore();
     }
   }
 

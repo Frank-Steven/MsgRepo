@@ -10,6 +10,7 @@ import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
 import 'ui/messages/messages_page.dart';
 import 'ui/notes/notes_page.dart';
+import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/todos/todos_page.dart';
 
@@ -117,12 +118,13 @@ class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
+  final _scheduleKey = GlobalKey<SchedulePageState>();
   final _todosKey = GlobalKey<TodosPageState>();
   final _notesKey = GlobalKey<NotesPageState>();
   final _messagesKey = GlobalKey<MessagesPageState>();
 
   late final _pages = [
-    const _SchedulePlaceholder(),
+    SchedulePage(key: _scheduleKey),
     TodosPage(key: _todosKey),
     NotesPage(key: _notesKey),
     MessagesPage(key: _messagesKey),
@@ -140,6 +142,8 @@ class _HomeShellState extends State<HomeShell> {
         onDestinationSelected: (i) {
           setState(() => _index = i);
           switch (i) {
+            case 0:
+              _scheduleKey.currentState?.reload();
             case 1:
               _todosKey.currentState?.reload();
             case 2:
@@ -160,19 +164,6 @@ class _HomeShellState extends State<HomeShell> {
               icon: Icon(Icons.settings_outlined), label: '设置'),
         ],
       ),
-    );
-  }
-}
-
-/// 日程占位页（阶段 4 接入三视图）。
-class _SchedulePlaceholder extends StatelessWidget {
-  const _SchedulePlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('日程')),
-      body: const Center(child: Text('日程视图将在阶段 4 接入')),
     );
   }
 }
