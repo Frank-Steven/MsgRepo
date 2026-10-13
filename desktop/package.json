@@ -4,19 +4,57 @@
   "private": true,
   "description": "MsgRepo 电脑端：接收手机通知，用本地 AI 结构化为日程/待办/笔记",
   "type": "module",
+  "main": "dist/electron-main.js",
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts start",
     "connect": "tsx src/connect.ts",
     "pair": "tsx src/index.ts pair",
-    "demo": "tsx src/index.ts demo"
+    "demo": "tsx src/index.ts demo",
+    "icons": "node scripts/make-icons.mjs",
+    "electron": "tsc && electron .",
+    "dist": "tsc && electron-builder"
   },
   "dependencies": {
     "ajv": "^8.17.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0"
+  },
+  "build": {
+    "appId": "dev.msgrepo.desktop",
+    "productName": "MsgRepo",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "config/default.json",
+      "assets/**/*",
+      "!data/**",
+      "!config/local.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../shared",
+        "to": "shared"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/icon.png",
+      "identity": null,
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    }
   }
 }

@@ -1,11 +1,9 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { loadConfig } from "./config.js";
 import { DESKTOP_ROOT } from "./registry.js";
 import { loadOrCreatePairing } from "./auth.js";
-
-const run = promisify(execFile);
+import { deviceState, ensureReverse } from "./adb.js";
 
 /**
  * 一键连接看护：起服务（如未运行）→ 检测手机授权 → 建立 adb reverse →
@@ -56,41 +54,6 @@ async function ensureServer(): Promise<void> {
   throw new Error("服务拉起超时");
 }
 
-type DeviceState = "ok" | "unauthorized" | "absent";
-
-async function deviceState(): Promise<DeviceState> {
-  try {
-    const { stdout } = await run("adb", ["devices"]);
-    const lines = stdout.trim().split("\n").slice(1);
-    for (const line of lines) {
-      if (line.includes("\tdevice")) return "ok";
-      if (line.includes("unauthorized")) return "unauthorized";
-    }
-    return "absent";
-  } catch {
-    return "absent";
-  }
-}
-
-async function reverseEstablished(): Promise<boolean> {
-  try {
-    const { stdout } = await run("adb", ["reverse", "--list"]);
-    return stdout.includes(`tcp:${PORT}`);
-  } catch {
-    return false;
-  }
-}
-
-async function ensureReverse(): Promise<boolean> {
-  if (await reverseEstablished()) return true;
-  try {
-    await run("adb", ["reverse", `tcp:${PORT}`, `tcp:${PORT}`]);
-    return await reverseEstablished();
-  } catch {
-    return false;
-  }
-}
-
 let lastState = "";
 
 async function tick(): Promise<void> {
@@ -109,7 +72,7 @@ async function tick(): Promise<void> {
     return;
   }
 
-  if (!(await ensureReverse())) {
+  if (!(await ensureReverse(PORT))) {
     if (lastState !== "reverse-fail") log(`adb reverse 建立失败，重试中…`);
     lastState = "reverse-fail";
     return;

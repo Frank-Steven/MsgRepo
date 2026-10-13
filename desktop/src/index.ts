@@ -5,28 +5,12 @@ import { loadOrCreatePairing, PairingManager } from "./auth.js";
 import { Store } from "./store.js";
 import { createServer } from "./server.js";
 import { runPipeline } from "./pipeline.js";
-import { loadConfig, type Config } from "./config.js";
-import type { AIProvider } from "./ai/provider.js";
+import { loadConfig } from "./config.js";
+import { createProvider } from "./ai/factory.js";
 import { MockProvider } from "./ai/mock.js";
-import { OllamaProvider } from "./ai/ollama.js";
-import { OpenAICompatProvider } from "./ai/openai-compat.js";
 import type { RawMessage, StructuredItem } from "./types.js";
 
 const DATA_DIR = path.join(DESKTOP_ROOT, "data");
-
-function createProvider(cfg: Config): AIProvider {
-  switch (cfg.provider) {
-    case "ollama":
-      return new OllamaProvider(cfg.ollama);
-    case "openai-compatible":
-      return new OpenAICompatProvider({
-        ...cfg.openai,
-        apiKey: process.env[cfg.openai.apiKeyEnv],
-      });
-    default:
-      return new MockProvider();
-  }
-}
 
 function contentHash(packageName: string, title: string, body: string, postedAt: number): string {
   return createHash("sha256").update(`${packageName}|${title}|${body}|${postedAt}`).digest("hex");
