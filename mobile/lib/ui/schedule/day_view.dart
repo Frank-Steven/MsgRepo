@@ -286,10 +286,13 @@ class DayViewState extends State<DayView> {
       builder: (context, constraints) {
         _viewW = constraints.maxWidth;
         final minPpm = constraints.maxWidth / 1440;
-        final ppm = (_ppm ?? minPpm).clamp(minPpm, _maxPpm);
+        // _ppm 必须在此初始化：_reportWindow 依赖它，若保持 null
+        // 则 onCenterChanged/onVisibleWindowChanged 永不上报（标题与内容脱节）
+        _ppm = (_ppm ?? minPpm).clamp(minPpm, _maxPpm);
+        final ppm = _ppm!;
         if (!_positioned) {
-          // 首帧：当前时刻定位在 1/3 屏宽处
-          _scrollMin = (_nowMin - constraints.maxWidth / (3 * ppm))
+          // 首帧：当前时刻居中
+          _scrollMin = (_nowMin - constraints.maxWidth / (2 * ppm))
               .clamp(0.0, _maxMin);
           _positioned = true;
           WidgetsBinding.instance.addPostFrameCallback((_) => _reportWindow());

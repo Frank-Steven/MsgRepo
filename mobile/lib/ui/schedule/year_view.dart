@@ -133,8 +133,9 @@ class YearViewState extends State<YearView> {
   void _jumpToYear(int year) {
     if (!_scroll.hasClients || _itemExtent <= 0) return;
     final idx = itemIndexForUnit(year - _baseYear);
-    final target = idx * _itemExtent -
-        (_scroll.position.viewportDimension - _itemExtent) / 2;
+    // 顶对齐（留 4px 边距）：itemExtent 常大于视口高，居中会把
+    // 年网格第一行顶出屏幕（首行被裁）
+    final target = idx * _itemExtent - 4;
     _scroll.jumpTo(target.clamp(0.0, _scroll.position.maxScrollExtent));
     _reportWindow();
   }
@@ -152,9 +153,8 @@ class YearViewState extends State<YearView> {
             2 * _YearLayout.pad;
         _itemExtent = gridH + _yearLabelH + 8;
         if (!_scroll.hasClients) {
-          // 首帧前定位到当前年
-          final initial = _currentItemIndex * _itemExtent -
-              (constraints.maxHeight - _itemExtent) / 2;
+          // 首帧前定位到当前年（顶对齐，与 _jumpToYear 一致）
+          final initial = _currentItemIndex * _itemExtent - 4;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_scroll.hasClients) {
               _scroll.jumpTo(initial.clamp(

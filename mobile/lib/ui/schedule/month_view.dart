@@ -54,7 +54,11 @@ class MonthViewState extends State<MonthView> {
   static double get _itemExtent =>
       _labelH + _MonthLayout.headerH + _rows * _cellH;
 
-  final ScrollController _ctrl = ScrollController();
+  // 初始偏移直接落在当前月（item index 空间 = unit + infiniteScrollOffset），
+  // 避免首帧渲染到 item 0（基准年之前的远古月份）再跳变的闪烁。
+  late final ScrollController _ctrl = ScrollController(
+      initialScrollOffset:
+          itemIndexForUnit(_monthIndexOf(DateTime.now())) * _itemExtent);
   Timer? _pulseTimer;
   DateTime? _pulseDay; // 「现在」脉冲：今天所在格
 
@@ -78,18 +82,19 @@ class MonthViewState extends State<MonthView> {
 
   void _reportWindow() {
     if (!_ctrl.hasClients) return;
-    final first =
-        (_ctrl.offset / _itemExtent).floor() + infiniteScrollOffset;
+    // _ctrl.offset 处于 item index 空间（含 infiniteScrollOffset 大偏移），
+    // 映射回月份单位序号必须经 unitIndexForItem。
+    final firstItem = (_ctrl.offset / _itemExtent).floor();
     final count =
         (_ctrl.position.viewportDimension / _itemExtent).ceil() + 1;
-    final a = _monthOfIndex(first - infiniteScrollOffset);
+    final a = _monthOfIndex(unitIndexForItem(firstItem));
     final b = DateTime(a.year, a.month + count);
     widget.onVisibleWindowChanged(
         a.millisecondsSinceEpoch, b.millisecondsSinceEpoch);
-    final centerIdx =
+    final centerItem =
         ((_ctrl.offset + _ctrl.position.viewportDimension / 2) / _itemExtent)
             .floor();
-    final c = _monthOfIndex(centerIdx);
+    final c = _monthOfIndex(unitIndexForItem(centerItem));
     widget.onCenterChanged(DateTime(c.year, c.month, 15));
   }
 
@@ -114,7 +119,9 @@ class MonthViewState extends State<MonthView> {
   void _jumpToMonth(int index) {
     if (!_ctrl.hasClients) return;
     final max = _ctrl.position.maxScrollExtent;
-    _ctrl.jumpTo((index * _itemExtent - 8).clamp(0.0, max));
+    // 顶对齐目标月分段（标签行在顶部），不再留 -8 残影
+    _ctrl.jumpTo(
+        (itemIndexForUnit(index) * _itemExtent).clamp(0.0, max));
     _reportWindow();
   }
 
@@ -348,13 +355,21 @@ class _MonthItemState extends State<_MonthItem> {
       pulseDay: widget.pulseDay,
     );
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(
-        padding: const EdgeInsets.only(left: 12, top: 4, bottom: 2),
-        child: Text('${widget.year} 年 ${widget.month} 月',
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: scheme.onSurfaceVariant)),
+      // 固定高度标签行：Padding+Text 的实际高度随设备字体缩放浮动，
+      // 不定高会把 Column 顶出 itemExtent 造成 1px 溢出
+      SizedBox(
+        height: MonthViewState._labelH,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 12),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text('${widget.year} 年 ${widget.month} 月',
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurfaceVariant)),
+          ),
+        ),
       ),
       GestureDetector(
         behavior: HitTestBehavior.opaque,
