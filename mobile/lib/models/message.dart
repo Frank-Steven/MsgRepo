@@ -1,6 +1,78 @@
 import 'dart:convert';
 
-import '../models.dart';
+import 'package:crypto/crypto.dart';
+
+/// SHA-256(packageName|title|body|postedAt)，消息入库去重的统一算法。
+String computeContentHash(
+    String packageName, String title, String body, int postedAt) {
+  return sha256
+      .convert(utf8.encode('$packageName|$title|$body|$postedAt'))
+      .toString();
+}
+
+/// 附件访问方式：本地路径 / content URI / 链接 / 小程序路径等，不复制文件内容。
+class AttachmentAccess {
+  static const typeLocalPath = 'local_path';
+  static const typeContentUri = 'content_uri';
+  static const typeUrl = 'url';
+  static const typeAppDeeplink = 'app_deeplink';
+  static const typeMiniprogramPath = 'miniprogram_path';
+
+  final String type;
+  final String value;
+  final String? mimeType;
+
+  const AttachmentAccess(
+      {required this.type, required this.value, this.mimeType});
+
+  factory AttachmentAccess.fromJson(Map<String, dynamic> json) =>
+      AttachmentAccess(
+        type: json['type'] as String,
+        value: json['value'] as String,
+        mimeType: json['mimeType'] as String?,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'value': value,
+        if (mimeType != null) 'mimeType': mimeType,
+      };
+}
+
+class Attachment {
+  static const kindImage = 'image';
+  static const kindFile = 'file';
+  static const kindMiniprogram = 'miniprogram';
+  static const kindLink = 'link';
+  static const kindOther = 'other';
+
+  final String id;
+  final String kind;
+  final String? label;
+  final AttachmentAccess access;
+
+  const Attachment({
+    required this.id,
+    required this.kind,
+    this.label,
+    required this.access,
+  });
+
+  factory Attachment.fromJson(Map<String, dynamic> json) => Attachment(
+        id: json['id'] as String,
+        kind: json['kind'] as String,
+        label: json['label'] as String?,
+        access:
+            AttachmentAccess.fromJson(json['access'] as Map<String, dynamic>),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'kind': kind,
+        if (label != null) 'label': label,
+        'access': access.toJson(),
+      };
+}
 
 /// v2 消息状态：pending（未处理）→ processed（已评估）→ archived（归档）。
 class MessageStatus {
@@ -19,7 +91,6 @@ class MessagePriority {
 }
 
 /// v2 消息模型，对应设计文档 §1.1 的 messages 表。
-/// 附件与 contentHash 算法复用 v1 的 Attachment / computeContentHash。
 class Message {
   final String id;
   final String packageName;

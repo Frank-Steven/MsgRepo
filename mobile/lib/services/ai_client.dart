@@ -5,9 +5,8 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
-import '../models.dart' show CategoryRegistry;
 import '../models/message.dart';
-import 'registry_service.dart';
+import 'categories.dart';
 
 /// AI 接口配置（设计 §8.1/§9）。电脑端条目自动生成（isDesktop=true），不持久化、不可删；
 /// 远程接口以 JSON 列表存 shared_preferences。
@@ -523,7 +522,6 @@ class AiClient {
 
   Stream<AiEvent> _processOneViaRemote(
       Message msg, AiEndpoint endpoint, String customPrompt) async* {
-    final registry = await RegistryService.instance.load();
     final now = DateTime.now();
 
     final req = http.Request(
@@ -537,7 +535,7 @@ class AiClient {
       'temperature': 0,
       'stream': true,
       'messages': [
-        {'role': 'system', 'content': _buildSystemPrompt(registry, customPrompt)},
+        {'role': 'system', 'content': _buildSystemPrompt(customPrompt)},
         {'role': 'user', 'content': _buildUserContent(msg, now)},
       ],
     });
@@ -585,8 +583,9 @@ class AiClient {
   }
 
   /// 与 desktop 端 buildEvalSystemPrompt 同结构的提示词（精简 schema，设计 §8.2）。
-  String _buildSystemPrompt(CategoryRegistry registry, String customPrompt) {
-    final catList = registry.categories
+  /// 分类参考用内置的 kPromptCategories。
+  String _buildSystemPrompt(String customPrompt) {
+    final catList = kPromptCategories
         .map((c) =>
             '- ${c.key}（${c.displayName}）: ${c.description}'
             '${c.priorityHints != null ? ' 优先级提示：${c.priorityHints}' : ''}')

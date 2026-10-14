@@ -49,7 +49,7 @@ Future<void> main() async {
   // 初始化失败（如本地数据损坏）也不能阻塞 runApp，否则直接黑屏
   try {
     await ReminderService.instance.init();
-    // 进程重启后重排未来提醒（recurring 不支持调度，跳过）
+    // 进程重启后重排未来提醒（年度任务的逐年重复提醒暂不支持，跳过）
     await ReminderService.instance.rescheduleAll();
   } catch (e) {
     debugPrint('ReminderService 初始化失败: $e');

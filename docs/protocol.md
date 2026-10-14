@@ -1,3 +1,5 @@
+> 已被 docs/design-v2.md 取代，保留作历史参考。
+
 # 同步协议
 
 手机（客户端）与电脑（服务端）之间的全部通信。机器可校验的定义见 `shared/schemas/sync-request.schema.json` 与 `sync-response.schema.json`。

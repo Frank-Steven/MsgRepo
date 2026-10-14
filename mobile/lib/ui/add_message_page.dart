@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
-import '../models.dart';
 import '../models/message.dart';
 import '../services/database.dart';
 
@@ -140,28 +139,16 @@ class _AddMessagePageState extends State<AddMessagePage> {
     }
     setState(() => _saving = true);
     final postedAt = DateTime.now().millisecondsSinceEpoch;
-    final message = RawMessage(
-      id: _uuid.v4(),
-      source: const MessageSource(packageName: 'manual', appName: '手动添加'),
-      title: title,
-      body: body,
-      postedAt: postedAt,
-      captureType: RawMessage.captureManual,
-      attachments: List.of(_attachments),
-      contentHash: computeContentHash('manual', title, body, postedAt),
-    );
-    await AppDatabase.instance.insertRawMessageIfNew(message);
-    // v2 双写：同 id/同 contentHash 写入 messages 表
     await AppDatabase.instance.insertMessageIfNew(Message(
-      id: message.id,
+      id: _uuid.v4(),
       packageName: 'manual',
       appName: '手动添加',
       title: title,
       body: body,
       postedAt: postedAt,
-      captureType: RawMessage.captureManual,
+      captureType: 'manual',
       attachments: List.of(_attachments),
-      contentHash: message.contentHash,
+      contentHash: computeContentHash('manual', title, body, postedAt),
       status: MessageStatus.pending,
       priority: MessagePriority.none,
       createdAt: DateTime.now().millisecondsSinceEpoch,

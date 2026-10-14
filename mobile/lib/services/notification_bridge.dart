@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
-import '../models.dart';
 import '../models/message.dart';
 import 'database.dart';
 
@@ -100,12 +99,10 @@ class NotificationBridge {
         try {
           final map =
               jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
-          final message = _fromQueueEntry(map);
-          final isNewRaw =
-              await AppDatabase.instance.insertRawMessageIfNew(message);
-          // v2 双写：raw_messages 保留给旧页面，messages 供新消息模块使用
-          await AppDatabase.instance.insertMessageIfNew(_toV2Message(message));
-          if (isNewRaw) imported++;
+          if (await AppDatabase.instance
+              .insertMessageIfNew(_fromQueueEntry(map))) {
+            imported++;
+          }
         } catch (_) {
           // 单个文件损坏不阻塞其他文件，文件照删避免反复失败
         } finally {
@@ -133,45 +130,28 @@ class NotificationBridge {
     }
   }
 
-  /// 与 v1 RawMessage 同 id/同 contentHash 的 v2 Message（captureType=notification）。
-  Message _toV2Message(RawMessage m) => Message(
-        id: m.id,
-        packageName: m.source.packageName,
-        appName: m.source.appName,
-        channelId: m.source.channelId,
-        conversationTitle: m.source.conversationTitle,
-        sender: m.source.sender,
-        title: m.title,
-        body: m.body,
-        postedAt: m.postedAt,
-        captureType: m.captureType,
-        attachments: m.attachments,
-        contentHash: m.contentHash,
-        status: MessageStatus.pending,
-        priority: MessagePriority.none,
-        createdAt: DateTime.now().millisecondsSinceEpoch,
-      );
-
-  RawMessage _fromQueueEntry(Map<String, dynamic> map) {
+  /// 队列文件（Kotlin 通知监听器落盘）→ v2 Message（captureType=notification）。
+  Message _fromQueueEntry(Map<String, dynamic> map) {
     final packageName = map['packageName'] as String? ?? 'unknown';
     final title = map['title'] as String? ?? '';
     final body = map['text'] as String? ?? '';
     final postedAt = (map['postedTime'] as num?)?.toInt() ??
         DateTime.now().millisecondsSinceEpoch;
-    return RawMessage(
+    return Message(
       id: _uuid.v4(),
-      source: MessageSource(
-        packageName: packageName,
-        appName: map['appName'] as String?,
-        channelId: map['channelId'] as String?,
-        conversationTitle: map['conversationTitle'] as String?,
-        sender: map['sender'] as String?,
-      ),
+      packageName: packageName,
+      appName: map['appName'] as String?,
+      channelId: map['channelId'] as String?,
+      conversationTitle: map['conversationTitle'] as String?,
+      sender: map['sender'] as String?,
       title: title,
       body: body,
       postedAt: postedAt,
-      captureType: RawMessage.captureNotification,
+      captureType: 'notification',
       contentHash: computeContentHash(packageName, title, body, postedAt),
+      status: MessageStatus.pending,
+      priority: MessagePriority.none,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
     );
   }
 }

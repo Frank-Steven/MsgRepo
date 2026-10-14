@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../models.dart';
 import '../../models/note.dart';
 import '../../services/database.dart';
 import 'note_editor_page.dart';
@@ -250,7 +249,7 @@ class _NotesListPageState extends State<NotesListPage> {
                       if (firstLine.isNotEmpty)
                         Text(firstLine,
                             maxLines: 1, overflow: TextOverflow.ellipsis),
-                      Text(formatMillis(note.updatedAt),
+                      Text(_formatMillis(note.updatedAt),
                           style: Theme.of(context).textTheme.bodySmall),
                     ],
                   ),
@@ -266,4 +265,10 @@ class _NotesListPageState extends State<NotesListPage> {
             ),
     );
   }
+}
+
+String _formatMillis(int ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
 }

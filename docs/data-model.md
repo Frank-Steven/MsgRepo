@@ -1,3 +1,5 @@
+> 已被 docs/design-v2.md 取代，保留作历史参考。
+
 # 数据模型设计
 
 > 这是 MsgRepo 最核心的设计文档。机器可校验的定义见 `shared/schemas/`（JSON Schema，唯一事实源），本文解释设计意图、语义与演进规则。代码与本文冲突时，以 `shared/schemas/` 为准并修订本文。

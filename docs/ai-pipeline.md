@@ -1,3 +1,5 @@
+> 已被 docs/design-v2.md 取代，保留作历史参考。
+
 # AI 处理管线
 
 电脑端把一批 RawMessage 变成 StructuredItem 的完整流程。实现在 `desktop/src/pipeline.ts` 与 `desktop/src/ai/`。
