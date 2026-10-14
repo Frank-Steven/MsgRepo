@@ -3,7 +3,7 @@ import 'package:msgrepo_mobile/models/task.dart';
 import 'package:msgrepo_mobile/ui/schedule/layout.dart';
 
 Task _task(String id, int startMs,
-        {int? endMs, String title = '任务'}) =>
+        {int? endMs, String title = '任务', String? parentId}) =>
     Task(
       id: id,
       title: title,
@@ -12,6 +12,7 @@ Task _task(String id, int startMs,
       endAt: endMs,
       createdAt: 0,
       updatedAt: 0,
+      parentId: parentId,
     );
 
 int _ms(int year, int month, [int day = 1, int hour = 9, int minute = 0]) =>
@@ -89,6 +90,42 @@ void main() {
       ], 2026);
       expect(items.single.startMonth, 1);
       expect(items.single.endMonth, 2);
+    });
+
+    test('子任务与父任务同槽并标记 isSubtask，其他任务槽位不受影响', () {
+      final items = layoutYearLane([
+        _task('parent', _ms(2026, 1), endMs: _ms(2026, 6)),
+        _task('sub', _ms(2026, 2), endMs: _ms(2026, 3), parentId: 'parent'),
+        // 与 parent 重叠的普通任务：若无子任务逻辑本应占 slot 1
+        _task('other', _ms(2026, 3), endMs: _ms(2026, 5)),
+      ], 2026);
+      final byId = {for (final e in items) e.taskId: e};
+      expect(byId['parent']!.slot, 0);
+      expect(byId['sub']!.slot, 0); // 与父同槽，不占新槽位
+      expect(byId['sub']!.isSubtask, isTrue);
+      expect(byId['parent']!.isSubtask, isFalse);
+      expect(byId['other']!.slot, 1);
+    });
+
+    test('父任务不在本泳道时子任务按普通任务填充', () {
+      final items = layoutYearLane([
+        _task('blocker', _ms(2026, 2), endMs: _ms(2026, 4)),
+        _task('sub', _ms(2026, 3), parentId: 'absent-parent'),
+      ], 2026);
+      final byId = {for (final e in items) e.taskId: e};
+      expect(byId['blocker']!.slot, 0);
+      expect(byId['sub']!.slot, 1); // 3 月被 blocker 占据
+      expect(byId['sub']!.isSubtask, isFalse);
+    });
+
+    test('父任务与本年无交集时子任务按普通任务填充', () {
+      final items = layoutYearLane([
+        _task('parent', _ms(2025, 6)), // 不在 2026 年
+        _task('sub', _ms(2026, 3), parentId: 'parent'),
+      ], 2026);
+      expect(items.single.taskId, 'sub');
+      expect(items.single.slot, 0);
+      expect(items.single.isSubtask, isFalse);
     });
   });
 
@@ -184,6 +221,38 @@ void main() {
       expect(major, 120);
       expect(minor, isNull); // 60*0.05=3 <6
       expect(stride, 16); // 120*0.05*16=96 ≥64
+    });
+  });
+
+  group('yearTickInterval', () {
+    test('最大缩放（每年 320px）：主刻度 1 年', () {
+      final (major, minor, stride) = yearTickInterval(320);
+      expect(major, 1);
+      expect(minor, isNull); // 1 年已是最密档
+      expect(stride, 1);
+    });
+
+    test('中等缩放（每年 20px）：主刻度 5 年 + 1 年次刻度', () {
+      // 1*20=20 <64，5*20=100 ≥64
+      final (major, minor, stride) = yearTickInterval(20);
+      expect(major, 5);
+      expect(minor, 1);
+      expect(stride, 1);
+    });
+
+    test('每年 8px：主刻度 10 年，标注隔一个显示', () {
+      // 5*8=40 <64 → 主刻度 10 年；10*8=80 ≥64
+      final (major, minor, stride) = yearTickInterval(8);
+      expect(major, 10);
+      expect(minor, 5);
+      expect(stride, 1);
+    });
+
+    test('比例尺极小时次刻度省略、标注按 2 的幂隔档', () {
+      final (major, minor, stride) = yearTickInterval(0.5);
+      expect(major, 10);
+      expect(minor, isNull); // 5*0.5=2.5 <6
+      expect(stride, 16); // 10*0.5*16=80 ≥64
     });
   });
 }

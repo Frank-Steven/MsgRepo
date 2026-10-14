@@ -9,14 +9,23 @@ import '../../services/text_width.dart';
 
 /// 任务编辑器结果：task 为保存后的任务；deleted=true 表示用户在编辑器内删除。
 /// 返回 null = 用户取消。编辑器本身不写数据库，持久化与撤销注册由调用方负责。
+///
+/// 设定父任务导致父级范围扩大时（设计 §7 三选之一）：[parentExpanded] 为
+/// 扩大范围后的父任务，[parentBefore] 为原父任务（供撤销恢复）。
 class TaskEditorResult {
   final Task? task;
   final bool deleted;
+  final Task? parentExpanded;
+  final Task? parentBefore;
 
-  const TaskEditorResult.save(this.task) : deleted = false;
+  const TaskEditorResult.save(this.task,
+      {this.parentExpanded, this.parentBefore})
+      : deleted = false;
   const TaskEditorResult.delete()
       : task = null,
-        deleted = true;
+        deleted = true,
+        parentExpanded = null,
+        parentBefore = null;
 }
 
 /// 任务编辑器（设计 §7）：半屏 modal，手动编辑全部字段。
@@ -74,7 +83,6 @@ class _TaskEditorSheet extends StatefulWidget {
 
 class _TaskEditorSheetState extends State<_TaskEditorSheet> {
   static const _maxTitleWidth = 36;
-  static const _annualLimit = Duration(days: 365);
 
   late final TextEditingController _titleCtrl;
   late final TextEditingController _descCtrl;
@@ -86,6 +94,10 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
   String? _sourceMessageId;
   Message? _sourceMessage;
   bool _sourceLoaded = false;
+
+  /// 父任务（设计 §7，v2.2）：可空，仅一级；候选在 initState 加载。
+  String? _parentId;
+  List<Task> _parentCandidates = [];
 
   bool get _isEditing => widget.existing != null;
 
@@ -106,8 +118,29 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
     _priority = e?.priority ?? TaskPriority.normal;
     _isAnnual = e?.isAnnual ?? false;
     _sourceMessageId = widget.sourceMessageId ?? e?.sourceMessageId;
+    _parentId = e?.parentId;
     _titleCtrl.addListener(() => setState(() {}));
     _loadSourceMessage();
+    _loadParentCandidates();
+  }
+
+  /// 父任务候选（设计 §7）：尺度不小于本任务、排除自身/已有父级的任务
+  /// （仅一级，已有父级者不能再作父）、is_annual 年度重复任务（范围语义
+  /// 逐年平移，不宜作父）。尺度随时间编辑实时变化，尺度过滤在下拉时进行。
+  Future<void> _loadParentCandidates() async {
+    final tasks =
+        await AppDatabase.instance.getTasks(status: TaskStatus.active);
+    if (!mounted) return;
+    setState(() {
+      _parentCandidates = tasks
+          .where((t) =>
+              t.id != widget.existing?.id && t.parentId == null && !t.isAnnual)
+          .toList();
+      if (_parentId != null &&
+          !_parentCandidates.any((t) => t.id == _parentId)) {
+        _parentId = null;
+      }
+    });
   }
 
   @override
@@ -147,28 +180,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
   }
 
   void _toggleAnnual(bool value) {
-    var clamped = false;
-    setState(() {
-      _isAnnual = value;
-      if (value && _spanExceedsYear) {
-        _endAt = _startAt!.add(_annualLimit - const Duration(hours: 1));
-        clamped = true;
-      }
-    });
-    if (clamped) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(
-            content: Text('年度任务跨度不能超过一年，已自动调整结束时间'),
-            duration: Duration(seconds: 2)));
-    }
-  }
-
-  bool get _spanExceedsYear {
-    final s = _startAt;
-    final e = _endAt;
-    if (s == null || e == null) return false;
-    return e.difference(s) >= _annualLimit;
+    setState(() => _isAnnual = value);
   }
 
   Future<void> _pickDate(bool isStart) async {
@@ -256,27 +268,145 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
     );
   }
 
-  void _save() {
+  /// 父任务下拉：尺度随时间编辑实时变化，候选按当前尺度过滤
+  /// （父尺度 ≥ 子尺度；不定时子任务可选任意候选）。
+  Widget _parentDropdown() {
+    final childRank = timeScaleRank(
+        deriveTimeScale(_startAt, _kind == TaskKind.range ? _endAt : null));
+    final eligible = _parentCandidates
+        .where((t) =>
+            timeScaleRank(deriveTaskScale(t.startAt, t.endAt)) >= childRank)
+        .toList();
+    final value =
+        eligible.any((t) => t.id == _parentId) ? _parentId : null;
+    return DropdownButton<String?>(
+      value: value,
+      isExpanded: true,
+      underline: const SizedBox.shrink(),
+      items: [
+        const DropdownMenuItem(value: null, child: Text('无')),
+        for (final t in eligible)
+          DropdownMenuItem(
+            value: t.id,
+            child: Text(
+              '${t.title}（${timeScaleLabel(deriveTaskScale(t.startAt, t.endAt))}）',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+      onChanged: (v) => setState(() => _parentId = v),
+    );
+  }
+
+  /// 范围不符时的三选对话框（设计 §7）：扩大父级范围 / 缩小本级范围 / 取消。
+  Future<String?> _chooseRangeFix() {
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('范围超出父任务'),
+        content: const Text('子任务的时间范围需包含在父任务范围内。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop('cancel'),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop('shrink'),
+              child: const Text('缩小本级范围')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('expand'),
+              child: const Text('扩大父级范围')),
+        ],
+      ),
+    );
+  }
+
+  void _snack(String text) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          content: Text(text), duration: const Duration(seconds: 2)));
+  }
+
+  Future<void> _save() async {
     final title = _titleCtrl.text.trim();
     if (title.isEmpty || displayWidth(title) > _maxTitleWidth) return;
-    final start = _startAt;
+    var start = _startAt;
     DateTime? end = _kind == TaskKind.range ? _endAt : null;
+    var kind = _kind;
     if (start == null) {
       end = null;
-    } else if (_kind == TaskKind.range) {
+    } else if (kind == TaskKind.range) {
       end ??= start.add(const Duration(hours: 1));
       if (!end.isAfter(start)) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(
-              content: Text('结束时间需晚于开始时间'),
-              duration: Duration(seconds: 2)));
+        _snack('结束时间需晚于开始时间');
         return;
       }
-      if (_isAnnual && end.difference(start) >= _annualLimit) {
-        end = start.add(_annualLimit - const Duration(hours: 1));
+    }
+
+    // 父任务约束（设计 §7，v2.2）：子尺度 ≤ 父尺度；双方有时间时
+    // 子范围必须 ⊂ 父范围，不符则三选；父不定时则子必须不定时。
+    Task? parentExpanded;
+    Task? parentBefore;
+    var parentId = _parentId;
+    if (parentId != null) {
+      final candidates =
+          _parentCandidates.where((t) => t.id == parentId).toList();
+      if (candidates.isEmpty) {
+        parentId = null; // 候选已被删除/失效
+      } else {
+        final parent = candidates.first;
+        final parentRank =
+            timeScaleRank(deriveTaskScale(parent.startAt, parent.endAt));
+        final childRank = timeScaleRank(
+            deriveTimeScale(start, kind == TaskKind.range ? end : null));
+        if (childRank > parentRank) {
+          _snack('子任务尺度不能大于父任务尺度');
+          return;
+        }
+        final psMs = parent.startAt;
+        if (psMs == null && start != null) {
+          _snack('不定时父任务的子任务也必须是不定时');
+          return;
+        }
+        if (psMs != null && start != null) {
+          final peMs = parent.endAt ?? psMs;
+          var csMs = start.millisecondsSinceEpoch;
+          var ceMs =
+              kind == TaskKind.range ? end!.millisecondsSinceEpoch : csMs;
+          if (csMs < psMs || ceMs > peMs) {
+            final choice = await _chooseRangeFix();
+            if (!mounted) return;
+            if (choice == null || choice == 'cancel') return; // 中止保存
+            if (choice == 'expand') {
+              parentBefore = parent;
+              final ns = csMs < psMs ? csMs : psMs;
+              final ne = ceMs > peMs ? ceMs : peMs;
+              final staysPoint =
+                  parent.kind == TaskKind.point && ns == ne;
+              parentExpanded = parent.copyWith(
+                kind: staysPoint ? TaskKind.point : TaskKind.range,
+                startAt: () => ns,
+                endAt: () => staysPoint ? null : ne,
+              );
+            } else {
+              // 缩小本级：钳进父范围；父为点任务或钳后退化时本级变点
+              csMs = csMs.clamp(psMs, peMs);
+              ceMs = ceMs.clamp(psMs, peMs);
+              if (ceMs <= csMs || parent.kind == TaskKind.point) {
+                start = DateTime.fromMillisecondsSinceEpoch(csMs);
+                end = null;
+                kind = TaskKind.point;
+              } else {
+                start = DateTime.fromMillisecondsSinceEpoch(csMs);
+                end = DateTime.fromMillisecondsSinceEpoch(ceMs);
+              }
+            }
+          }
+        }
       }
     }
+
     final now = DateTime.now().millisecondsSinceEpoch;
     final e = widget.existing;
     final desc = _descCtrl.text.trim();
@@ -284,7 +414,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       id: e?.id ?? const Uuid().v4(),
       title: title,
       description: desc.isEmpty ? null : desc,
-      kind: _kind,
+      kind: kind,
       startAt: start?.millisecondsSinceEpoch,
       endAt: end?.millisecondsSinceEpoch,
       priority: _priority,
@@ -293,8 +423,10 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       status: e?.status ?? TaskStatus.active,
       createdAt: e?.createdAt ?? now,
       updatedAt: now,
+      parentId: parentId,
     );
-    Navigator.of(context).pop(TaskEditorResult.save(task));
+    Navigator.of(context).pop(TaskEditorResult.save(task,
+        parentExpanded: parentExpanded, parentBefore: parentBefore));
   }
 
   @override
@@ -419,10 +551,20 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            // 父任务（设计 §7，v2.2）：候选 = 尺度不小于本任务的任务，
+            // 排除自身/已有父级/年度重复任务；仅一级。
+            Row(
+              children: [
+                Text('父任务', style: Theme.of(context).textTheme.labelLarge),
+                const SizedBox(width: 12),
+                Expanded(child: _parentDropdown()),
+              ],
+            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('年度任务'),
-              subtitle: const Text('每年同一时间重复展示，跨度不能超过一年'),
+              subtitle: const Text('每年同一时间重复展示'),
               value: _isAnnual,
               onChanged: _toggleAnnual,
             ),

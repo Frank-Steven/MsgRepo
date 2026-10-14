@@ -79,4 +79,49 @@ void main() {
       expect(timeScaleLabel('其他'), '不定时'); // 兜底
     });
   });
+
+  group('deriveTaskScale', () {
+    test('毫秒时间戳包装与 deriveTimeScale 一致', () {
+      expect(
+        deriveTaskScale(
+            _d(2026, 1, 1).millisecondsSinceEpoch, null),
+        deriveTimeScale(_d(2026, 1, 1), null),
+      );
+      expect(
+        deriveTaskScale(_d(2026, 1, 1).millisecondsSinceEpoch,
+            _d(2029, 1, 1).millisecondsSinceEpoch),
+        'yearly',
+      );
+      expect(deriveTaskScale(null, null), 'untimed');
+    });
+  });
+
+  group('timeScaleRank', () {
+    test('从大到小单调，不定时最小', () {
+      const order = [
+        'yearly',
+        'quarterly',
+        'monthly',
+        'weekly',
+        'daily',
+        'timed',
+      ];
+      for (var i = 0; i < order.length - 1; i++) {
+        expect(timeScaleRank(order[i]),
+            greaterThan(timeScaleRank(order[i + 1])));
+      }
+      expect(timeScaleRank('timed'), greaterThan(timeScaleRank('untimed')));
+      expect(timeScaleRank('未知'), -1);
+    });
+  });
+
+  group('scalesForView', () {
+    test('四个视图按尺度过滤表（设计 §2）', () {
+      expect(scalesForView('yearly'), {'yearly'});
+      expect(scalesForView('year'), {'quarterly', 'monthly', 'weekly'});
+      expect(scalesForView('month'), {'weekly', 'daily'});
+      expect(scalesForView('day'), {'timed'});
+      expect(scalesForView('其他'), isEmpty);
+    });
+  });
 }

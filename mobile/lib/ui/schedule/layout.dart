@@ -18,6 +18,9 @@ class YearLaneItem {
   /// 泳道内槽位，0 起往下。
   final int slot;
 
+  /// 子任务（设计 §1.2/§3）：父任务在同泳道时与父同槽，画更小节点/更细线段。
+  final bool isSubtask;
+
   const YearLaneItem({
     required this.taskId,
     required this.startMonth,
@@ -25,6 +28,7 @@ class YearLaneItem {
     required this.extendsBefore,
     required this.extendsAfter,
     required this.slot,
+    this.isSubtask = false,
   });
 }
 
@@ -32,6 +36,9 @@ class YearLaneItem {
 /// 按开始时间升序，从 slot 0 起找第一个月份区间无重叠的槽位放下；
 /// 被更早任务占据的槽位跳过继续往下。跨年任务按钳制后的范围占位
 /// （每年独立调用本函数，跨年部分自然落到相邻年泳道的最上面槽位）。
+/// 子任务（parent_id 非空）在其父任务位于本泳道时占用与父相同的槽位
+/// （isSubtask=true，叠加绘制更小节点/更细线段，不做冲突检查）；
+/// 父不在本泳道时按普通任务参与填充。
 List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
   final yearStart = DateTime(year).millisecondsSinceEpoch;
   final yearEnd = DateTime(year + 1).millisecondsSinceEpoch;
@@ -48,6 +55,7 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
     final ce = math.max(cs, math.min(e - 1, yearEnd - 1));
     entries.add(_LaneEntry(
       taskId: t.id,
+      parentId: t.parentId,
       startMs: s,
       startMonth: DateTime.fromMillisecondsSinceEpoch(cs).month,
       endMonth: DateTime.fromMillisecondsSinceEpoch(ce).month,
@@ -55,32 +63,56 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
       extendsAfter: e >= yearEnd,
     ));
   }
-  entries.sort((a, b) {
+  int byStart(_LaneEntry a, _LaneEntry b) {
     final c = a.startMs.compareTo(b.startMs);
     return c != 0 ? c : a.taskId.compareTo(b.taskId);
-  });
+  }
+
+  final parents = entries.where((e) => e.parentId == null).toList()
+    ..sort(byStart);
+  final subtasks = entries.where((e) => e.parentId != null).toList()
+    ..sort(byStart);
   final slots = <List<(int, int)>>[];
   final result = <YearLaneItem>[];
-  for (final en in entries) {
+
+  int placeNormally(_LaneEntry en) {
     var slot = 0;
     while (true) {
       if (slot == slots.length) slots.add([]);
       final occupied = slots[slot];
-      final clash = occupied.any(
-          (iv) => en.startMonth <= iv.$2 && iv.$1 <= en.endMonth);
+      final clash = occupied
+          .any((iv) => en.startMonth <= iv.$2 && iv.$1 <= en.endMonth);
       if (!clash) {
         occupied.add((en.startMonth, en.endMonth));
-        result.add(YearLaneItem(
-          taskId: en.taskId,
-          startMonth: en.startMonth,
-          endMonth: en.endMonth,
-          extendsBefore: en.extendsBefore,
-          extendsAfter: en.extendsAfter,
-          slot: slot,
-        ));
-        break;
+        return slot;
       }
       slot++;
+    }
+  }
+
+  YearLaneItem toItem(_LaneEntry en, int slot, {bool isSubtask = false}) =>
+      YearLaneItem(
+        taskId: en.taskId,
+        startMonth: en.startMonth,
+        endMonth: en.endMonth,
+        extendsBefore: en.extendsBefore,
+        extendsAfter: en.extendsAfter,
+        slot: slot,
+        isSubtask: isSubtask,
+      );
+
+  final parentSlot = <String, int>{};
+  for (final en in parents) {
+    final slot = placeNormally(en);
+    parentSlot[en.taskId] = slot;
+    result.add(toItem(en, slot));
+  }
+  for (final en in subtasks) {
+    final ps = parentSlot[en.parentId!];
+    if (ps != null) {
+      result.add(toItem(en, ps, isSubtask: true));
+    } else {
+      result.add(toItem(en, placeNormally(en)));
     }
   }
   return result;
@@ -88,6 +120,7 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
 
 class _LaneEntry {
   final String taskId;
+  final String? parentId;
   final int startMs;
   final int startMonth;
   final int endMonth;
@@ -96,12 +129,41 @@ class _LaneEntry {
 
   const _LaneEntry({
     required this.taskId,
+    required this.parentId,
     required this.startMs,
     required this.startMonth,
     required this.endMonth,
     required this.extendsBefore,
     required this.extendsAfter,
   });
+}
+
+/// 年度视图刻度档位（设计 §2.1，v2.2）：与 [dayTickInterval] 同思路。
+///
+/// 返回 (主刻度间隔年数, 次刻度间隔年数?, 年份标注隔几个显示)：
+/// - 主刻度 = 候选 1/5/10 年中「相邻标注间距 ≥ [labelSpacingPx]」的最密档，
+///   都不满足时取 10 年；
+/// - 次刻度 = 下一更密档，间距不足 [minorSpacingPx] 时省略（null）；
+/// - 标注按 2 的幂隔一个显示（stride=1 即每个主刻度都标）。
+(int, int?, int) yearTickInterval(
+  double pxPerYear, {
+  double labelSpacingPx = 64,
+  double minorSpacingPx = 6,
+}) {
+  final ppy = math.max(pxPerYear, 1e-6);
+  const candidates = [1, 5, 10];
+  var majorIdx = candidates.indexWhere((c) => c * ppy >= labelSpacingPx);
+  if (majorIdx < 0) majorIdx = candidates.length - 1;
+  final major = candidates[majorIdx];
+  final minor =
+      majorIdx > 0 && candidates[majorIdx - 1] * ppy >= minorSpacingPx
+          ? candidates[majorIdx - 1]
+          : null;
+  var stride = 1;
+  while (major * ppy * stride < labelSpacingPx) {
+    stride *= 2;
+  }
+  return (major, minor, stride);
 }
 
 /// 日视图刻度档位（设计 §2.3，v2.1 修订）。

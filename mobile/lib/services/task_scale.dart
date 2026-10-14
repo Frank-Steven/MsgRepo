@@ -59,3 +59,34 @@ int _weekIndex(int dayNumber) {
 int _monthNumber(DateTime d) => d.year * 12 + d.month;
 
 int _quarterNumber(DateTime d) => d.year * 4 + (d.month - 1) ~/ 3;
+
+/// 毫秒时间戳包装（Task.startAt/endAt 直接传入）。
+String deriveTaskScale(int? startAt, int? endAt) => deriveTimeScale(
+    startAt == null ? null : DateTime.fromMillisecondsSinceEpoch(startAt),
+    endAt == null ? null : DateTime.fromMillisecondsSinceEpoch(endAt));
+
+/// 尺度大小序号：yearly 最大、untimed 最小（不定时不参与包含判断时为 -1）。
+int timeScaleRank(String scale) => switch (scale) {
+      'yearly' => 6,
+      'quarterly' => 5,
+      'monthly' => 4,
+      'weekly' => 3,
+      'daily' => 2,
+      'timed' => 1,
+      _ => -1,
+    };
+
+/// 各日程视图放行的尺度集合（设计 §2 尺度过滤表）。
+///
+/// - 'yearly'（年度视图）：yearly 节点/线段 + is_annual 逐年节点；
+/// - 'year'（年视图）：quarterly / monthly / weekly；
+/// - 'month'（月视图）：weekly / daily；
+/// - 'day'（日视图）：timed。
+/// 不定时任务不进任何日程视图。
+Set<String> scalesForView(String view) => switch (view) {
+      'yearly' => {'yearly'},
+      'year' => {'quarterly', 'monthly', 'weekly'},
+      'month' => {'weekly', 'daily'},
+      'day' => {'timed'},
+      _ => const {},
+    };

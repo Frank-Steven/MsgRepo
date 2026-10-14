@@ -264,6 +264,9 @@ class _DayItem {
   final bool startInDay;
   final bool endInDay;
 
+  /// 子任务（父任务在同泳道可见时与父同 y，画更小节点/更细线段）。
+  final bool isSubtask;
+
   const _DayItem({
     required this.task,
     required this.x1,
@@ -273,6 +276,7 @@ class _DayItem {
     required this.isPoint,
     required this.startInDay,
     required this.endInDay,
+    this.isSubtask = false,
   });
 }
 
@@ -372,9 +376,18 @@ class _DayLayout {
     for (final t in clamped) {
       final s = t.startAt!;
       final e = t.endAt;
-      final laneIdx = _priorities.contains(t.priority)
+      var laneIdx = _priorities.contains(t.priority)
           ? _priorities.indexOf(t.priority)
           : 1;
+      // 子任务：父任务在本视图可见时用父的泳道 y（设计 §3）
+      final pid = t.parentId;
+      final parent = pid == null ? null : originals[pid];
+      final isSubtask = parent != null;
+      if (parent != null) {
+        laneIdx = _priorities.contains(parent.priority)
+            ? _priorities.indexOf(parent.priority)
+            : 1;
+      }
       final startMin = (s - dayStartMs) / 60000.0;
       final endMin = e == null ? startMin : (e - dayStartMs) / 60000.0;
       spans[t.id] = (startMin, endMin);
@@ -389,9 +402,11 @@ class _DayLayout {
         isPoint: e == null,
         startInDay: s >= dayStartMs,
         endInDay: e == null || e <= dayStartMs + 86400000,
+        isSubtask: isSubtask,
       ));
     }
-    for (final it in items) {
+    // 命中区域：子任务在前（与父同 y 叠加时优先命中子任务）
+    for (final it in [...items.where((i) => i.isSubtask), ...items.where((i) => !i.isSubtask)]) {
       if (it.isPoint) {
         hitRegions.add(_HitRegion(
             Rect.fromCircle(center: Offset(it.x1, it.y), radius: 12),
@@ -478,27 +493,29 @@ class _DayPainter extends CustomPainter {
 
     _drawTicks(canvas, size, top, ganttTop);
 
-    // 任务：时间点=节点；时间段=带断点方块的线段
+    // 任务：时间点=节点；时间段=带断点方块的线段；子任务画更小节点/更细线
     for (final it in layout.items) {
       if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
       final done = it.task.status == TaskStatus.done;
       final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
       if (it.isPoint) {
-        canvas.drawCircle(Offset(it.x1, it.y), 5, Paint()..color = color);
+        canvas.drawCircle(Offset(it.x1, it.y), it.isSubtask ? 3.5 : 5,
+            Paint()..color = color);
       } else {
         canvas.drawLine(
           Offset(it.x1, it.y),
           Offset(it.x2, it.y),
           Paint()
             ..color = color
-            ..strokeWidth = 3
+            ..strokeWidth = it.isSubtask ? 1.5 : 3
             ..strokeCap = StrokeCap.round,
         );
+        final breakSize = it.isSubtask ? 5.0 : 8.0;
         if (it.startInDay) {
-          _drawBreak(canvas, it.x1, it.y, color);
+          _drawBreak(canvas, it.x1, it.y, color, breakSize);
         }
         if (it.endInDay) {
-          _drawBreak(canvas, it.x2, it.y, color);
+          _drawBreak(canvas, it.x2, it.y, color, breakSize);
         }
       }
     }
@@ -509,6 +526,7 @@ class _DayPainter extends CustomPainter {
         ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
         ..strokeWidth = 1;
       for (final it in layout.items) {
+        if (it.isSubtask) continue; // 子任务不显示名称（与父同 y 叠加）
         final slot = layout.nameSlots[it.task.id];
         if (slot == null || !slot.visible) continue;
         final anchorX = slot.centerMinutes * ppm - scrollX;
@@ -615,9 +633,10 @@ class _DayPainter extends CustomPainter {
   }
 
   /// 时间段端点的断点方块。
-  void _drawBreak(Canvas canvas, double x, double y, Color color) {
+  void _drawBreak(Canvas canvas, double x, double y, Color color,
+      [double size = 8]) {
     canvas.drawRect(
-      Rect.fromCenter(center: Offset(x, y), width: 8, height: 8),
+      Rect.fromCenter(center: Offset(x, y), width: size, height: size),
       Paint()..color = color,
     );
   }

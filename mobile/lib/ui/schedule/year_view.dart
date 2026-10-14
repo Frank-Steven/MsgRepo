@@ -122,13 +122,11 @@ class _YearViewState extends State<YearView> {
           _dragStartMonth = start0 + 1;
           _dragEndMonth = start0 + 1 + span;
         case _DragMode.resizeStart:
-          // 钳制：跨度 < 1 整年（<= 11 个月）
-          final start0 =
-              mp.round().clamp(_origEndMonth - 1 - 11, _origEndMonth - 1);
-          _dragStartMonth = start0.clamp(0, 11) + 1;
+          // v2.2 取消跨度钳制：只受网格界与本端点次序约束
+          final start0 = mp.round().clamp(0, _origEndMonth - 1);
+          _dragStartMonth = start0 + 1;
         case _DragMode.resizeEnd:
-          final end0 =
-              mp.round().clamp(_origStartMonth - 1, _origStartMonth - 1 + 11);
+          final end0 = mp.round().clamp(_origStartMonth - 1, 12);
           _dragEndMonth = end0.clamp(0, 11) + 1;
       }
     });
@@ -385,12 +383,15 @@ class _YearLayout {
         final avail =
             (slotNextX[li.taskId] ?? (width - pad)) - nameX - 2;
         final done = task.status == TaskStatus.done;
-        final tp = TextPainter(
-          text: TextSpan(
-              text: task.title, style: done ? doneNameStyle : nameStyle),
-          textDirection: TextDirection.ltr,
-          maxLines: 1,
-        )..layout();
+        // 子任务（与父同槽叠加）不画名称
+        final tp = li.isSubtask
+            ? null
+            : (TextPainter(
+                text: TextSpan(
+                    text: task.title, style: done ? doneNameStyle : nameStyle),
+                textDirection: TextDirection.ltr,
+                maxLines: 1,
+              )..layout());
         items.add(_YearItem(
           task: task,
           lane: li,
@@ -399,13 +400,18 @@ class _YearLayout {
           y: y,
           color: color,
           nameX: nameX,
-          name: tp.width <= avail ? tp : null,
+          name: tp != null && tp.width <= avail ? tp : null,
         ));
       }
     }
 
+    // 命中区域：子任务在前（与父同槽叠加时优先命中子任务）
     final hitRegions = <_HitRegion>[];
-    for (final it in items) {
+    final hitOrdered = [
+      ...items.where((i) => i.lane.isSubtask),
+      ...items.where((i) => !i.lane.isSubtask),
+    ];
+    for (final it in hitOrdered) {
       final isSegment = it.lane.startMonth != it.lane.endMonth ||
           it.lane.extendsBefore ||
           it.lane.extendsAfter;
@@ -536,7 +542,7 @@ class _YearPainter extends CustomPainter {
       tp.paint(canvas, Offset(rect.left + 6, rect.top + 3));
     }
 
-    // 任务节点/线段/名称
+    // 任务节点/线段/名称；子任务画更小节点/更细线段（与父同槽叠加）
     for (final it in layout.items) {
       final done = it.task.status == TaskStatus.done;
       final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
@@ -549,13 +555,16 @@ class _YearPainter extends CustomPainter {
           Offset(it.x2, it.y),
           Paint()
             ..color = color
-            ..strokeWidth = 2.5
+            ..strokeWidth = it.lane.isSubtask ? 1.5 : 2.5
             ..strokeCap = StrokeCap.round,
         );
-        _drawEnd(canvas, it.x1, it.y, color, it.lane.extendsBefore, true);
-        _drawEnd(canvas, it.x2, it.y, color, it.lane.extendsAfter, false);
+        _drawEnd(canvas, it.x1, it.y, color, it.lane.extendsBefore, true,
+            it.lane.isSubtask);
+        _drawEnd(canvas, it.x2, it.y, color, it.lane.extendsAfter, false,
+            it.lane.isSubtask);
       } else {
-        canvas.drawCircle(Offset(it.x1, it.y), _nodeR, Paint()..color = color);
+        canvas.drawCircle(Offset(it.x1, it.y),
+            it.lane.isSubtask ? _nodeR - 1.5 : _nodeR, Paint()..color = color);
       }
       final name = it.name;
       if (name != null) {
@@ -566,9 +575,11 @@ class _YearPainter extends CustomPainter {
 
   /// 端点：普通端点画圆点；延伸出年边界的端点画斜切箭头指出边界。
   void _drawEnd(Canvas canvas, double x, double y, Color color,
-      bool extendsOut, bool isStart) {
+      bool extendsOut, bool isStart,
+      [bool isSubtask = false]) {
     if (!extendsOut) {
-      canvas.drawCircle(Offset(x, y), _nodeR, Paint()..color = color);
+      canvas.drawCircle(Offset(x, y), isSubtask ? _nodeR - 1.5 : _nodeR,
+          Paint()..color = color);
       return;
     }
     final dir = isStart ? -1.0 : 1.0;

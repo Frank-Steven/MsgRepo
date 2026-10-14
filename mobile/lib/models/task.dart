@@ -34,6 +34,9 @@ class Task {
   final String priority;
   final bool isAnnual;
   final String? sourceMessageId;
+
+  /// 父任务（v2.2，可空，仅一级子任务）。
+  final String? parentId;
   final String status;
   final int createdAt;
   final int updatedAt;
@@ -48,6 +51,7 @@ class Task {
     this.priority = TaskPriority.normal,
     this.isAnnual = false,
     this.sourceMessageId,
+    this.parentId,
     this.status = TaskStatus.active,
     required this.createdAt,
     required this.updatedAt,
@@ -79,6 +83,7 @@ class Task {
         priority: row['priority'] as String,
         isAnnual: (row['is_annual'] as num? ?? 0) != 0,
         sourceMessageId: row['source_message_id'] as String?,
+        parentId: row['parent_id'] as String?,
         status: row['status'] as String,
         createdAt: (row['created_at'] as num).toInt(),
         updatedAt: (row['updated_at'] as num).toInt(),
@@ -94,6 +99,7 @@ class Task {
         'priority': priority,
         'is_annual': isAnnual ? 1 : 0,
         'source_message_id': sourceMessageId,
+        'parent_id': parentId,
         'status': status,
         'created_at': createdAt,
         'updated_at': updatedAt,
@@ -109,6 +115,7 @@ class Task {
     String? priority,
     bool? isAnnual,
     String? Function()? sourceMessageId,
+    String? Function()? parentId,
     String? status,
     int? createdAt,
     int? updatedAt,
@@ -125,6 +132,7 @@ class Task {
         sourceMessageId: sourceMessageId != null
             ? sourceMessageId()
             : this.sourceMessageId,
+        parentId: parentId != null ? parentId() : this.parentId,
         status: status ?? this.status,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,

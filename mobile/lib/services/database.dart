@@ -40,7 +40,7 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -58,6 +58,9 @@ class AppDatabase {
     if (oldVersion < 4) {
       await _createV4Tables(db);
       await _migrateV3ToV4(db);
+    }
+    if (oldVersion < 5) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN parent_id TEXT');
     }
   }
 
@@ -181,7 +184,8 @@ class AppDatabase {
         source_message_id TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        parent_id TEXT
       )
     ''');
     await db.execute('CREATE INDEX idx_tasks_start ON tasks(start_at)');
@@ -535,6 +539,14 @@ class AppDatabase {
     final db = await database;
     final rows = await db.query('tasks',
         where: 'is_annual = 1', orderBy: 'start_at ASC');
+    return rows.map(Task.fromRow).toList();
+  }
+
+  /// 子任务（设计 §1.2：parent_id 仅一级）。
+  Future<List<Task>> getChildTasks(String parentId) async {
+    final db = await database;
+    final rows = await db.query('tasks',
+        where: 'parent_id = ?', whereArgs: [parentId], orderBy: 'start_at ASC');
     return rows.map(Task.fromRow).toList();
   }
 

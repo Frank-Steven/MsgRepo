@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 
-import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
 import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
+import '../messages/message_widgets.dart';
 import '../tasks/task_editor.dart';
+import '../tasks/task_tile.dart';
 
 /// 待办页（设计 §3，v2.1：按时间尺度分页）：顶部尺度页签 +
 /// 各尺度 active 任务列表 + 已完成/已归档两个特殊页签。
@@ -39,6 +40,9 @@ class TodosPageState extends State<TodosPage> {
   List<Task> _done = [];
   List<Task> _archived = [];
   bool _loading = true;
+
+  /// 折叠的父任务 id（设计 §3：子任务在父行下缩进，默认展开）。
+  final Set<String> _collapsedParents = {};
 
   @override
   void initState() {
@@ -89,48 +93,12 @@ class TodosPageState extends State<TodosPage> {
   }
 
   void _showUndoSnack(String label) {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(label),
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () async {
-            await UndoService.instance.undoLatest();
-            await reload();
-          },
-        ),
-      ),
-    );
+    showUndoSnackBar(context, label, onUndone: () async => reload());
   }
 
   /// 勾选完成/取消完成；有来源消息时联动归档/恢复（设计 §3 行内勾选）。
-  Future<void> _toggleDone(Task task) async {
-    final db = AppDatabase.instance;
-    final completing = task.status != TaskStatus.done;
-    final msgId = task.sourceMessageId;
-    final oldMsgStatus =
-        msgId == null ? null : (await db.getMessageById(msgId))?.status;
-    await db.setTaskStatus(
-        [task.id], completing ? TaskStatus.done : TaskStatus.active);
-    if (msgId != null) {
-      await db.updateMessageStatus([msgId],
-          completing ? MessageStatus.archived : MessageStatus.processed);
-    }
-    UndoService.instance.register(
-      label: completing ? '已完成' : '已恢复',
-      undo: () async {
-        await db.setTaskStatus([task.id], task.status);
-        if (msgId != null && oldMsgStatus != null) {
-          await db.updateMessageStatus([msgId], oldMsgStatus);
-        }
-      },
-    );
-    await reload();
-    if (mounted) _showUndoSnack(completing ? '已完成' : '已恢复');
-  }
+  Future<void> _toggleDone(Task task) =>
+      toggleTaskDoneWithUndo(context, task, onChanged: reload);
 
   Future<void> _unarchive(Task task) async {
     final db = AppDatabase.instance;
@@ -148,10 +116,17 @@ class TodosPageState extends State<TodosPage> {
     final task = result?.task;
     if (result == null || result.deleted || task == null || !mounted) return;
     final db = AppDatabase.instance;
+    if (result.parentExpanded != null) {
+      await db.updateTask(result.parentExpanded!);
+    }
     await db.insertTask(task);
+    final parentBefore = result.parentBefore;
     UndoService.instance.register(
       label: '已新建',
-      undo: () => db.deleteTasks([task.id]),
+      undo: () async {
+        await db.deleteTasks([task.id]);
+        if (parentBefore != null) await db.updateTask(parentBefore);
+      },
     );
     await reload();
     if (mounted) _showUndoSnack('已新建');
@@ -162,18 +137,36 @@ class TodosPageState extends State<TodosPage> {
     if (result == null || !mounted) return;
     final db = AppDatabase.instance;
     if (result.deleted) {
+      // 删父任务前先把子任务升级为普通任务（parent_id 置空），
+      // 与删除合并为一个复合撤销（设计 §7）。
+      final children = await db.getChildTasks(task.id);
+      for (final c in children) {
+        await db.updateTask(c.copyWith(parentId: () => null));
+      }
       await db.deleteTasks([task.id]);
       UndoService.instance.register(
         label: '已删除',
-        undo: () => db.insertTask(task),
+        undo: () async {
+          await db.insertTask(task);
+          for (final c in children) {
+            await db.updateTask(c);
+          }
+        },
       );
       await reload();
       if (mounted) _showUndoSnack('已删除');
     } else if (result.task != null) {
+      if (result.parentExpanded != null) {
+        await db.updateTask(result.parentExpanded!);
+      }
       await db.updateTask(result.task!);
+      final parentBefore = result.parentBefore;
       UndoService.instance.register(
         label: '已保存',
-        undo: () => db.insertTask(task),
+        undo: () async {
+          await db.insertTask(task);
+          if (parentBefore != null) await db.updateTask(parentBefore);
+        },
       );
       await reload();
       if (mounted) _showUndoSnack('已保存');
@@ -274,6 +267,59 @@ class TodosPageState extends State<TodosPage> {
     }
   }
 
+  /// 子任务分组（设计 §3）：父任务在同列表时子任务附在父行下缩进，
+  /// 父不在本列表的子任务按顶级行平铺；父行可折叠（默认展开）。
+  Map<String, List<Task>> _childrenMap(List<Task> tasks) {
+    final ids = {for (final t in tasks) t.id};
+    final byParent = <String, List<Task>>{};
+    for (final t in tasks) {
+      final p = t.parentId;
+      if (p != null && ids.contains(p)) {
+        byParent.putIfAbsent(p, () => []).add(t);
+      }
+    }
+    return byParent;
+  }
+
+  List<Task> _visibleRows(List<Task> tasks, Map<String, List<Task>> byParent) {
+    final rows = <Task>[];
+    for (final t in tasks) {
+      final p = t.parentId;
+      if (p != null && byParent.containsKey(p)) continue; // 由父行带出
+      rows.add(t);
+      if (!_collapsedParents.contains(t.id)) {
+        rows.addAll(byParent[t.id] ?? const []);
+      }
+    }
+    return rows;
+  }
+
+  Widget _tileFor(Task task, Map<String, List<Task>> byParent,
+      {bool archived = false, bool recent = false}) {
+    final isChild =
+        task.parentId != null && byParent.containsKey(task.parentId);
+    final children = byParent[task.id] ?? const <Task>[];
+    return TaskTile(
+      task: task,
+      archived: archived,
+      recent: recent,
+      indent: isChild ? 24 : 0,
+      hasChildren: children.isNotEmpty,
+      collapsed: _collapsedParents.contains(task.id),
+      onToggleCollapse: () => setState(() {
+        if (!_collapsedParents.remove(task.id)) {
+          _collapsedParents.add(task.id);
+        }
+      }),
+      onTap: () => _editTask(task),
+      onToggleDone: archived ? null : () => _toggleDone(task),
+      onUnarchive: archived ? () => _unarchive(task) : null,
+      onShowSource: task.sourceMessageId == null
+          ? null
+          : () => _showSourceMessage(task.sourceMessageId!),
+    );
+  }
+
   Widget _taskListView(List<Task> tasks,
       {bool done = false, bool archived = false}) {
     if (tasks.isEmpty) {
@@ -285,23 +331,16 @@ class TodosPageState extends State<TodosPage> {
         ],
       );
     }
+    final byParent = _childrenMap(tasks);
+    final rows = _visibleRows(tasks, byParent);
     return ListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
-      itemCount: tasks.length + 1,
+      itemCount: rows.length + 1,
       itemBuilder: (context, i) {
-        if (i == tasks.length) return const SizedBox(height: 32);
-        final task = tasks[i];
-        return _TaskRow(
-          task: task,
-          archived: archived,
-          recent: done && _isRecent(task),
-          onTap: () => _editTask(task),
-          onToggleDone: archived ? null : () => _toggleDone(task),
-          onUnarchive: archived ? () => _unarchive(task) : null,
-          onShowSource: task.sourceMessageId == null
-              ? null
-              : () => _showSourceMessage(task.sourceMessageId!),
-        );
+        if (i == rows.length) return const SizedBox(height: 32);
+        final task = rows[i];
+        return _tileFor(task, byParent,
+            archived: archived, recent: done && _isRecent(task));
       },
     );
   }
@@ -311,21 +350,15 @@ class TodosPageState extends State<TodosPage> {
   Widget _yearlyTabBody() {
     final currentYear = DateTime.now().year;
     final derived = _byScale['yearly']!;
+    final derivedByParent = _childrenMap(derived);
+    final derivedRows = _visibleRows(derived, derivedByParent);
     final sorted = _annualSorted();
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       children: [
         if (derived.isNotEmpty) ...[
           _sectionHeader(context, '年度尺度', derived.length),
-          for (final task in derived)
-            _TaskRow(
-              task: task,
-              onTap: () => _editTask(task),
-              onToggleDone: () => _toggleDone(task),
-              onShowSource: task.sourceMessageId == null
-                  ? null
-                  : () => _showSourceMessage(task.sourceMessageId!),
-            ),
+          for (final task in derivedRows) _tileFor(task, derivedByParent),
         ],
         _sectionHeader(context, '年度任务', _annual.length),
         for (var i = 0; i < _annualYearCount; i++) ...[
@@ -336,14 +369,7 @@ class TodosPageState extends State<TodosPage> {
           ),
           // 年度任务按 startAt 的月日在每年重复展示
           for (final task in sorted)
-            _TaskRow(
-              task: task,
-              onTap: () => _editTask(task),
-              onToggleDone: () => _toggleDone(task),
-              onShowSource: task.sourceMessageId == null
-                  ? null
-                  : () => _showSourceMessage(task.sourceMessageId!),
-            ),
+            _tileFor(task, const {}),
         ],
         const SizedBox(height: 32),
       ],
@@ -439,177 +465,3 @@ class _EmptyHint extends StatelessWidget {
   }
 }
 
-Color _priorityColor(String priority) => switch (priority) {
-      TaskPriority.important => Colors.red,
-      TaskPriority.minor => Colors.green,
-      _ => Colors.amber,
-    };
-
-String _two(int v) => v.toString().padLeft(2, '0');
-
-String _fmtMs(int ms) {
-  final d = DateTime.fromMillisecondsSinceEpoch(ms);
-  return '${_two(d.month)}-${_two(d.day)} ${_two(d.hour)}:${_two(d.minute)}';
-}
-
-String _timeSummary(Task task) {
-  final s = task.startAt;
-  if (s == null) return '—';
-  if (task.kind == TaskKind.range && task.endAt != null) {
-    return '${_fmtMs(s)} → ${_fmtMs(task.endAt!)}';
-  }
-  return _fmtMs(s);
-}
-
-class _TaskRow extends StatelessWidget {
-  final Task task;
-  final bool archived;
-  final bool recent;
-  final VoidCallback onTap;
-  final VoidCallback? onToggleDone;
-  final VoidCallback? onUnarchive;
-  final VoidCallback? onShowSource;
-
-  const _TaskRow({
-    required this.task,
-    this.archived = false,
-    this.recent = false,
-    required this.onTap,
-    this.onToggleDone,
-    this.onUnarchive,
-    this.onShowSource,
-  });
-
-  /// 行内尺度徽标（设计 §3）：派生尺度小字 chip。
-  Widget _scaleChip(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final scale = deriveTimeScale(
-      task.startAt == null
-          ? null
-          : DateTime.fromMillisecondsSinceEpoch(task.startAt!),
-      task.endAt == null
-          ? null
-          : DateTime.fromMillisecondsSinceEpoch(task.endAt!),
-    );
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        timeScaleLabel(scale),
-        style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final done = task.status == TaskStatus.done;
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            if (!archived)
-              GestureDetector(
-                onTap: onToggleDone,
-                child: Container(
-                  width: 22,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: done ? scheme.primary : Colors.transparent,
-                    border: Border.all(
-                      width: 2,
-                      color: done ? scheme.primary : scheme.outline,
-                    ),
-                  ),
-                  child: done
-                      ? Icon(Icons.check, size: 14, color: scheme.onPrimary)
-                      : null,
-                ),
-              ),
-            if (!archived) const SizedBox(width: 10),
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _priorityColor(task.priority),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          task.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            decoration:
-                                done ? TextDecoration.lineThrough : null,
-                            color: done ? scheme.onSurfaceVariant : null,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _scaleChip(context),
-                      if (recent) ...[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 5, vertical: 1),
-                          decoration: BoxDecoration(
-                            color: scheme.primaryContainer,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text('最近',
-                              style: TextStyle(
-                                  fontSize: 10,
-                                  color: scheme.onPrimaryContainer)),
-                        ),
-                      ],
-                    ],
-                  ),
-                  Text(
-                    _timeSummary(task),
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: scheme.onSurfaceVariant),
-                  ),
-                ],
-              ),
-            ),
-            if (onShowSource != null)
-              IconButton(
-                tooltip: '查看来源消息',
-                visualDensity: VisualDensity.compact,
-                onPressed: onShowSource,
-                icon: Icon(Icons.message_outlined,
-                    size: 18, color: scheme.onSurfaceVariant),
-              ),
-            if (onUnarchive != null)
-              IconButton(
-                tooltip: '取出',
-                visualDensity: VisualDensity.compact,
-                onPressed: onUnarchive,
-                icon: Icon(Icons.unarchive_outlined,
-                    size: 20, color: scheme.onSurfaceVariant),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}

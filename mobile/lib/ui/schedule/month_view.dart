@@ -130,14 +130,12 @@ class _MonthViewState extends State<MonthView> {
           _deltaStart = start0 - _origStartIdx;
           _deltaEnd = _deltaStart;
         case _DragMode.resizeStart:
-          // 钳制：跨度 < 1 整年
-          final start0 = dp.round().clamp(
-              _origEndIdx - 364, _origEndIdx);
-          _deltaStart = start0.clamp(0, maxIdx) - _origStartIdx;
+          // v2.2 取消跨度钳制：只受网格界与本端点次序约束
+          final start0 = dp.round().clamp(0, _origEndIdx);
+          _deltaStart = start0 - _origStartIdx;
         case _DragMode.resizeEnd:
-          final end0 = dp.round().clamp(
-              _origStartIdx, _origStartIdx + 364);
-          _deltaEnd = end0.clamp(0, maxIdx) - _origEndIdx;
+          final end0 = dp.round().clamp(_origStartIdx, maxIdx);
+          _deltaEnd = end0 - _origEndIdx;
       }
     });
   }
@@ -227,6 +225,9 @@ class _CellMark {
   final bool isStartCell;
   final bool isEndCell;
 
+  /// 子任务（父任务在同视图可见时与父同 y，画更小节点/更细线段）。
+  final bool isSubtask;
+
   const _CellMark({
     required this.task,
     required this.cellIndex,
@@ -237,6 +238,7 @@ class _CellMark {
     required this.isPoint,
     required this.isStartCell,
     required this.isEndCell,
+    this.isSubtask = false,
   });
 }
 
@@ -318,6 +320,15 @@ class _MonthLayout {
       final laneIdx = _priorities.contains(t.priority)
           ? _priorities.indexOf(t.priority)
           : 1;
+      // 子任务：父任务在本视图可见时用父的泳道 y（设计 §3）
+      final pid = t.parentId;
+      final parent = pid == null ? null : originals[pid];
+      final isSubtask = parent != null;
+      final parentLaneIdx = parent == null
+          ? laneIdx
+          : (_priorities.contains(parent.priority)
+              ? _priorities.indexOf(parent.priority)
+              : 1);
       final color = priorityColor(scheme, t.priority);
       var firstCell = -1;
       var lastCell = -1;
@@ -334,7 +345,7 @@ class _MonthLayout {
         if (firstCell < 0) firstCell = i;
         lastCell = i;
         final rect = cellRect(i);
-        final y = rect.top + _marksTop + laneIdx * _laneDy + 3;
+        final y = rect.top + _marksTop + parentLaneIdx * _laneDy + 3;
         final x1 = isPoint || s >= cellStart
             ? rect.left + 6 + (rect.width - 12) * _fracOfDay(s)
             : rect.left;
@@ -353,6 +364,7 @@ class _MonthLayout {
           isPoint: isPoint,
           isStartCell: i == firstCell,
           isEndCell: false, // 先占位，循环结束后统一修正
+          isSubtask: isSubtask,
         ));
       }
       if (firstCell >= 0) {
@@ -370,13 +382,15 @@ class _MonthLayout {
               isPoint: marks[i].isPoint,
               isStartCell: marks[i].isStartCell,
               isEndCell: true,
+              isSubtask: marks[i].isSubtask,
             );
           }
         }
       }
     }
 
-    for (final m in marks) {
+    // 命中区域：子任务在前（与父同 y 叠加时优先命中子任务）
+    for (final m in [...marks.where((x) => x.isSubtask), ...marks.where((x) => !x.isSubtask)]) {
       if (m.isPoint) {
         hitRegions.add(_HitRegion(
             Rect.fromCircle(center: Offset(m.x1, m.y), radius: 10),
@@ -507,22 +521,23 @@ class _MonthPainter extends CustomPainter {
     for (final m in layout.marks) {
       final done = m.task.status == TaskStatus.done;
       final color = m.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
+      final r = m.isSubtask ? 2.0 : 3.0;
       if (m.isPoint) {
-        canvas.drawCircle(Offset(m.x1, m.y), 3, Paint()..color = color);
+        canvas.drawCircle(Offset(m.x1, m.y), r, Paint()..color = color);
       } else {
         canvas.drawLine(
           Offset(m.x1, m.y),
           Offset(m.x2, m.y),
           Paint()
             ..color = color
-            ..strokeWidth = 3
+            ..strokeWidth = m.isSubtask ? 1.5 : 3
             ..strokeCap = StrokeCap.round,
         );
         if (m.isStartCell) {
-          canvas.drawCircle(Offset(m.x1, m.y), 3, Paint()..color = color);
+          canvas.drawCircle(Offset(m.x1, m.y), r, Paint()..color = color);
         }
         if (m.isEndCell) {
-          canvas.drawCircle(Offset(m.x2, m.y), 3, Paint()..color = color);
+          canvas.drawCircle(Offset(m.x2, m.y), r, Paint()..color = color);
         }
       }
     }

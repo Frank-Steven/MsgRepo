@@ -115,13 +115,18 @@ class MessagesPageState extends State<MessagesPage> {
     );
     final task = result?.task;
     if (task == null) return;
+    if (result!.parentExpanded != null) {
+      await _db.updateTask(result.parentExpanded!);
+    }
     await _db.insertTask(task);
     await _db.setMessageLinkedTask(msg.id, task.id);
+    final parentBefore = result.parentBefore;
     UndoService.instance.register(
       label: '已创建任务',
       undo: () async {
         await _db.deleteTasks([task.id]);
         await _db.setMessageLinkedTask(msg.id, null);
+        if (parentBefore != null) await _db.updateTask(parentBefore);
       },
     );
     if (!mounted) return;
@@ -130,11 +135,23 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   /// 删除选中消息各自关联的任务，并清除链接；撤销整体回滚。
+  /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），
+  /// 与删除合并为同一个复合撤销（设计 §7）。
   Future<void> _deleteLinkedTasks(List<Message> targets) async {
     final pairs = <(Message, Task?)>[];
     for (final m in targets) {
       final id = m.linkedTaskId;
       pairs.add((m, id == null ? null : await _db.getTaskById(id)));
+    }
+    final childrenOf = <String, List<Task>>{};
+    for (final (_, t) in pairs) {
+      if (t == null) continue;
+      final children = await _db.getChildTasks(t.id);
+      if (children.isEmpty) continue;
+      childrenOf[t.id] = children;
+      for (final c in children) {
+        await _db.updateTask(c.copyWith(parentId: () => null));
+      }
     }
     await _db
         .deleteTasks([for (final (_, t) in pairs) if (t != null) t.id]);
@@ -147,6 +164,11 @@ class MessagesPageState extends State<MessagesPage> {
         for (final (m, t) in pairs) {
           if (t != null) await _db.insertTask(t);
           await _db.setMessageLinkedTask(m.id, m.linkedTaskId);
+        }
+        for (final children in childrenOf.values) {
+          for (final c in children) {
+            await _db.updateTask(c);
+          }
         }
       },
     );
