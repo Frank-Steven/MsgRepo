@@ -41,7 +41,7 @@ Future<void> toggleTaskDoneWithUndo(
   }
 }
 
-Color _priorityColor(String priority) => switch (priority) {
+Color taskPriorityDotColor(String priority) => switch (priority) {
       TaskPriority.important => Colors.red,
       TaskPriority.minor => Colors.green,
       _ => Colors.amber,
@@ -54,7 +54,8 @@ String _fmtMs(int ms) {
   return '${_two(d.month)}-${_two(d.day)} ${_two(d.hour)}:${_two(d.minute)}';
 }
 
-String _timeSummary(Task task) {
+/// 任务时间摘要（MM-dd HH:mm 或 起 → 止），供 TaskTile 与详情面板共用。
+String taskTimeSummary(Task task) {
   final s = task.startAt;
   if (s == null) return '—';
   if (task.kind == TaskKind.range && task.endAt != null) {
@@ -78,6 +79,12 @@ class TaskTile extends StatelessWidget {
   final bool hasChildren;
   final bool collapsed;
   final VoidCallback? onToggleCollapse;
+
+  /// 子任务进度（done, total）（设计 §3，v2.3）：行尾显示「已完成数/总数」。
+  final (int, int)? progress;
+
+  /// 选中态（v2.3：详情面板跳转定位高亮）。
+  final bool selected;
   final VoidCallback onTap;
   final VoidCallback? onToggleDone;
   final VoidCallback? onUnarchive;
@@ -92,6 +99,8 @@ class TaskTile extends StatelessWidget {
     this.hasChildren = false,
     this.collapsed = false,
     this.onToggleCollapse,
+    this.progress,
+    this.selected = false,
     required this.onTap,
     this.onToggleDone,
     this.onUnarchive,
@@ -119,7 +128,10 @@ class TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final done = task.status == TaskStatus.done;
-    return InkWell(
+    final progressValue = progress;
+    return Container(
+      color: selected ? scheme.secondaryContainer.withValues(alpha: 0.5) : null,
+      child: InkWell(
       onTap: onTap,
       child: Padding(
         padding: EdgeInsets.only(left: 12 + indent, right: 12),
@@ -165,7 +177,7 @@ class TaskTile extends StatelessWidget {
                 height: 8,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: _priorityColor(task.priority),
+                  color: taskPriorityDotColor(task.priority),
                 ),
               ),
               const SizedBox(width: 10),
@@ -207,7 +219,7 @@ class TaskTile extends StatelessWidget {
                       ],
                     ),
                     Text(
-                      _timeSummary(task),
+                      taskTimeSummary(task),
                       style: Theme.of(context)
                           .textTheme
                           .bodySmall
@@ -216,6 +228,13 @@ class TaskTile extends StatelessWidget {
                   ],
                 ),
               ),
+              if (progressValue != null) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '${progressValue.$1}/${progressValue.$2}',
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                ),
+              ],
               if (onShowSource != null)
                 IconButton(
                   tooltip: '查看来源消息',
@@ -235,6 +254,7 @@ class TaskTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }

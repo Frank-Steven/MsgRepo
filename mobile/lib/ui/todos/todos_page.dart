@@ -5,11 +5,15 @@ import '../../services/database.dart';
 import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../messages/message_widgets.dart';
+import '../shared/segmented_selector.dart';
+import '../tasks/task_detail_panel.dart';
 import '../tasks/task_editor.dart';
 import '../tasks/task_tile.dart';
 
-/// 待办页（设计 §3，v2.1：按时间尺度分页）：顶部尺度页签 +
-/// 各尺度 active 任务列表 + 已完成/已归档两个特殊页签。
+/// 待办页（设计 §3，v2.3）：顶部尺度页签（含计数徽标）+ PageView 滑动翻页。
+/// 点击任务行弹出任务详情面板（与日程视图共用 TaskDetailPanel），
+/// 仅面板右上角编辑图标进编辑器；有子任务的行尾显示「已完成数/总数」；
+/// 面板中点击父/子任务跳转到对应尺度页签并高亮定位。
 class TodosPage extends StatefulWidget {
   const TodosPage({super.key});
 
@@ -30,6 +34,7 @@ class TodosPageState extends State<TodosPage> {
     'daily',
     'timed',
   ];
+  static const _tabLabels = ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档'];
 
   int _tab = 6; // 默认「不定时」（原"我的待办"）
 
@@ -39,15 +44,32 @@ class TodosPageState extends State<TodosPage> {
   List<Task> _annual = [];
   List<Task> _done = [];
   List<Task> _archived = [];
+
+  /// 各父任务的直接子任务进度（done, total）（v2.3）。
+  Map<String, (int, int)> _progress = {};
   bool _loading = true;
 
   /// 折叠的父任务 id（设计 §3：子任务在父行下缩进，默认展开）。
   final Set<String> _collapsedParents = {};
 
+  /// 高亮定位的任务（v2.3：详情面板跳转选中态）。
+  String? _selectedTaskId;
+  final Map<String, GlobalKey> _rowKeys = {};
+
+  final PageController _pageController = PageController(initialPage: 6);
+  final ScrollController _tabScrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
     reload();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _tabScrollController.dispose();
+    super.dispose();
   }
 
   Future<void> reload() async {
@@ -58,25 +80,24 @@ class TodosPageState extends State<TodosPage> {
       db.getAnnualTasks(),
       db.getTasks(status: TaskStatus.done),
       db.getTasks(status: TaskStatus.archived),
+      db.getSubtaskProgress(),
     ]);
-    final active = results[0];
-    final untimed = results[1];
+    final active = results[0] as List<Task>;
+    final untimed = results[1] as List<Task>;
     // 年度任务（is_annual）与派生尺度正交：只在「年度」页签逐年展示
-    final annual = results[2]
+    final annual = (results[2] as List<Task>)
         .where((t) => t.status == TaskStatus.active)
         .toList();
-    final done = results[3]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    final archived = results[4]
+    final done = (results[3] as List<Task>)
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final archived = (results[4] as List<Task>)
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final progress = results[5] as Map<String, (int, int)>;
     final byScale = {for (final s in _scaleTabs) s: <Task>[]};
     for (final t in active) {
       final s = t.startAt;
       if (s == null || t.isAnnual) continue;
-      final scale = deriveTimeScale(
-        DateTime.fromMillisecondsSinceEpoch(s),
-        t.endAt == null ? null : DateTime.fromMillisecondsSinceEpoch(t.endAt!),
-      );
-      byScale[scale]?.add(t);
+      byScale[deriveTaskScale(t.startAt, t.endAt)]?.add(t);
     }
     // getTasks 已按 start_at 升序，分组内天然有序
     if (!mounted) return;
@@ -88,9 +109,19 @@ class TodosPageState extends State<TodosPage> {
       _annual = annual;
       _done = done;
       _archived = archived;
+      _progress = progress;
       _loading = false;
     });
   }
+
+  /// 各页签计数徽标（设计 §3，v2.3）：年度 = 派生年度 + is_annual 任务数。
+  List<int> get _tabBadges => [
+        _byScale['yearly']!.length + _annual.length,
+        for (final s in _scaleTabs.skip(1)) _byScale[s]!.length,
+        _untimed.length,
+        _done.length,
+        _archived.length,
+      ];
 
   void _showUndoSnack(String label) {
     showUndoSnackBar(context, label, onUndone: () async => reload());
@@ -173,6 +204,57 @@ class TodosPageState extends State<TodosPage> {
     }
   }
 
+  /// 点击任务行：下方弹出任务详情面板（设计 §3，v2.3；不再直接进编辑器）。
+  void _showDetail(Task task) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => TaskDetailPanel(
+        task: task,
+        onEdit: () {
+          Navigator.of(ctx).pop();
+          _editTask(task);
+        },
+        onOpenTask: (t) {
+          Navigator.of(ctx).pop();
+          _jumpToTask(t);
+        },
+      ),
+    );
+  }
+
+  /// 任务所在页签（v2.3 跳转定位用）。
+  int _tabForTask(Task t) {
+    if (t.status == TaskStatus.done) return 7;
+    if (t.status == TaskStatus.archived) return 8;
+    if (t.isAnnual) return 0;
+    if (t.startAt == null) return 6;
+    final idx = _scaleTabs.indexOf(deriveTaskScale(t.startAt, t.endAt));
+    return idx >= 0 ? idx : 6;
+  }
+
+  /// 跳转到任务对应尺度页签并高亮定位（滚动到可见 + 选中态）（设计 §3，v2.3）。
+  void _jumpToTask(Task t) {
+    final tab = _tabForTask(t);
+    setState(() {
+      _tab = tab;
+      _selectedTaskId = t.id;
+      if (t.parentId != null) _collapsedParents.remove(t.parentId);
+    });
+    _pageController.jumpToPage(tab);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _rowKeys[t.id]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+          alignment: 0.3,
+        );
+      }
+    });
+  }
+
   Future<void> _showSourceMessage(String messageId) async {
     final msg = await AppDatabase.instance.getMessageById(messageId);
     if (!mounted) return;
@@ -227,10 +309,23 @@ class TodosPageState extends State<TodosPage> {
       ),
       body: Column(
         children: [
-          _ScaleTabBar(
-            tabs: const ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档'],
-            selected: _tab,
-            onChanged: (i) => setState(() => _tab = i),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: SegmentedSelector<int>(
+              values: const [0, 1, 2, 3, 4, 5, 6, 7, 8],
+              labels: _tabLabels,
+              badges: _tabBadges,
+              selected: _tab,
+              equalWidth: false,
+              itemWidth: 64,
+              scrollController: _tabScrollController,
+              onChanged: (i) {
+                setState(() => _tab = i);
+                _pageController.animateToPage(i,
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeOut);
+              },
+            ),
           ),
           const Divider(height: 1),
           Expanded(
@@ -244,7 +339,14 @@ class TodosPageState extends State<TodosPage> {
                         Center(child: CircularProgressIndicator()),
                       ],
                     )
-                  : _buildTabBody(),
+                  : PageView(
+                      controller: _pageController,
+                      onPageChanged: (i) => setState(() => _tab = i),
+                      children: [
+                        for (var i = 0; i < _tabLabels.length; i++)
+                          _buildTabBody(i),
+                      ],
+                    ),
             ),
           ),
         ],
@@ -252,8 +354,8 @@ class TodosPageState extends State<TodosPage> {
     );
   }
 
-  Widget _buildTabBody() {
-    switch (_tab) {
+  Widget _buildTabBody(int tab) {
+    switch (tab) {
       case 7:
         return _taskListView(_done, done: true);
       case 8:
@@ -263,7 +365,7 @@ class TodosPageState extends State<TodosPage> {
       case 0:
         return _yearlyTabBody();
       default:
-        return _taskListView(_byScale[_scaleTabs[_tab]] ?? const []);
+        return _taskListView(_byScale[_scaleTabs[tab]] ?? const []);
     }
   }
 
@@ -295,11 +397,13 @@ class TodosPageState extends State<TodosPage> {
   }
 
   Widget _tileFor(Task task, Map<String, List<Task>> byParent,
-      {bool archived = false, bool recent = false}) {
+      {bool archived = false, bool recent = false, bool keyed = true}) {
     final isChild =
         task.parentId != null && byParent.containsKey(task.parentId);
     final children = byParent[task.id] ?? const <Task>[];
+    final progress = _progress[task.id];
     return TaskTile(
+      key: keyed ? _rowKeys.putIfAbsent(task.id, () => GlobalKey()) : null,
       task: task,
       archived: archived,
       recent: recent,
@@ -311,7 +415,9 @@ class TodosPageState extends State<TodosPage> {
           _collapsedParents.add(task.id);
         }
       }),
-      onTap: () => _editTask(task),
+      progress: (progress != null && progress.$2 > 0) ? progress : null,
+      selected: task.id == _selectedTaskId,
+      onTap: () => _showDetail(task),
       onToggleDone: archived ? null : () => _toggleDone(task),
       onUnarchive: archived ? () => _unarchive(task) : null,
       onShowSource: task.sourceMessageId == null
@@ -367,9 +473,10 @@ class TodosPageState extends State<TodosPage> {
             child: Text('${currentYear + i}年',
                 style: Theme.of(context).textTheme.labelLarge),
           ),
-          // 年度任务按 startAt 的月日在每年重复展示
+          // 年度任务按 startAt 的月日在每年重复展示（同一任务出现多次，
+          // 只在第一年分节挂 GlobalKey，避免重复 key 冲突）
           for (final task in sorted)
-            _tileFor(task, const {}),
+            _tileFor(task, const {}, keyed: i == 0),
         ],
         const SizedBox(height: 32),
       ],
@@ -395,66 +502,6 @@ class TodosPageState extends State<TodosPage> {
   }
 }
 
-/// 尺度页签条（设计 §3 + §10.1）：等宽段、横向可滚动、选中只改底色。
-class _ScaleTabBar extends StatelessWidget {
-  final List<String> tabs;
-  final int selected;
-  final ValueChanged<int> onChanged;
-
-  const _ScaleTabBar({
-    required this.tabs,
-    required this.selected,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return SizedBox(
-      height: 44,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: scheme.outline),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Row(
-            children: [
-              for (var i = 0; i < tabs.length; i++) ...[
-                if (i > 0) Container(width: 1, color: scheme.outline),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => onChanged(i),
-                  child: Container(
-                    width: 60,
-                    height: double.infinity,
-                    alignment: Alignment.center,
-                    color: i == selected
-                        ? scheme.secondaryContainer
-                        : Colors.transparent,
-                    child: Text(
-                      tabs[i],
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: i == selected
-                            ? scheme.onSecondaryContainer
-                            : scheme.onSurface,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _EmptyHint extends StatelessWidget {
   const _EmptyHint();
 
@@ -464,4 +511,3 @@ class _EmptyHint extends StatelessWidget {
     return Text('无', style: TextStyle(color: scheme.onSurfaceVariant));
   }
 }
-

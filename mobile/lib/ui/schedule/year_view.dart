@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
@@ -6,40 +8,238 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
-/// 年视图（设计 §2.1）：4 行（季度）× 3 块（月），块内红黄绿三条泳道，
-/// 全图泳道垂直位置由优先级决定（跨行跨月对齐）。
+/// 年视图（设计 §2.2，v2.3 修订）：纵向**无限滚动**——年份网格
+/// （4 行季度 × 3 块月）按年无缝上下衔接（ListView 大初始偏移法）。
+/// 月块为格线风格（v2.3 §13-8：不填充底色，只画淡分隔线；当前月描边高亮），
+/// 无泳道底纹。块内三条优先级泳道全图垂直对齐。
+///
+/// 选中-调整（v2.3 §13-6）：点按任务出现描边选中态，仅选中任务可拖拽
+/// （吸附月界）；有选中时点空白 = 取消选中，无选中时点空白月块 = 下钻月视图。
+/// 未选中时纵向滚动手势不被抢占。
 class YearView extends StatefulWidget {
-  final int year;
   final List<Task> tasks;
-  final ValueChanged<int> onMonthTap;
-  final ValueChanged<Task> onTaskTap;
-
-  /// 拖拽落库回调：(原任务, 新 startAt, 新 endAt)。
+  final String? selectedTaskId;
+  final ValueChanged<Task?> onTaskSelected;
+  final ValueChanged<int> onMonthTap; // 参数：月份时间戳（所在月 1 日）
   final void Function(Task task, int newStartMs, int? newEndMs) onTaskMoved;
-  final ValueChanged<int> onBlankLongPress;
+  final ValueChanged<int> onBlankLongPress; // 参数：月份时间戳
+  final void Function(int startMs, int endMs) onVisibleWindowChanged;
+  final ValueChanged<DateTime> onCenterChanged;
 
   const YearView({
     super.key,
+    required this.tasks,
+    required this.selectedTaskId,
+    required this.onTaskSelected,
+    required this.onMonthTap,
+    required this.onTaskMoved,
+    required this.onBlankLongPress,
+    required this.onVisibleWindowChanged,
+    required this.onCenterChanged,
+  });
+
+  @override
+  State<YearView> createState() => YearViewState();
+}
+
+class YearViewState extends State<YearView> {
+  static const _baseYear = 2000; // 索引基准年
+  static const _yearLabelH = 24.0;
+
+  final ScrollController _scroll = ScrollController();
+  double _itemExtent = 0; // 首帧由宽度计算
+
+  /// 「现在」脉冲目标（年, 月），1.5 秒后恢复。
+  (int, int)? _pulse;
+  Timer? _pulseTimer;
+
+  int get _currentItemIndex =>
+      itemIndexForUnit(DateTime.now().year - _baseYear);
+
+  /// 可视中心的年（由滚动位置推导）。
+  int get _centerYear {
+    if (!_scroll.hasClients || _itemExtent <= 0) return DateTime.now().year;
+    return _baseYear +
+        unitIndexForItem(
+            ((_scroll.offset + _scroll.position.viewportDimension / 2) /
+                    _itemExtent)
+                .floor());
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _pulseTimer?.cancel();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    // 滚动停止附近才上报（用通知层的 ScrollEndNotification 也可，这里按帧节流：
+    // 仅在像素落整时无动画期间变化上报，由父级去重）
+    _reportDebounced();
+  }
+
+  Timer? _reportTimer;
+  void _reportDebounced() {
+    _reportTimer?.cancel();
+    _reportTimer = Timer(const Duration(milliseconds: 150), _reportWindow);
+  }
+
+  void _reportWindow() {
+    if (!mounted || !_scroll.hasClients || _itemExtent <= 0) return;
+    final firstIdx = (_scroll.offset / _itemExtent).floor() - 1;
+    final lastIdx =
+        ((_scroll.offset + _scroll.position.viewportDimension) / _itemExtent)
+                .ceil() +
+            1;
+    final firstYear = _baseYear + unitIndexForItem(firstIdx);
+    final lastYear = _baseYear + unitIndexForItem(lastIdx);
+    widget.onVisibleWindowChanged(
+      DateTime(firstYear).millisecondsSinceEpoch,
+      DateTime(lastYear + 1).millisecondsSinceEpoch,
+    );
+    widget.onCenterChanged(DateTime(_centerYear, 7));
+  }
+
+  /// 滚动到当前年并居中，脉冲高亮当月块（设计 §13-10）。
+  void scrollToNow() {
+    _jumpToYear(DateTime.now().year);
+    setState(() {
+      _pulse = (DateTime.now().year, DateTime.now().month);
+    });
+    _pulseTimer?.cancel();
+    _pulseTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _pulse = null);
+    });
+    widget.onCenterChanged(DateTime.now());
+  }
+
+  /// 滚动到指定年并居中（期移箭头用）。
+  void scrollTo(DateTime anchor) => _jumpToYear(anchor.year);
+
+  /// 滚动到任务所在年（详情面板跳转用）。
+  void scrollToTask(Task t) {
+    final s = t.startAt;
+    if (s == null) return;
+    _jumpToYear(DateTime.fromMillisecondsSinceEpoch(s).year);
+  }
+
+  void _jumpToYear(int year) {
+    if (!_scroll.hasClients || _itemExtent <= 0) return;
+    final idx = itemIndexForUnit(year - _baseYear);
+    final target = idx * _itemExtent -
+        (_scroll.position.viewportDimension - _itemExtent) / 2;
+    _scroll.jumpTo(target.clamp(0.0, _scroll.position.maxScrollExtent));
+    _reportWindow();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 年网格高度：约 4/3 宽度 + 年份标签；固定 itemExtent 保证 jumpTo 准确
+        final gridH = (constraints.maxWidth - 2 * _YearLayout.pad - 2 * _YearLayout.gap) /
+                3 *
+                4 +
+            3 * _YearLayout.gap +
+            2 * _YearLayout.pad;
+        _itemExtent = gridH + _yearLabelH + 8;
+        if (!_scroll.hasClients) {
+          // 首帧前定位到当前年
+          final initial = _currentItemIndex * _itemExtent -
+              (constraints.maxHeight - _itemExtent) / 2;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scroll.hasClients) {
+              _scroll.jumpTo(initial.clamp(
+                  0.0, _scroll.position.maxScrollExtent));
+              _reportWindow();
+            }
+          });
+        }
+        return NotificationListener<ScrollEndNotification>(
+          onNotification: (_) {
+            _reportWindow();
+            return false;
+          },
+          child: ListView.builder(
+            controller: _scroll,
+            itemExtent: _itemExtent,
+            itemBuilder: (context, index) {
+              final year = _baseYear + unitIndexForItem(index);
+              return _YearGridItem(
+                key: ValueKey(year),
+                year: year,
+                tasks: widget.tasks,
+                gridHeight: gridH,
+                labelHeight: _yearLabelH,
+                selectedTaskId: widget.selectedTaskId,
+                pulseMonth: _pulse != null && _pulse!.$1 == year
+                    ? _pulse!.$2
+                    : null,
+                scheme: scheme,
+                onTaskSelected: widget.onTaskSelected,
+                onMonthTap: (month) => widget
+                    .onMonthTap(DateTime(year, month).millisecondsSinceEpoch),
+                onTaskMoved: widget.onTaskMoved,
+                onBlankLongPress: (month) => widget.onBlankLongPress(
+                    DateTime(year, month, 1, 9).millisecondsSinceEpoch),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 单一年份的网格项（4×3 月块 + 泳道任务层），持有自身拖拽预览状态。
+class _YearGridItem extends StatefulWidget {
+  final int year;
+  final List<Task> tasks;
+  final double gridHeight;
+  final double labelHeight;
+  final String? selectedTaskId;
+  final int? pulseMonth;
+  final ColorScheme scheme;
+  final ValueChanged<Task?> onTaskSelected;
+  final ValueChanged<int> onMonthTap;
+  final void Function(Task task, int newStartMs, int? newEndMs) onTaskMoved;
+  final ValueChanged<int> onBlankLongPress;
+
+  const _YearGridItem({
+    super.key,
     required this.year,
     required this.tasks,
+    required this.gridHeight,
+    required this.labelHeight,
+    required this.selectedTaskId,
+    required this.pulseMonth,
+    required this.scheme,
+    required this.onTaskSelected,
     required this.onMonthTap,
-    required this.onTaskTap,
     required this.onTaskMoved,
     required this.onBlankLongPress,
   });
 
   @override
-  State<YearView> createState() => _YearViewState();
+  State<_YearGridItem> createState() => _YearGridItemState();
 }
 
-class _YearViewState extends State<YearView> {
+class _YearGridItemState extends State<_YearGridItem> {
   Task? _dragOriginal;
   _DragMode? _dragMode;
-  int _dragStartMonth = 1; // 预览（1-12）
+  int _dragStartMonth = 1;
   int _dragEndMonth = 1;
-  int _origStartMonth = 1; // 拖拽开始时展示副本的月份
+  int _origStartMonth = 1;
   int _origEndMonth = 1;
-  double _grabOffset = 0; // monthPos 抓取偏移（保留月内小数部分）
+  double _grabOffset = 0;
 
   (int, int) get _yearRange => (
         DateTime(widget.year).millisecondsSinceEpoch,
@@ -61,7 +261,8 @@ class _YearViewState extends State<YearView> {
   /// 拖拽预览：吸附月边界（起点到 1 日，终点到月末，时间保留原时分）。
   Task _previewTask(Task display) {
     final s = DateTime.fromMillisecondsSinceEpoch(display.startAt!);
-    final newStart = DateTime(widget.year, _dragStartMonth, 1, s.hour, s.minute);
+    final newStart =
+        DateTime(widget.year, _dragStartMonth, 1, s.hour, s.minute);
     int? newEnd;
     final e = display.endAt;
     if (e != null) {
@@ -79,7 +280,11 @@ class _YearViewState extends State<YearView> {
     final hit = layout.hitTest(d.localPosition);
     if (hit != null) {
       final original = layout.originals[hit.taskId];
-      if (original != null) widget.onTaskTap(original);
+      if (original != null) widget.onTaskSelected(original);
+      return;
+    }
+    if (widget.selectedTaskId != null) {
+      widget.onTaskSelected(null); // 有选中时点空白 = 取消选中
       return;
     }
     final month = layout.monthAt(d.localPosition);
@@ -94,7 +299,8 @@ class _YearViewState extends State<YearView> {
 
   void _onPanStart(DragStartDetails d, _YearLayout layout) {
     final hit = layout.hitTest(d.localPosition);
-    if (hit == null) return;
+    // 仅选中任务可拖拽（v2.3 选中-调整）
+    if (hit == null || hit.taskId != widget.selectedTaskId) return;
     final item = layout.itemById(hit.taskId);
     final original = layout.originals[hit.taskId];
     if (item == null || original == null) return;
@@ -117,12 +323,10 @@ class _YearViewState extends State<YearView> {
     setState(() {
       switch (_dragMode!) {
         case _DragMode.move:
-          final start0 =
-              (mp - _grabOffset).round().clamp(0, 11 - span);
+          final start0 = (mp - _grabOffset).round().clamp(0, 11 - span);
           _dragStartMonth = start0 + 1;
           _dragEndMonth = start0 + 1 + span;
         case _DragMode.resizeStart:
-          // v2.2 取消跨度钳制：只受网格界与本端点次序约束
           final start0 = mp.round().clamp(0, _origEndMonth - 1);
           _dragStartMonth = start0 + 1;
         case _DragMode.resizeEnd:
@@ -153,8 +357,8 @@ class _YearViewState extends State<YearView> {
             _DragMode.move => deltaStartM,
           };
           // 终点吸附到月末：取下月 1 日（查询/展示按半开区间处理）
-          newEnd = DateTime(ed.year, ed.month + deltaM + 1, 1, ed.hour,
-                  ed.minute)
+          newEnd = DateTime(
+                  ed.year, ed.month + deltaM + 1, 1, ed.hour, ed.minute)
               .millisecondsSinceEpoch;
         }
         widget.onTaskMoved(original, newStart, newEnd);
@@ -168,20 +372,38 @@ class _YearViewState extends State<YearView> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final display = _displayTasks();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final layout = _YearLayout.build(
-          width: constraints.maxWidth,
-          maxHeight: constraints.maxHeight,
-          year: widget.year,
-          tasks: display,
-          originals: {for (final t in widget.tasks) t.id: t},
-          scheme: scheme,
-          now: DateTime.now(),
-        );
-        return GestureDetector(
+    final layout = _YearLayout.build(
+      width: MediaQuery.of(context).size.width,
+      maxHeight: widget.gridHeight,
+      year: widget.year,
+      tasks: display,
+      originals: {for (final t in widget.tasks) t.id: t},
+      scheme: widget.scheme,
+      now: DateTime.now(),
+      selectedTaskId: widget.selectedTaskId,
+      pulseMonth: widget.pulseMonth,
+    );
+    return Column(
+      children: [
+        SizedBox(
+          height: widget.labelHeight,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 12, top: 6),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '${widget.year}年',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: widget.scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+        ),
+        GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapUp: (d) => _onTapUp(d, layout),
           onLongPressStart: (d) => _onLongPress(d, layout),
@@ -190,11 +412,11 @@ class _YearViewState extends State<YearView> {
           onPanEnd: (_) => _onPanEnd(),
           onPanCancel: _onPanEnd,
           child: CustomPaint(
-            size: Size(constraints.maxWidth, layout.height),
+            size: Size(MediaQuery.of(context).size.width, widget.gridHeight),
             painter: _YearPainter(layout),
           ),
-        );
-      },
+        ),
+      ],
     );
   }
 }
@@ -249,6 +471,8 @@ class _YearLayout {
   final Map<String, Task> originals;
   final ColorScheme scheme;
   final int currentMonth; // 0 = 当前年不在今年
+  final String? selectedTaskId;
+  final int? pulseMonth;
 
   _YearLayout._({
     required this.width,
@@ -264,6 +488,8 @@ class _YearLayout {
     required this.originals,
     required this.scheme,
     required this.currentMonth,
+    required this.selectedTaskId,
+    required this.pulseMonth,
   });
 
   static const _priorities = [
@@ -286,6 +512,8 @@ class _YearLayout {
     required Map<String, Task> originals,
     required ColorScheme scheme,
     required DateTime now,
+    String? selectedTaskId,
+    int? pulseMonth,
   }) {
     final blockW = (width - 2 * pad - 2 * gap) / 3;
     final byId = {for (final t in tasks) t.id: t};
@@ -299,7 +527,7 @@ class _YearLayout {
           items.fold(0, (m, e) => e.slot + 1 > m ? e.slot + 1 : m).clamp(1, 99);
     }
 
-    // 槽位过高时整体压缩 slotH，保证 12 块一屏绘完不滚动
+    // 槽位过高时整体压缩 slotH，保证 12 块在给定高度内绘完
     var slotH = _naturalSlotH;
     double totalH(double sh) {
       final blockH =
@@ -314,8 +542,7 @@ class _YearLayout {
       slotH = ((blockH - labelH - 2 * blockVPad) / lanesTotal)
           .clamp(8.0, _naturalSlotH);
     }
-    final height =
-        maxHeight.isFinite ? maxHeight : totalH(slotH);
+    final height = maxHeight.isFinite ? maxHeight : totalH(slotH);
     final blockH = (height - 3 * gap - 2 * pad) / 4;
 
     double blockLeft(int month) => pad + ((month - 1) % 3) * (blockW + gap);
@@ -380,8 +607,7 @@ class _YearLayout {
             !li.extendsBefore &&
             !li.extendsAfter;
         final nameX = (isNode ? x1 : x2) + 9;
-        final avail =
-            (slotNextX[li.taskId] ?? (width - pad)) - nameX - 2;
+        final avail = (slotNextX[li.taskId] ?? (width - pad)) - nameX - 2;
         final done = task.status == TaskStatus.done;
         // 子任务（与父同槽叠加）不画名称
         final tp = li.isSubtask
@@ -448,6 +674,8 @@ class _YearLayout {
       originals: originals,
       scheme: scheme,
       currentMonth: now.year == year ? now.month : 0,
+      selectedTaskId: selectedTaskId,
+      pulseMonth: pulseMonth,
     );
   }
 
@@ -476,12 +704,10 @@ class _YearLayout {
 
   /// 位置对应的连续月坐标（0.0-12.0），拖拽吸附取整用；纵向跨行有效。
   double monthPosAt(Offset p) {
-    final col =
-        ((p.dx - pad) / (blockW + gap)).floor().clamp(0, 2);
+    final col = ((p.dx - pad) / (blockW + gap)).floor().clamp(0, 2);
     final fracX =
         ((p.dx - pad - col * (blockW + gap)) / blockW).clamp(0.0, 1.0);
-    final row =
-        ((p.dy - pad) / (blockH + gap)).floor().clamp(0, 3);
+    final row = ((p.dy - pad) / (blockH + gap)).floor().clamp(0, 3);
     return (row * 3 + col + fracX).clamp(0.0, 12.0);
   }
 }
@@ -496,37 +722,31 @@ class _YearPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
-    // 月块与泳道
+    final gridPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5
+      ..color = scheme.outlineVariant.withValues(alpha: 0.7);
+    // 月块：格线风格（v2.3 §13-8）——不填充底色，只画分隔细线；
+    // 当前月/脉冲月保留描边高亮
     for (var m = 1; m <= 12; m++) {
       final rect = layout.monthBlocks[m - 1];
-      final rrect =
-          RRect.fromRectAndRadius(rect, const Radius.circular(8));
       final isCurrent = m == layout.currentMonth;
-      canvas.drawRRect(
-        rrect,
-        Paint()
-          ..color = isCurrent
-              ? scheme.primaryContainer.withValues(alpha: 0.45)
-              : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-      );
-      if (isCurrent) {
-        canvas.drawRRect(
-          rrect,
+      final isPulse = m == layout.pulseMonth;
+      canvas.drawRect(rect, gridPaint);
+      if (isCurrent || isPulse) {
+        canvas.drawRect(
+          rect,
+          Paint()
+            ..color = scheme.primary
+                .withValues(alpha: isPulse ? 0.18 : 0.08),
+        );
+        canvas.drawRect(
+          rect,
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5
             ..color = scheme.primary,
         );
-      }
-      // 泳道底色（优先级色极低透明度），保证跨块上下对齐可见
-      var laneTop = rect.top + _YearLayout.labelH;
-      for (final p in _YearLayout._priorities) {
-        final h = layout.laneSlotCounts[p]! * layout.slotH;
-        canvas.drawRect(
-          Rect.fromLTWH(rect.left + 2, laneTop, rect.width - 4, h),
-          Paint()..color = priorityColor(scheme, p).withValues(alpha: 0.07),
-        );
-        laneTop += h;
       }
       final tp = TextPainter(
         text: TextSpan(
@@ -542,7 +762,8 @@ class _YearPainter extends CustomPainter {
       tp.paint(canvas, Offset(rect.left + 6, rect.top + 3));
     }
 
-    // 任务节点/线段/名称；子任务画更小节点/更细线段（与父同槽叠加）
+    // 任务节点/线段/名称；子任务画更小节点/更细线段（与父同槽叠加）；
+    // 选中任务加描边（v2.3 选中-调整）
     for (final it in layout.items) {
       final done = it.task.status == TaskStatus.done;
       final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
@@ -566,10 +787,34 @@ class _YearPainter extends CustomPainter {
         canvas.drawCircle(Offset(it.x1, it.y),
             it.lane.isSubtask ? _nodeR - 1.5 : _nodeR, Paint()..color = color);
       }
+      if (it.task.id == layout.selectedTaskId) {
+        _drawSelection(canvas, it, scheme);
+      }
       final name = it.name;
       if (name != null) {
         name.paint(canvas, Offset(it.nameX, it.y - name.height / 2));
       }
+    }
+  }
+
+  void _drawSelection(Canvas canvas, _YearItem it, ColorScheme scheme) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..color = scheme.primary;
+    final isSegment = it.lane.startMonth != it.lane.endMonth ||
+        it.lane.extendsBefore ||
+        it.lane.extendsAfter;
+    if (isSegment) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTRB(it.x1 - 6, it.y - 8, it.x2 + 6, it.y + 8),
+          const Radius.circular(5),
+        ),
+        paint,
+      );
+    } else {
+      canvas.drawCircle(Offset(it.x1, it.y), _nodeR + 4, paint);
     }
   }
 

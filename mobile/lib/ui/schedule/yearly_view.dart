@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -8,56 +9,63 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
-/// 年度视图（设计 §2.1，v2.2）：横向年份轴，窗口为中心年 ±10 年，
-/// 横向滚动 + 捏合缩放（刻度档 1/5/10 年），年份标注 -45° 斜向上。
+/// 年度视图（设计 §2.1，v2.3 修订）：横向年份轴**双向无限滚动**
+/// （坐标 = 2000 年起算的绝对年小数，初始居中当前年），捏合缩放
+/// （焦点锚定），刻度档 1/5/10 年，年份标注 -45° 斜向上。
 /// 尺度为 yearly 的任务：单年内 = 节点、跨年 = 带端点线段；is_annual 任务
-/// 在每年画一个小节点；当前年高亮竖带；点年格下钻该年的年视图。
-/// 拖拽粒度 = 年：移动整体平移整数年（保留月日时分），起止端点吸附年界；
-/// 无跨度上限（v2.2 取消钳制）。
+/// 在每年画一个小节点；当前年高亮竖带。
 ///
-/// 手势合一在一个 scale 识别器里：落在任务上是拖拽，落在空白是平移/缩放。
+/// 选中-调整（v2.3 §13-6）：点按任务出现描边选中态，仅选中任务可拖拽
+/// （移动 = 整数年平移保留月日；起止端点吸附年界；无跨度上限）；
+/// 有选中时点空白 = 取消选中，无选中时点空白 = 下钻该年的年视图。
+/// 名称层（v2.3 §13-7）：贪心放置，纯碰撞决定可见性。
 class YearlyView extends StatefulWidget {
-  /// 窗口中心年（窗口 = [centerYear-10, centerYear+10]）。
-  final int centerYear;
-
-  /// 已按年度视图尺度过滤的任务（yearly + is_annual）。
+  /// 已按年度视图尺度过滤的任务（yearly + is_annual，覆盖可视窗口）。
   final List<Task> tasks;
-  final ValueChanged<Task> onTaskTap;
+  final String? selectedTaskId;
+  final ValueChanged<Task?> onTaskSelected;
 
   /// 拖拽落库回调：(原任务, 新 startAt, 新 endAt)。
   final void Function(Task task, int newStartMs, int? newEndMs) onTaskMoved;
 
-  /// 点按年格空白：下钻该年的年视图。
+  /// 点按空白年格（无选中时）：下钻该年的年视图。
   final ValueChanged<int> onYearTap;
+
+  final void Function(int startMs, int endMs) onVisibleWindowChanged;
+  final ValueChanged<DateTime> onCenterChanged;
 
   const YearlyView({
     super.key,
-    required this.centerYear,
     required this.tasks,
-    required this.onTaskTap,
+    required this.selectedTaskId,
+    required this.onTaskSelected,
     required this.onTaskMoved,
     required this.onYearTap,
+    required this.onVisibleWindowChanged,
+    required this.onCenterChanged,
   });
 
   @override
-  State<YearlyView> createState() => _YearlyViewState();
+  State<YearlyView> createState() => YearlyViewState();
 }
 
-class _YearlyViewState extends State<YearlyView> {
-  /// 缩放范围：最小 = 整个 21 年窗口恰好铺满可视宽（随宽度动态算），
-  /// 最大 = 每年 320dp。
+class YearlyViewState extends State<YearlyView> {
+  /// 缩放范围：最小 = 20 年铺满可视宽，最大 = 每年 320dp。
   static const _maxPpy = 320.0;
 
-  /// 名称层显示阈值：每年 ≥64dp 才尝试放置（最密刻度档思路）。
-  static const _nameThresholdPpy = 64.0;
+  /// 绝对年小数基准（2000-01-01）。
+  static const _epochYear = 2000;
 
-  int get _windowStart => widget.centerYear - 10;
-  static const _spanYears = 21;
+  /// 实际可滚动范围：1900 ~ 2200 年。
+  static const _minYear = 1900;
+  static const _maxYear = 2200;
 
-  double? _ppy; // null = 未初始化，首帧按窗口铺满可视宽
-  double _scrollX = 0;
+  double? _ppy; // null = 未初始化，首帧定位到当前年
+  double _scrollYf = 0; // 左边缘的绝对年小数
+  bool _positioned = false;
+  double _viewW = 0;
   double _startPpy = 0;
-  double _startScrollX = 0;
+  double _startScrollYf = 0;
   double _startFocalX = 0;
 
   Task? _dragOriginal;
@@ -66,19 +74,90 @@ class _YearlyViewState extends State<YearlyView> {
   int _origStartMs = 0;
   int? _origEndMs;
 
+  /// 「现在」脉冲高亮的目标年，1.5 秒后恢复。
+  int? _pulseYear;
+  Timer? _pulseTimer;
+
   @override
-  void didUpdateWidget(YearlyView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.centerYear != widget.centerYear) {
-      // 平移窗口后让中心年回到可视中央
-      _scrollX = -1; // 标记：下一帧按中心年居中
-    }
+  void dispose() {
+    _pulseTimer?.cancel();
+    super.dispose();
   }
+
+  /// 毫秒时间戳 → 绝对年小数（按各年实际长度插值）。
+  static double _yearFraction(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    final y0 = DateTime(d.year).millisecondsSinceEpoch;
+    final y1 = DateTime(d.year + 1).millisecondsSinceEpoch;
+    return d.year - _epochYear + (ms - y0) / (y1 - y0);
+  }
+
+  double get _minScroll => _minYear - _epochYear.toDouble();
+  double get _maxScroll => _maxYear - _epochYear.toDouble();
 
   static int _shiftYears(int ms, int dy) {
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     return DateTime(d.year + dy, d.month, d.day, d.hour, d.minute, d.second)
         .millisecondsSinceEpoch;
+  }
+
+  // ---- 供父级调用的定位方法 ----
+
+  /// 滚动到当前年并居中，短暂脉冲高亮（设计 §13-10）。
+  void scrollToNow() {
+    final ppy = _ppy ?? (_viewW > 0 ? _viewW / 20 : 20.0);
+    final nowYf = _yearFraction(DateTime.now().millisecondsSinceEpoch);
+    setState(() {
+      _scrollYf = (nowYf - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      _positioned = true;
+      _pulseYear = DateTime.now().year;
+    });
+    _pulseTimer?.cancel();
+    _pulseTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _pulseYear = null);
+    });
+    _reportWindow();
+    widget.onCenterChanged(DateTime.now());
+  }
+
+  /// 滚动到指定年并居中（期移箭头用）。
+  void scrollTo(DateTime anchor) {
+    final ppy = _ppy ?? 20.0;
+    final yf = _yearFraction(anchor.millisecondsSinceEpoch);
+    setState(() {
+      _scrollYf = (yf - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      _positioned = true;
+    });
+    _reportWindow();
+  }
+
+  /// 滚动到任务并使其居中（详情面板跳转用）。
+  void scrollToTask(Task t) {
+    final s = t.startAt;
+    if (s == null) return;
+    final ppy = _ppy ?? 20.0;
+    final f1 = _yearFraction(s);
+    final f2 = t.endAt == null ? f1 : _yearFraction(t.endAt!);
+    setState(() {
+      _scrollYf =
+          ((f1 + f2) / 2 - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      _positioned = true;
+    });
+    _reportWindow();
+  }
+
+  void _reportWindow() {
+    if (_viewW <= 0 || _ppy == null) return;
+    const marginYears = 5.0;
+    final startMs = DateTime(_epochYear + (_scrollYf - marginYears).floor())
+        .millisecondsSinceEpoch;
+    final endMs = DateTime(
+            _epochYear + (_scrollYf + _viewW / _ppy! + marginYears).ceil())
+        .millisecondsSinceEpoch;
+    widget.onVisibleWindowChanged(startMs, endMs);
+    final centerYf = _scrollYf + _viewW / (2 * _ppy!);
+    widget.onCenterChanged(
+        DateTime(_epochYear + centerYf.floor(), 7));
   }
 
   List<Task> _displayTasks() {
@@ -94,7 +173,8 @@ class _YearlyViewState extends State<YearlyView> {
           case _DragMode.move:
             newStart =
                 t.startAt == null ? null : _shiftYears(t.startAt!, _deltaYears);
-            newEnd = t.endAt == null ? null : _shiftYears(t.endAt!, _deltaYears);
+            newEnd =
+                t.endAt == null ? null : _shiftYears(t.endAt!, _deltaYears);
           case _DragMode.resizeStart:
             final ty =
                 DateTime.fromMillisecondsSinceEpoch(_origStartMs).year +
@@ -117,8 +197,11 @@ class _YearlyViewState extends State<YearlyView> {
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
     _startPpy = layout.ppy;
-    _startScrollX = _scrollX;
-    if (hit != null && !layout.annualIds.contains(hit.taskId)) {
+    _startScrollYf = _scrollYf;
+    // 仅选中任务可拖拽（v2.3 选中-调整）；is_annual 节点不可拖拽
+    if (hit != null &&
+        hit.taskId == widget.selectedTaskId &&
+        !layout.annualIds.contains(hit.taskId)) {
       final original = layout.originals[hit.taskId];
       final span = layout.spans[hit.taskId];
       if (original != null && span != null) {
@@ -135,8 +218,7 @@ class _YearlyViewState extends State<YearlyView> {
 
   void _onScaleUpdate(ScaleUpdateDetails d, _YearlyLayout layout) {
     if (_dragOriginal != null) {
-      final rawYears = (d.localFocalPoint.dx - _startFocalX) / layout.ppy;
-      final dy = rawYears.round();
+      final dy = ((d.localFocalPoint.dx - _startFocalX) / layout.ppy).round();
       final origStartYear =
           DateTime.fromMillisecondsSinceEpoch(_origStartMs).year;
       final origEndYear = _origEndMs == null
@@ -146,29 +228,26 @@ class _YearlyViewState extends State<YearlyView> {
         switch (_dragMode!) {
           case _DragMode.move:
             final span = origEndYear - origStartYear;
-            _deltaYears = dy.clamp(
-                _windowStart - origStartYear,
-                _windowStart + _spanYears - 1 - span - origStartYear);
+            _deltaYears = dy.clamp(_minYear - origStartYear,
+                _maxYear - 1 - span - origStartYear);
           case _DragMode.resizeStart:
-            _deltaYears = dy.clamp(_windowStart - origStartYear,
-                origEndYear - origStartYear);
+            _deltaYears =
+                dy.clamp(_minYear - origStartYear, origEndYear - origStartYear);
           case _DragMode.resizeEnd:
             _deltaYears = dy.clamp(
-                origStartYear - origEndYear,
-                _windowStart + _spanYears - origEndYear);
+                origStartYear - origEndYear, _maxYear - origEndYear);
         }
       });
       return;
     }
     // 平移 + 无级缩放，以双指焦点对应的年份为锚（焦点下年份不动）
-    final minPpy = layout.viewW / _spanYears;
+    final minPpy = layout.viewW / 20;
     final newPpy = (_startPpy * d.scale).clamp(minPpy, _maxPpy);
-    final focalYear = (_startScrollX + _startFocalX) / _startPpy;
-    final newScrollX = focalYear * newPpy - d.localFocalPoint.dx;
+    final focalYf = _startScrollYf + _startFocalX / _startPpy;
     setState(() {
       _ppy = newPpy;
-      _scrollX = newScrollX.clamp(
-          0.0, math.max(0.0, _spanYears * newPpy - layout.viewW));
+      _scrollYf = (focalYf - d.localFocalPoint.dx / newPpy)
+          .clamp(_minScroll, _maxScroll);
     });
   }
 
@@ -198,6 +277,7 @@ class _YearlyViewState extends State<YearlyView> {
       }
       widget.onTaskMoved(original, newStart, newEnd);
     }
+    if (_dragOriginal == null) _reportWindow();
     setState(() {
       _dragOriginal = null;
       _dragMode = null;
@@ -209,48 +289,60 @@ class _YearlyViewState extends State<YearlyView> {
     final hit = layout.hitTest(d.localPosition);
     if (hit != null) {
       final original = layout.originals[hit.taskId];
-      if (original != null) widget.onTaskTap(original);
+      if (original != null) widget.onTaskSelected(original);
       return;
     }
-    // 空白年格：下钻该年的年视图
-    final year =
-        _windowStart + ((d.localPosition.dx + _scrollX) / layout.ppy).floor();
-    if (year >= _windowStart && year < _windowStart + _spanYears) {
-      widget.onYearTap(year);
+    if (widget.selectedTaskId != null) {
+      // 有选中时点空白 = 取消选中（设计 §13-6）
+      widget.onTaskSelected(null);
+      return;
     }
+    // 无选中时点空白年格 = 下钻该年的年视图（设计 §2.1）
+    final year =
+        _epochYear + ((d.localPosition.dx / layout.ppy) + _scrollYf).floor();
+    widget.onYearTap(year);
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final nameStyle = TextStyle(fontSize: 11, color: scheme.onSurface);
+    final measureCache = <String, double>{};
+    double measure(String title) => measureCache.putIfAbsent(
+        title,
+        () => (TextPainter(
+              text: TextSpan(text: title, style: nameStyle),
+              textDirection: TextDirection.ltr,
+              maxLines: 1,
+            )..layout())
+            .width);
     final display = _displayTasks();
     return LayoutBuilder(
       builder: (context, constraints) {
-        final minPpy = constraints.maxWidth / _spanYears;
+        _viewW = constraints.maxWidth;
+        final minPpy = constraints.maxWidth / 20;
         final ppy = (_ppy ?? minPpy).clamp(minPpy, _maxPpy);
-        var scrollX = _scrollX.clamp(
-                0.0, math.max(0.0, _spanYears * ppy - constraints.maxWidth))
-            .toDouble();
-        if (_scrollX == -1) {
-          // 窗口平移后中心年居中
-          scrollX = (10.5 * ppy - constraints.maxWidth / 2)
-              .clamp(0.0, math.max(0.0, _spanYears * ppy - constraints.maxWidth))
-              .toDouble();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _scrollX == -1) setState(() => _scrollX = scrollX);
-          });
+        if (!_positioned) {
+          final nowYf = _yearFraction(DateTime.now().millisecondsSinceEpoch);
+          _scrollYf = (nowYf - constraints.maxWidth / (2 * ppy))
+              .clamp(_minScroll, _maxScroll);
+          _positioned = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) => _reportWindow());
         }
+        _scrollYf = _scrollYf.clamp(_minScroll, _maxScroll);
         final layout = _YearlyLayout.build(
           viewW: constraints.maxWidth,
           viewH: constraints.maxHeight,
-          windowStart: _windowStart,
-          spanYears: _spanYears,
           tasks: display,
           originals: {for (final t in widget.tasks) t.id: t},
           ppy: ppy,
-          scrollX: scrollX,
+          scrollYf: _scrollYf,
+          epochYear: _epochYear,
           scheme: scheme,
+          measure: measure,
           now: DateTime.now(),
+          selectedTaskId: widget.selectedTaskId,
+          pulseYear: _pulseYear,
         );
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -280,14 +372,12 @@ class _HitRegion {
 
 class _YearlyItem {
   final Task task;
-  final double x1; // 画布坐标（已减 scrollX）
+  final double x1; // 画布坐标
   final double x2;
   final double y;
   final Color color;
   final bool isPoint;
   final bool isSubtask;
-  final bool startInWindow;
-  final bool endInWindow;
 
   const _YearlyItem({
     required this.task,
@@ -297,8 +387,6 @@ class _YearlyItem {
     required this.color,
     required this.isPoint,
     required this.isSubtask,
-    required this.startInWindow,
-    required this.endInWindow,
   });
 }
 
@@ -324,31 +412,31 @@ class _YearlyLayout {
   final double viewW;
   final double viewH;
   final double ppy;
-  final double scrollX;
-  final int windowStart;
-  final int spanYears;
+  final double scrollYf;
+  final int epochYear;
   final double namesH;
-  final List<double> laneHeights; // 每条优先级泳道的高度（随槽位数伸缩）
+  final List<double> laneHeights;
   final int majorTickYears;
   final int? minorTickYears;
   final int labelStride;
   final List<_YearlyItem> items;
   final List<_AnnualNode> annualNodes;
   final Set<String> annualIds;
-  final Map<String, double> nameAnchors; // 可见名称 taskId → 锚点 x（画布坐标）
+  final Map<String, DayNameSlot> nameSlots;
   final List<_HitRegion> hitRegions;
   final Map<String, Task> originals;
   final Map<String, (int, int?)> spans; // taskId -> (startMs, endMs)
   final ColorScheme scheme;
   final int nowYear;
+  final String? selectedTaskId;
+  final int? pulseYear;
 
   _YearlyLayout._({
     required this.viewW,
     required this.viewH,
     required this.ppy,
-    required this.scrollX,
-    required this.windowStart,
-    required this.spanYears,
+    required this.scrollYf,
+    required this.epochYear,
     required this.namesH,
     required this.laneHeights,
     required this.majorTickYears,
@@ -357,12 +445,14 @@ class _YearlyLayout {
     required this.items,
     required this.annualNodes,
     required this.annualIds,
-    required this.nameAnchors,
+    required this.nameSlots,
     required this.hitRegions,
     required this.originals,
     required this.spans,
     required this.scheme,
     required this.nowYear,
+    required this.selectedTaskId,
+    required this.pulseYear,
   });
 
   static const _priorities = [
@@ -371,81 +461,72 @@ class _YearlyLayout {
     TaskPriority.minor,
   ];
 
-  /// 毫秒时间戳 → 距窗口起点的年小数（按各年实际长度插值）。
-  static double _yearFraction(int ms, int windowStart) {
+  static double _yearFraction(int ms, int epochYear) {
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     final y0 = DateTime(d.year).millisecondsSinceEpoch;
     final y1 = DateTime(d.year + 1).millisecondsSinceEpoch;
-    return d.year - windowStart + (ms - y0) / (y1 - y0);
+    return d.year - epochYear + (ms - y0) / (y1 - y0);
   }
 
   static _YearlyLayout build({
     required double viewW,
     required double viewH,
-    required int windowStart,
-    required int spanYears,
     required List<Task> tasks,
     required Map<String, Task> originals,
     required double ppy,
-    required double scrollX,
+    required double scrollYf,
+    required int epochYear,
     required ColorScheme scheme,
+    required double Function(String) measure,
     required DateTime now,
+    required String? selectedTaskId,
+    required int? pulseYear,
   }) {
     final (majorTickYears, minorTickYears, labelStride) =
         yearTickInterval(ppy);
-    final winStartMs = DateTime(windowStart).millisecondsSinceEpoch;
-    final winEndMs =
-        DateTime(windowStart + spanYears).millisecondsSinceEpoch;
+
+    double xOf(double yf) => (yf - scrollYf) * ppy;
 
     int laneIndexOf(Task t) => _priorities.contains(t.priority)
         ? _priorities.indexOf(t.priority)
         : 1;
 
+    // 名称贪心放置（v2.3）：轴 = 绝对年小数，锚点按月步进
+    final nameSlotsList = assignAngledNames(
+      tasks.where((t) => !t.isAnnual && t.startAt != null).toList(),
+      axisOf: (t) {
+        final f1 = _yearFraction(t.startAt!, epochYear);
+        final f2 =
+            t.endAt == null ? f1 : _yearFraction(t.endAt!, epochYear);
+        return (f1, f2);
+      },
+      axisPerPx: 1 / ppy,
+      anchorStep: 1 / 12,
+      measureText: measure,
+      maxHeightPx: nameLayerH - 8,
+    );
+    final nameSlots = {for (final s in nameSlotsList) s.taskId: s};
+    final namesH = nameSlotsList.any((e) => e.visible) ? nameLayerH : 0.0;
+
     // 非 is_annual 任务：按优先级分泳道，泳道内按年小数区间贪心分槽；
-    // 子任务（parent_id 非空）父在窗口内可见时与父同泳道同槽（设计 §3）。
+    // 子任务（parent_id 非空）父在可见任务中则与父同泳道同槽（设计 §3）。
     final laneSlots = List.generate(3, (_) => <List<(double, double)>>[]);
     final slotOf = <String, (int, int)>{}; // taskId -> (lane, slot)
-    final regular = tasks.where((t) => !t.isAnnual).toList()
+    final regular = tasks
+        .where((t) => !t.isAnnual && t.startAt != null)
+        .toList()
       ..sort((a, b) {
-        final c = (a.startAt ?? 0).compareTo(b.startAt ?? 0);
+        final c = a.startAt!.compareTo(b.startAt!);
         return c != 0 ? c : a.id.compareTo(b.id);
       });
-    final subtaskItems = <_YearlyItem>[];
     final items = <_YearlyItem>[];
     final spans = <String, (int, int?)>{};
-
-    _YearlyItem toItem(Task t, int laneIdx, int slot,
-        {bool isSubtask = false}) {
-      final s = t.startAt!;
-      final e = t.endAt;
-      spans[t.id] = (s, e);
-      final x1 = _yearFraction(s, windowStart) * ppy - scrollX;
-      final x2 =
-          e == null ? x1 : _yearFraction(e, windowStart) * ppy - scrollX;
-      return _YearlyItem(
-        task: t,
-        x1: x1,
-        x2: x2,
-        y: double.nan, // 泳道高度确定后回填
-        color: priorityColor(scheme, t.priority),
-        isPoint: e == null,
-        isSubtask: isSubtask,
-        startInWindow: s >= winStartMs,
-        endInWindow: e == null || e <= winEndMs,
-      );
-    }
-
     final pending = <(Task, int, int, bool)>[]; // task, lane, slot, isSubtask
+
     for (final t in regular) {
-      final s = t.startAt;
-      if (s == null) continue;
-      final e = t.endAt;
-      if (s >= winEndMs) continue;
-      if (e != null && e <= winStartMs) continue;
-      if (e == null && s < winStartMs) continue;
       final lane = laneIndexOf(t);
-      final f1 = _yearFraction(s, windowStart);
-      final f2 = e == null ? f1 : _yearFraction(e, windowStart);
+      final f1 = _yearFraction(t.startAt!, epochYear);
+      final f2 = t.endAt == null ? f1 : _yearFraction(t.endAt!, epochYear);
       final parentId = t.parentId;
       final parentPlace = parentId == null ? null : slotOf[parentId];
       if (parentPlace != null) {
@@ -456,8 +537,7 @@ class _YearlyLayout {
       var slot = 0;
       while (true) {
         if (slot == slots.length) slots.add([]);
-        final clash =
-            slots[slot].any((iv) => f1 <= iv.$2 && iv.$1 <= f2);
+        final clash = slots[slot].any((iv) => f1 <= iv.$2 && iv.$1 <= f2);
         if (!clash) {
           slots[slot].add((f1, f2));
           break;
@@ -475,7 +555,7 @@ class _YearlyLayout {
     ];
 
     double laneTop(int laneIdx) {
-      var y = headerH.toDouble();
+      var y = namesH + headerH.toDouble();
       for (var i = 0; i < laneIdx; i++) {
         y += laneHeights[i];
       }
@@ -485,95 +565,40 @@ class _YearlyLayout {
     double itemY(int laneIdx, int slot) =>
         laneTop(laneIdx) + 8 + slot * slotH + slotH / 2;
 
-    // 名称层：每年 ≥64dp 时按 45° 斜文本贪心放置（放不下不显示）
-    final allowNames = ppy >= _YearlyViewState._nameThresholdPpy;
-    final nameAnchors = <String, double>{};
-    final placedU = <(double, double)>[];
-    final placedV = <double>[];
-    bool nameFits(double anchorPx, double lengthPx) {
-      const sqrt2 = math.sqrt2;
-      final u0 = anchorPx / sqrt2;
-      final u1 = u0 + lengthPx;
-      final v = -anchorPx / sqrt2;
-      for (var i = 0; i < placedU.length; i++) {
-        final (pu0, pu1) = placedU[i];
-        if (u1 > pu0 && u0 < pu1 && (v - placedV[i]).abs() < 14) return false;
-      }
-      return true;
-    }
-
     for (final (t, lane, slot, isSub) in pending) {
-      final item = toItem(t, lane, slot, isSubtask: isSub);
-      final y = itemY(lane, slot);
-      final placed = _YearlyItem(
-        task: item.task,
-        x1: item.x1,
-        x2: item.x2,
-        y: y,
-        color: item.color,
-        isPoint: item.isPoint,
-        isSubtask: item.isSubtask,
-        startInWindow: item.startInWindow,
-        endInWindow: item.endInWindow,
-      );
-      if (isSub) {
-        subtaskItems.add(placed);
-      } else {
-        items.add(placed);
-        if (allowNames) {
-          final width = t.title.length * 11.0; // 粗略估算（全角≈字宽）
-          final anchor = placed.x1;
-          if (width / math.sqrt2 <= nameLayerH - 8 &&
-              nameFits(anchor, width)) {
-            nameAnchors[t.id] = anchor;
-            const sqrt2 = math.sqrt2;
-            placedU.add((anchor / sqrt2, anchor / sqrt2 + width));
-            placedV.add(-anchor / sqrt2);
-          }
-        }
-      }
-    }
-    final namesH = nameAnchors.isEmpty ? 0.0 : nameLayerH;
-    // 名称层出现时整体下移
-    if (namesH > 0) {
-      items.addAll(subtaskItems);
-      final shifted = [
-        for (final it in items)
-          _YearlyItem(
-            task: it.task,
-            x1: it.x1,
-            x2: it.x2,
-            y: it.y + namesH,
-            color: it.color,
-            isPoint: it.isPoint,
-            isSubtask: it.isSubtask,
-            startInWindow: it.startInWindow,
-            endInWindow: it.endInWindow,
-          )
-      ];
-      items
-        ..clear()
-        ..addAll(shifted);
-    } else {
-      items.addAll(subtaskItems);
+      final s = t.startAt!;
+      final e = t.endAt;
+      spans[t.id] = (s, e);
+      final x1 = xOf(_yearFraction(s, epochYear));
+      final x2 = e == null ? x1 : xOf(_yearFraction(e, epochYear));
+      items.add(_YearlyItem(
+        task: t,
+        x1: x1,
+        x2: x2,
+        y: itemY(lane, slot),
+        color: priorityColor(scheme, t.priority),
+        isPoint: e == null,
+        isSubtask: isSub,
+      ));
     }
 
-    // is_annual：按 startAt 的月日映射到窗口内每年一个小节点（设计 §2.1）
+    // is_annual：按 startAt 的月日映射到可视范围每年一个小节点（设计 §2.1）
     final annualNodes = <_AnnualNode>[];
     final annualIds = <String>{};
+    final firstVisYear = epochYear + scrollYf.floor();
+    final lastVisYear = epochYear + (scrollYf + viewW / ppy).ceil();
     for (final t in tasks) {
       if (!t.isAnnual || t.startAt == null) continue;
       annualIds.add(t.id);
       final origin = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
       final lane = laneIndexOf(t);
-      final y = itemY(lane, 0) + namesH;
-      for (var year = windowStart; year < windowStart + spanYears; year++) {
+      final y = itemY(lane, 0);
+      for (var year = firstVisYear - 1; year <= lastVisYear + 1; year++) {
         final occ = DateTime(year, origin.month, origin.day, origin.hour,
             origin.minute, origin.second);
         annualNodes.add(_AnnualNode(
           task: t,
-          x: _yearFraction(occ.millisecondsSinceEpoch, windowStart) * ppy -
-              scrollX,
+          x: xOf(_yearFraction(occ.millisecondsSinceEpoch, epochYear)),
           y: y,
           color: priorityColor(scheme, t.priority),
         ));
@@ -593,18 +618,14 @@ class _YearlyLayout {
             it.task.id,
             _DragMode.move));
       } else {
-        if (it.endInWindow) {
-          hitRegions.add(_HitRegion(
-              Rect.fromCircle(center: Offset(it.x2, it.y), radius: 10),
-              it.task.id,
-              _DragMode.resizeEnd));
-        }
-        if (it.startInWindow) {
-          hitRegions.add(_HitRegion(
-              Rect.fromCircle(center: Offset(it.x1, it.y), radius: 10),
-              it.task.id,
-              _DragMode.resizeStart));
-        }
+        hitRegions.add(_HitRegion(
+            Rect.fromCircle(center: Offset(it.x2, it.y), radius: 10),
+            it.task.id,
+            _DragMode.resizeEnd));
+        hitRegions.add(_HitRegion(
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 10),
+            it.task.id,
+            _DragMode.resizeStart));
         hitRegions.add(_HitRegion(
             Rect.fromLTRB(it.x1, it.y - 8, it.x2, it.y + 8),
             it.task.id,
@@ -617,21 +638,26 @@ class _YearlyLayout {
           n.task.id,
           _DragMode.move));
     }
-    // 名称也可点按进编辑器
-    for (final it in items) {
-      final anchor = nameAnchors[it.task.id];
-      if (anchor == null) continue;
-      hitRegions.add(_HitRegion(
-          Rect.fromLTWH(anchor - 2, 0, 60, namesH), it.task.id, _DragMode.move));
+    // 名称命中区域：点按名称 = 选中（设计 §13-6）
+    if (namesH > 0) {
+      for (final it in items) {
+        if (it.isSubtask) continue;
+        final slot = nameSlots[it.task.id];
+        if (slot == null || !slot.visible) continue;
+        final anchorX = xOf(slot.centerMinutes);
+        hitRegions.add(_HitRegion(
+            Rect.fromLTWH(anchorX - 2, 0, slot.textWidth * 0.7 + 8, namesH),
+            it.task.id,
+            _DragMode.move));
+      }
     }
 
     return _YearlyLayout._(
       viewW: viewW,
       viewH: viewH,
       ppy: ppy,
-      scrollX: scrollX,
-      windowStart: windowStart,
-      spanYears: spanYears,
+      scrollYf: scrollYf,
+      epochYear: epochYear,
       namesH: namesH,
       laneHeights: laneHeights,
       majorTickYears: majorTickYears,
@@ -640,12 +666,14 @@ class _YearlyLayout {
       items: items,
       annualNodes: annualNodes,
       annualIds: annualIds,
-      nameAnchors: nameAnchors,
+      nameSlots: nameSlots,
       hitRegions: hitRegions,
       originals: originals,
       spans: spans,
       scheme: scheme,
       nowYear: now.year,
+      selectedTaskId: selectedTaskId,
+      pulseYear: pulseYear,
     );
   }
 
@@ -662,45 +690,36 @@ class _YearlyPainter extends CustomPainter {
 
   _YearlyPainter(this.layout);
 
+  double _xOf(double yf) => (yf - layout.scrollYf) * layout.ppy;
+
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
     final ppy = layout.ppy;
-    final scrollX = layout.scrollX;
     final top = layout.namesH;
     final ganttTop = top + _YearlyLayout.headerH;
 
     // 当前年高亮竖带
-    final nowX = (layout.nowYear - layout.windowStart) * ppy - scrollX;
-    if (nowX + ppy >= 0 && nowX <= size.width) {
+    final nowX = (layout.nowYear - layout.epochYear).toDouble();
+    final nowX0 = _xOf(nowX);
+    if (nowX0 + ppy >= 0 && nowX0 <= size.width) {
       canvas.drawRect(
-        Rect.fromLTWH(nowX, top, ppy, size.height - top),
+        Rect.fromLTWH(nowX0, top, ppy, size.height - top),
         Paint()..color = scheme.primary.withValues(alpha: 0.08),
       );
     }
 
-    // 泳道底色
-    var laneTop = ganttTop;
-    for (var i = 0; i < 3; i++) {
-      canvas.drawRect(
-        Rect.fromLTWH(0, laneTop, size.width, layout.laneHeights[i]),
-        Paint()
-          ..color = priorityColor(scheme, _YearlyLayout._priorities[i])
-              .withValues(alpha: 0.05),
-      );
-      laneTop += layout.laneHeights[i];
-    }
-
     _drawTicks(canvas, size, top, ganttTop);
 
-    // 任务：节点 / 带端点方块的线段；子任务画更小节点/更细线
+    // 任务：节点 / 带端点方块的线段；子任务画更小节点/更细线；
+    // 选中任务加描边（v2.3 选中-调整）。无泳道底纹（v2.3 §13-8）。
     for (final it in layout.items) {
       if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
       final done = it.task.status == TaskStatus.done;
       final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
       if (it.isPoint) {
-        canvas.drawCircle(
-            Offset(it.x1, it.y), it.isSubtask ? 3.5 : 5, Paint()..color = color);
+        canvas.drawCircle(Offset(it.x1, it.y), it.isSubtask ? 3.5 : 5,
+            Paint()..color = color);
       } else {
         canvas.drawLine(
           Offset(it.x1, it.y),
@@ -711,12 +730,11 @@ class _YearlyPainter extends CustomPainter {
             ..strokeCap = StrokeCap.round,
         );
         final breakSize = it.isSubtask ? 5.0 : 8.0;
-        if (it.startInWindow) {
-          _drawBreak(canvas, it.x1, it.y, color, breakSize);
-        }
-        if (it.endInWindow) {
-          _drawBreak(canvas, it.x2, it.y, color, breakSize);
-        }
+        _drawBreak(canvas, it.x1, it.y, color, breakSize);
+        _drawBreak(canvas, it.x2, it.y, color, breakSize);
+      }
+      if (it.task.id == layout.selectedTaskId) {
+        _drawSelection(canvas, it, scheme);
       }
     }
 
@@ -730,21 +748,33 @@ class _YearlyPainter extends CustomPainter {
         Paint()
           ..color = n.color.withValues(alpha: done ? doneTaskOpacity : 1.0),
       );
+      if (n.task.id == layout.selectedTaskId) {
+        canvas.drawCircle(
+          Offset(n.x, n.y),
+          7,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5
+            ..color = scheme.primary,
+        );
+      }
     }
 
-    // 名称层：45° 斜文本 + 垂直虚线
+    // 名称层：45° 斜文本 + 垂直虚线（贪心放置，v2.3）
     if (layout.namesH > 0) {
       final dashPaint = Paint()
         ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
         ..strokeWidth = 1;
       for (final it in layout.items) {
-        final anchor = layout.nameAnchors[it.task.id];
-        if (anchor == null) continue;
-        if (anchor < -120 || anchor > size.width + 120) continue;
+        if (it.isSubtask) continue;
+        final slot = layout.nameSlots[it.task.id];
+        if (slot == null || !slot.visible) continue;
+        final anchorX = _xOf(slot.centerMinutes);
+        if (anchorX < -120 || anchorX > size.width + 120) continue;
         var dy = layout.namesH - 6.0;
         while (dy < it.y - 8) {
           canvas.drawLine(
-              Offset(anchor, dy), Offset(anchor, dy + 3), dashPaint);
+              Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
           dy += 6;
         }
         final done = it.task.status == TaskStatus.done;
@@ -762,11 +792,41 @@ class _YearlyPainter extends CustomPainter {
           maxLines: 1,
         )..layout();
         canvas.save();
-        canvas.translate(anchor, layout.namesH - 4);
+        canvas.translate(anchorX, layout.namesH - 4);
         canvas.rotate(-math.pi / 4);
         tp.paint(canvas, Offset(3, -tp.height + 2));
         canvas.restore();
       }
+    }
+
+    // 「现在」脉冲高亮（1.5 秒）
+    final pulseYear = layout.pulseYear;
+    if (pulseYear != null) {
+      final x = _xOf((pulseYear - layout.epochYear).toDouble());
+      if (x + ppy >= 0 && x <= size.width) {
+        canvas.drawRect(
+          Rect.fromLTWH(x, top, ppy, size.height - top),
+          Paint()..color = scheme.primary.withValues(alpha: 0.2),
+        );
+      }
+    }
+  }
+
+  void _drawSelection(Canvas canvas, _YearlyItem it, ColorScheme scheme) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..color = scheme.primary;
+    if (it.isPoint) {
+      canvas.drawCircle(Offset(it.x1, it.y), 9, paint);
+    } else {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTRB(it.x1 - 6, it.y - 9, it.x2 + 6, it.y + 9),
+          const Radius.circular(6),
+        ),
+        paint,
+      );
     }
   }
 
@@ -775,7 +835,7 @@ class _YearlyPainter extends CustomPainter {
   void _drawTicks(Canvas canvas, Size size, double top, double ganttTop) {
     final scheme = layout.scheme;
     final ppy = layout.ppy;
-    final scrollX = layout.scrollX;
+    final scrollYf = layout.scrollYf;
     final major = layout.majorTickYears;
     final minor = layout.minorTickYears;
     final gridPaint = Paint()
@@ -786,46 +846,47 @@ class _YearlyPainter extends CustomPainter {
       ..strokeWidth = 1;
     final labelStyle =
         TextStyle(fontSize: 10, color: scheme.onSurfaceVariant);
-    final firstYear =
-        layout.windowStart + (scrollX / ppy).floor() - 1;
-    final lastYear =
-        layout.windowStart + ((scrollX + size.width) / ppy).ceil() + 1;
+
+    // 可视范围内的刻度序号（刻度序号 = 年 - epochYear，从 0 起对齐 major）
+    final firstTick = scrollYf.floor() - major;
+    final lastTick = (scrollYf + size.width / ppy).ceil() + major;
 
     if (minor != null) {
-      final firstMinor = (firstYear - layout.windowStart) ~/ minor * minor;
-      for (var o = firstMinor;
-          o <= lastYear - layout.windowStart;
-          o += minor) {
-        if (o < 0 || o % major == 0) continue;
-        final x = o * ppy - scrollX;
-        canvas.drawLine(
-            Offset(x, ganttTop - 3), Offset(x, ganttTop), tickPaint);
+      var t = (firstTick / minor).floor() * minor;
+      while (t <= lastTick) {
+        if (t % major != 0) {
+          final x = _xOf(t.toDouble());
+          canvas.drawLine(
+              Offset(x, ganttTop - 3), Offset(x, ganttTop), tickPaint);
+        }
+        t += minor;
       }
     }
 
-    final firstMajor = (firstYear - layout.windowStart) ~/ major * major;
-    for (var o = firstMajor; o <= lastYear - layout.windowStart; o += major) {
-      if (o < 0) continue;
-      final x = o * ppy - scrollX;
+    var t = (firstTick / major).floor() * major;
+    while (t <= lastTick) {
+      final x = _xOf(t.toDouble());
       canvas.drawLine(Offset(x, top), Offset(x, size.height), gridPaint);
       canvas.drawLine(
           Offset(x, ganttTop - 6), Offset(x, ganttTop), tickPaint);
-      if ((o ~/ major) % layout.labelStride != 0) continue;
-      final tp = TextPainter(
-        text: TextSpan(
-            text: '${layout.windowStart + o}', style: labelStyle),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      canvas.save();
-      canvas.translate(x + 2, ganttTop - 8);
-      canvas.rotate(-math.pi / 4);
-      tp.paint(canvas, Offset(2, -tp.height + 1));
-      canvas.restore();
+      if ((t ~/ major) % layout.labelStride == 0) {
+        final tp = TextPainter(
+          text: TextSpan(
+              text: '${layout.epochYear + t}', style: labelStyle),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        canvas.save();
+        canvas.translate(x + 2, ganttTop - 8);
+        canvas.rotate(-math.pi / 4);
+        tp.paint(canvas, Offset(2, -tp.height + 1));
+        canvas.restore();
+      }
+      t += major;
     }
   }
 
-  void _drawBreak(
-      Canvas canvas, double x, double y, Color color, double size) {
+  void _drawBreak(Canvas canvas, double x, double y, Color color,
+      [double size = 8]) {
     canvas.drawRect(
       Rect.fromCenter(center: Offset(x, y), width: size, height: size),
       Paint()..color = color,

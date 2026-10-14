@@ -6,6 +6,7 @@ import '../../models/task.dart';
 import '../../services/database.dart';
 import '../../services/task_scale.dart';
 import '../../services/text_width.dart';
+import '../shared/segmented_selector.dart';
 
 /// 任务编辑器结果：task 为保存后的任务；deleted=true 表示用户在编辑器内删除。
 /// 返回 null = 用户取消。编辑器本身不写数据库，持久化与撤销注册由调用方负责。
@@ -497,8 +498,10 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
             const SizedBox(height: 12),
             Text('类型', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: 6),
-            _EqualSegments(
+            SegmentedSelector<int>(
+              values: const [0, 1],
               labels: const ['时间点', '时间段'],
+              height: 36,
               selected: _kind == TaskKind.point ? 0 : 1,
               onChanged: _switchKind,
             ),
@@ -520,9 +523,11 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
             const SizedBox(height: 12),
             Text('优先级', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: 6),
-            _EqualSegments(
+            SegmentedSelector<int>(
+              values: const [0, 1, 2],
               labels: const ['重要', '一般', '不重要'],
               dots: const [Colors.red, Colors.amber, Colors.green],
+              height: 36,
               selected: switch (_priority) {
                 TaskPriority.important => 0,
                 TaskPriority.minor => 2,
@@ -610,78 +615,6 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// 等宽分段控件（设计 §10.1）：固定总宽内均分，选中态只改底色不改宽度。
-class _EqualSegments extends StatelessWidget {
-  final List<String> labels;
-  final List<Color?> dots;
-  final int selected;
-  final ValueChanged<int> onChanged;
-
-  const _EqualSegments({
-    required this.labels,
-    this.dots = const [],
-    required this.selected,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      height: 36,
-      decoration: BoxDecoration(
-        border: Border.all(color: scheme.outline),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Row(
-        children: [
-          for (var i = 0; i < labels.length; i++) ...[
-            if (i > 0) Container(width: 1, color: scheme.outline),
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => onChanged(i),
-                child: Container(
-                  alignment: Alignment.center,
-                  color: i == selected
-                      ? scheme.secondaryContainer
-                      : Colors.transparent,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (i < dots.length && dots[i] != null) ...[
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: dots[i],
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
-                      Text(
-                        labels[i],
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: i == selected
-                              ? scheme.onSecondaryContainer
-                              : scheme.onSurface,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
       ),
     );
   }

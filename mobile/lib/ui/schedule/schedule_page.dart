@@ -6,6 +6,8 @@ import '../../services/date_ranges.dart';
 import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../messages/message_widgets.dart';
+import '../shared/segmented_selector.dart';
+import '../tasks/task_detail_panel.dart';
 import '../tasks/task_editor.dart';
 import '../tasks/task_tile.dart';
 import 'day_view.dart';
@@ -14,13 +16,20 @@ import 'schedule_shared.dart';
 import 'year_view.dart';
 import 'yearly_view.dart';
 
-/// 日程页（设计 §2，v2.2：四粒度）：年度/年/月/日四级视图 + 顶部控制条。
+/// 日程页（设计 §2，v2.3 修订）：年度/年/月/日四级视图均无限滚动。
+///
+/// v2.3 变更：
+/// - 平移箭头移入标题栏（[←] 标题 [→]），控制条只留段选器（居中固定宽）
+///   与「现在」按钮；
+/// - 任务加载改为按可视窗口增量缓存（[onVisibleWindowChanged] 驱动），
+///   视图滚动即加载，不再按"当前期"整期重查；
+/// - 点选任务后底部板块切换为任务详情面板（[TaskDetailPanel]），
+///   无选中时保持原底部任务列表板块（年=yearly∩当年、月=monthly∩当月、
+///   日=daily∩当日，基于可视中心 [_anchor]）。
 ///
 /// 尺度过滤表（§2）：年度视图 = yearly + is_annual 逐年节点；
 /// 年视图 = quarterly/monthly/weekly；月视图 = weekly/daily；
 /// 日视图 = timed；不定时不进日程；is_annual 只进年度视图。
-/// 年/月/日视图下方有底部任务列表板块（§2）：年视图下 = yearly∩当年、
-/// 月视图下 = monthly∩当月、日视图下 = daily∩当日（均为 active）。
 ///
 /// 通过 GlobalKey<SchedulePageState> 暴露 [SchedulePageState.reload]，
 /// 供壳层切页时刷新（与其他页一致）。
@@ -34,69 +43,75 @@ class SchedulePage extends StatefulWidget {
 class SchedulePageState extends State<SchedulePage> {
   /// 0=年度 1=年 2=月 3=日
   int _granularity = 0;
-  late int _year; // 年度粒度下为窗口中心年
-  late int _month;
-  late DateTime _day;
 
-  List<Task> _tasks = [];
+  /// 当前视图的可视中心（由各视图 onCenterChanged 回写）。
+  DateTime _anchor = DateTime.now();
+
+  Task? _selectedTask;
+
+  /// 增量任务缓存：覆盖 [_cacheStart, _cacheEnd] 区间（按 id 覆盖式合并）。
+  final Map<String, Task> _cache = {};
+  int? _cacheStart;
+  int? _cacheEnd;
   bool _loading = true;
+
+  final _yearlyKey = GlobalKey<YearlyViewState>();
+  final _yearKey = GlobalKey<YearViewState>();
+  final _monthKey = GlobalKey<MonthViewState>();
+  final _dayKey = GlobalKey<DayViewState>();
 
   @override
   void initState() {
     super.initState();
-    final now = DateTime.now();
-    _year = now.year;
-    _month = now.month;
-    _day = DateTime(now.year, now.month, now.day);
     reload();
   }
 
-  /// 当前视图的查询范围（年度粒度取中心年 ±10 窗口；
-  /// 月视图取覆盖当月的完整周网格）。
-  (int, int) get _range {
-    switch (_granularity) {
-      case 0:
-        return (
-          DateTime(_year - 10).millisecondsSinceEpoch,
-          DateTime(_year + 11).millisecondsSinceEpoch,
-        );
-      case 2:
-        final first = DateTime(_year, _month);
-        final start = DateTime(
-            first.year, first.month, first.day - first.weekday % 7);
-        final last = DateTime(_year, _month + 1, 0);
-        final end =
-            DateTime(last.year, last.month, last.day + (7 - last.weekday % 7));
-        return (start.millisecondsSinceEpoch, end.millisecondsSinceEpoch);
-      case 3:
-        final start = DateTime(_day.year, _day.month, _day.day);
-        return (
-          start.millisecondsSinceEpoch,
-          DateTime(start.year, start.month, start.day + 1)
-              .millisecondsSinceEpoch
-        );
-      default:
-        final r = yearRange(_year);
-        return (r.startMs, r.endMs);
-    }
+  /// 初始/全量刷新：清空缓存，加载可视中心 ±2 年。
+  Future<void> reload() async {
+    _cache.clear();
+    _cacheStart = null;
+    _cacheEnd = null;
+    final y = _anchor.year;
+    await _ensureRange(
+      DateTime(y - 2).millisecondsSinceEpoch,
+      DateTime(y + 3).millisecondsSinceEpoch,
+    );
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      final sel = _selectedTask;
+      if (sel != null) _selectedTask = _cache[sel.id] ?? sel;
+    });
   }
 
-  Future<void> reload() async {
+  /// 视口超出缓存范围时增量加载（向两侧各扩一个窗口宽做提前量）。
+  Future<void> _ensureRange(int startMs, int endMs) async {
+    final cs = _cacheStart, ce = _cacheEnd;
+    if (cs != null && ce != null && startMs >= cs && endMs <= ce) return;
+    final span = endMs - startMs;
+    final ns = (cs == null
+            ? startMs
+            : (startMs < cs ? startMs : cs)) -
+        span;
+    final ne =
+        (ce == null ? endMs : (endMs > ce ? endMs : ce)) + span;
     final db = AppDatabase.instance;
-    final (startMs, endMs) = _range;
     // active 为主，done 淡色/划线展示；archived 不显示。
     // getTasksOverlapping 无条件包含年度任务，这里按平移后的发生年过滤。
     final results = await Future.wait([
-      db.getTasksOverlapping(startMs, endMs),
-      db.getTasksOverlapping(startMs, endMs, status: TaskStatus.done),
+      db.getTasksOverlapping(ns, ne),
+      db.getTasksOverlapping(ns, ne, status: TaskStatus.done),
     ]);
     final tasks = [...results[0], ...results[1]]
-        .where((t) => occurrenceOverlapping(t, startMs, endMs) != null)
-        .toList();
+        .where((t) => occurrenceOverlapping(t, ns, ne) != null);
     if (!mounted) return;
     setState(() {
-      _tasks = tasks;
-      _loading = false;
+      for (final t in tasks) {
+        _cache[t.id] = t;
+      }
+      _cacheStart =
+          _cacheStart == null ? ns : (_cacheStart! < ns ? _cacheStart! : ns);
+      _cacheEnd = _cacheEnd == null ? ne : (_cacheEnd! > ne ? _cacheEnd! : ne);
     });
   }
 
@@ -104,7 +119,7 @@ class SchedulePageState extends State<SchedulePage> {
   List<Task> get _ganttTasks {
     switch (_granularity) {
       case 0:
-        return _tasks
+        return _cache.values
             .where((t) =>
                 t.isAnnual || deriveTaskScale(t.startAt, t.endAt) == 'yearly')
             .toList();
@@ -119,7 +134,7 @@ class SchedulePageState extends State<SchedulePage> {
 
   List<Task> _filterByScales(String view) {
     final scales = scalesForView(view);
-    return _tasks
+    return _cache.values
         .where((t) =>
             !t.isAnnual && scales.contains(deriveTaskScale(t.startAt, t.endAt)))
         .toList();
@@ -128,15 +143,31 @@ class SchedulePageState extends State<SchedulePage> {
   /// 底部任务列表板块（设计 §2）：年视图下 = yearly∩当年；
   /// 月视图下 = monthly∩当月；日视图下 = daily∩当日；年度视图无底部板块。
   List<Task> get _bottomTasks {
+    final (int, int)? range = switch (_granularity) {
+      1 => (() {
+          final r = yearRange(_anchor.year);
+          return (r.startMs, r.endMs);
+        })(),
+      2 => (
+          DateTime(_anchor.year, _anchor.month).millisecondsSinceEpoch,
+          DateTime(_anchor.year, _anchor.month + 1).millisecondsSinceEpoch,
+        ),
+      3 => (
+          DateTime(_anchor.year, _anchor.month, _anchor.day)
+              .millisecondsSinceEpoch,
+          DateTime(_anchor.year, _anchor.month, _anchor.day + 1)
+              .millisecondsSinceEpoch,
+        ),
+      _ => null,
+    };
+    if (range == null) return const [];
     final scale = switch (_granularity) {
       1 => 'yearly',
       2 => 'monthly',
-      3 => 'daily',
-      _ => '',
+      _ => 'daily',
     };
-    if (scale.isEmpty) return const [];
-    final (startMs, endMs) = _range;
-    return _tasks
+    final (startMs, endMs) = range;
+    return _cache.values
         .where((t) =>
             t.status == TaskStatus.active &&
             !t.isAnnual &&
@@ -172,6 +203,7 @@ class SchedulePageState extends State<SchedulePage> {
           }
         },
       );
+      setState(() => _selectedTask = null);
       await reload();
       if (mounted) _showUndoSnack('已删除');
     } else if (result.task != null) {
@@ -234,141 +266,216 @@ class SchedulePageState extends State<SchedulePage> {
   Future<void> _toggleDone(Task task) =>
       toggleTaskDoneWithUndo(context, task, onChanged: reload);
 
-  void _drillToYear(int year) {
+  /// 详情面板中点父/子任务：按目标任务的尺度切换到能展示它的粒度并定位。
+  void _jumpToTask(Task t) {
+    final s = t.startAt;
+    if (s == null) return; // 不定时任务在日程无视图可跳
+    final g = t.isAnnual
+        ? 0
+        : switch (deriveTaskScale(t.startAt, t.endAt)) {
+            'yearly' => 0,
+            'quarterly' || 'monthly' => 1,
+            'weekly' || 'daily' => 2,
+            _ => 3,
+          };
     setState(() {
-      _year = year;
-      _granularity = 1;
+      _granularity = g;
+      _selectedTask = t;
+      _anchor = DateTime.fromMillisecondsSinceEpoch(s);
     });
-    reload();
-  }
-
-  void _drillToMonth(int month) {
-    setState(() {
-      _month = month;
-      _granularity = 2;
-    });
-    reload();
-  }
-
-  void _drillToDay(DateTime day) {
-    setState(() {
-      _day = DateTime(day.year, day.month, day.day);
-      _year = day.year;
-      _month = day.month;
-      _granularity = 3;
-    });
-    reload();
-  }
-
-  /// 上跳链（设计 §2.5）：日 → 月 → 年 → 年度。
-  void _jumpUp() {
-    if (_granularity == 0) return;
-    setState(() => _granularity--);
-    reload();
-  }
-
-  void _goToday() {
-    final now = DateTime.now();
-    setState(() {
-      _year = now.year;
-      _month = now.month;
-      _day = DateTime(now.year, now.month, now.day);
-    });
-    reload();
-  }
-
-  void _shiftPeriod(int delta) {
-    setState(() {
-      switch (_granularity) {
+    _afterTwoFrames(() {
+      switch (g) {
         case 0:
-          _year += delta * 10; // 年度窗口按 ±10 年平移
+          _yearlyKey.currentState?.scrollToTask(t);
         case 1:
-          _year += delta;
+          _yearKey.currentState?.scrollToTask(t);
         case 2:
-          final d = DateTime(_year, _month + delta);
-          _year = d.year;
-          _month = d.month;
+          _monthKey.currentState?.scrollToTask(t);
         case 3:
-          _day = DateTime(_day.year, _day.month, _day.day + delta);
-          _year = _day.year;
-          _month = _day.month;
+          _dayKey.currentState?.scrollToTask(t);
       }
     });
-    reload();
   }
 
-  /// AppBar 标题（设计 §2/§2.5）：年度粒度显示轴覆盖区间，其余显示当前期。
+  /// 等两帧再定位：第一帧新视图挂载（其首帧 scrollToNow），第二帧覆盖到目标。
+  void _afterTwoFrames(VoidCallback fn) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => fn());
+    });
+  }
+
+  void _onTaskSelected(Task? t) {
+    setState(() => _selectedTask = t);
+  }
+
+  /// 标题栏箭头平移：年度 ±20 年、年 ±1 年、月 ±1 月、日 ±1 天。
+  void _shiftPeriod(int delta) {
+    final target = switch (_granularity) {
+      0 => DateTime(_anchor.year + delta * 20, _anchor.month),
+      1 => DateTime(_anchor.year + delta, _anchor.month),
+      2 => DateTime(_anchor.year, _anchor.month + delta),
+      _ => DateTime(_anchor.year, _anchor.month, _anchor.day + delta),
+    };
+    setState(() => _anchor = target);
+    switch (_granularity) {
+      case 0:
+        _yearlyKey.currentState?.scrollTo(target);
+      case 1:
+        _yearKey.currentState?.scrollTo(target);
+      case 2:
+        _monthKey.currentState?.scrollTo(target);
+      case 3:
+        _dayKey.currentState?.scrollTo(target);
+    }
+  }
+
+  void _goNow() {
+    switch (_granularity) {
+      case 0:
+        _yearlyKey.currentState?.scrollToNow();
+      case 1:
+        _yearKey.currentState?.scrollToNow();
+      case 2:
+        _monthKey.currentState?.scrollToNow();
+      case 3:
+        _dayKey.currentState?.scrollToNow();
+    }
+  }
+
+  /// AppBar 标题：年度粒度显示窗口覆盖区间，其余显示可视中心所在期。
   String get _title {
     switch (_granularity) {
       case 0:
-        return '${_year - 10}–${_year + 10}';
+        return '${_anchor.year - 10}–${_anchor.year + 9}';
       case 2:
-        return '$_year年$_month月';
+        return '${_anchor.year}年${_anchor.month}月';
       case 3:
         const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-        return '${_day.year}年${_day.month}月${_day.day}日'
-            '（${weekdays[_day.weekday - 1]}）';
+        return '${_anchor.year}年${_anchor.month}月${_anchor.day}日'
+            '（${weekdays[_anchor.weekday - 1]}）';
       default:
-        return '$_year年';
+        return '${_anchor.year}年';
     }
   }
 
   Widget _ganttView() {
+    final tasks = _ganttTasks;
     switch (_granularity) {
       case 0:
         return YearlyView(
-          key: ValueKey('Y-$_year'),
-          centerYear: _year,
-          tasks: _ganttTasks,
-          onTaskTap: _editTask,
+          key: _yearlyKey,
+          tasks: tasks,
+          selectedTaskId: _selectedTask?.id,
+          onTaskSelected: _onTaskSelected,
           onTaskMoved: _moveTask,
           onYearTap: _drillToYear,
+          onVisibleWindowChanged: _ensureRange,
+          onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 2:
         return MonthView(
-          key: ValueKey('m-$_year-$_month'),
-          year: _year,
-          month: _month,
-          tasks: _ganttTasks,
+          key: _monthKey,
+          tasks: tasks,
+          selectedTaskId: _selectedTask?.id,
+          onTaskSelected: _onTaskSelected,
           onDayTap: _drillToDay,
-          onTaskTap: _editTask,
           onTaskMoved: _moveTask,
-          onBlankLongPress: (day) => _createTask(
-            seedStartAt:
-                DateTime(day.year, day.month, day.day, 9).millisecondsSinceEpoch,
+          onBlankLongPress: (ms) => _createTask(
+            seedStartAt: ms + const Duration(hours: 9).inMilliseconds,
             seedKind: TaskKind.point,
           ),
+          onVisibleWindowChanged: _ensureRange,
+          onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 3:
         return DayView(
-          key: ValueKey('d-$_day'),
-          day: _day,
-          tasks: _ganttTasks,
-          onTaskTap: _editTask,
+          key: _dayKey,
+          tasks: tasks,
+          selectedTaskId: _selectedTask?.id,
+          onTaskSelected: _onTaskSelected,
           onTaskMoved: _moveTask,
           onBlankLongPress: (ms) => _createTask(
             seedStartAt: ms,
             seedKind: TaskKind.point,
           ),
+          onVisibleWindowChanged: _ensureRange,
+          onCenterChanged: (c) => setState(() => _anchor = c),
         );
       default:
         return YearView(
-          key: ValueKey('y-$_year'),
-          year: _year,
-          tasks: _ganttTasks,
+          key: _yearKey,
+          tasks: tasks,
+          selectedTaskId: _selectedTask?.id,
+          onTaskSelected: _onTaskSelected,
           onMonthTap: _drillToMonth,
-          onTaskTap: _editTask,
           onTaskMoved: _moveTask,
-          onBlankLongPress: (month) => _createTask(
-            seedStartAt: DateTime(_year, month, 1, 9).millisecondsSinceEpoch,
-            seedKind: TaskKind.range,
-          ),
+          onBlankLongPress: (ms) {
+            final m = DateTime.fromMillisecondsSinceEpoch(ms);
+            _createTask(
+              seedStartAt:
+                  DateTime(m.year, m.month, 1, 9).millisecondsSinceEpoch,
+              seedKind: TaskKind.range,
+            );
+          },
+          onVisibleWindowChanged: _ensureRange,
+          onCenterChanged: (c) => setState(() => _anchor = c),
         );
     }
   }
 
-  /// 底部任务列表板块（设计 §2）：行 UI 照搬待办页（TaskTile 平铺）。
+  void _drillToYear(int year) {
+    final target = DateTime(year, 7);
+    setState(() {
+      _granularity = 1;
+      _selectedTask = null;
+      _anchor = target;
+    });
+    _afterTwoFrames(() => _yearKey.currentState?.scrollTo(target));
+  }
+
+  void _drillToMonth(int monthMs) {
+    final m = DateTime.fromMillisecondsSinceEpoch(monthMs);
+    final target = DateTime(m.year, m.month, 15);
+    setState(() {
+      _granularity = 2;
+      _selectedTask = null;
+      _anchor = target;
+    });
+    _afterTwoFrames(() => _monthKey.currentState?.scrollTo(target));
+  }
+
+  void _drillToDay(int dayMs) {
+    final d = DateTime.fromMillisecondsSinceEpoch(dayMs);
+    final target = DateTime(d.year, d.month, d.day);
+    setState(() {
+      _granularity = 3;
+      _selectedTask = null;
+      _anchor = target;
+    });
+    _afterTwoFrames(() => _dayKey.currentState?.scrollTo(target));
+  }
+
+  /// 底部板块：有选中 = 任务详情面板；无选中 = 原任务列表（设计 §2）。
   Widget _bottomSection(BuildContext context) {
+    final selected = _selectedTask;
+    if (selected != null) {
+      return Expanded(
+        flex: 2,
+        child: Column(children: [
+          const Divider(height: 1),
+          Expanded(
+            child: SingleChildScrollView(
+              child: TaskDetailPanel(
+                key: ValueKey(selected.id),
+                task: selected,
+                onEdit: () => _editTask(selected),
+                onOpenTask: _jumpToTask,
+              ),
+            ),
+          ),
+        ]),
+      );
+    }
     final tasks = _bottomTasks;
     return Expanded(
       flex: 2,
@@ -438,7 +545,23 @@ class SchedulePageState extends State<SchedulePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(_title)),
+      appBar: AppBar(
+        title: Row(children: [
+          IconButton(
+            tooltip: '上一期',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _shiftPeriod(-1),
+            icon: const Icon(Icons.chevron_left),
+          ),
+          Expanded(child: Center(child: Text(_title))),
+          IconButton(
+            tooltip: '下一期',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _shiftPeriod(1),
+            icon: const Icon(Icons.chevron_right),
+          ),
+        ]),
+      ),
       body: Column(
         children: [
           SizedBox(
@@ -446,37 +569,36 @@ class SchedulePageState extends State<SchedulePage> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  IconButton(
-                    tooltip: '上一期',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => _shiftPeriod(-1),
-                    icon: const Icon(Icons.chevron_left),
-                  ),
-                  Expanded(
-                    child: ScheduleSegments(
+                  SizedBox(
+                    width: 260,
+                    child: SegmentedSelector<int>(
+                      values: const [0, 1, 2, 3],
                       labels: const ['年度', '年', '月', '日'],
                       selected: _granularity,
                       onChanged: (i) {
                         if (i == _granularity) return;
-                        setState(() => _granularity = i);
-                        reload();
+                        setState(() {
+                          _granularity = i;
+                          _selectedTask = null;
+                        });
+                        _afterTwoFrames(() {
+                          switch (i) {
+                            case 0:
+                              _yearlyKey.currentState?.scrollTo(_anchor);
+                            case 1:
+                              _yearKey.currentState?.scrollTo(_anchor);
+                            case 2:
+                              _monthKey.currentState?.scrollTo(_anchor);
+                            case 3:
+                              _dayKey.currentState?.scrollTo(_anchor);
+                          }
+                        });
                       },
                     ),
                   ),
-                  IconButton(
-                    tooltip: '下一期',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => _shiftPeriod(1),
-                    icon: const Icon(Icons.chevron_right),
-                  ),
-                  TextButton(onPressed: _goToday, child: const Text('今天')),
-                  IconButton(
-                    tooltip: '上跳',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: _granularity > 0 ? _jumpUp : null,
-                    icon: const Icon(Icons.arrow_upward),
-                  ),
+                  TextButton(onPressed: _goNow, child: const Text('现在')),
                 ],
               ),
             ),
@@ -485,7 +607,8 @@ class SchedulePageState extends State<SchedulePage> {
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else ...[
             Expanded(flex: 3, child: _ganttView()),
-            if (_granularity != 0) _bottomSection(context),
+            if (_granularity != 0 || _selectedTask != null)
+              _bottomSection(context),
           ],
         ],
       ),

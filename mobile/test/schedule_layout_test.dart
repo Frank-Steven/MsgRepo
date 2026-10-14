@@ -129,25 +129,24 @@ void main() {
     });
   });
 
-  group('assignDayNames', () {
+  group('assignDayNames（v2.3 贪心：无比例尺阈值）', () {
     final day = DateTime(2026, 10, 12);
     int at(int hour, [int minute = 0]) =>
         DateTime(day.year, day.month, day.day, hour, minute)
             .millisecondsSinceEpoch;
 
-    test('比例尺未达每 5 分钟一个节点时全部不可见', () {
-      final slots = assignDayNames(
-        [_task('a', at(9)), _task('b', at(14))],
-        minutesPerNode: 10,
-      );
-      expect(slots, hasLength(2));
-      expect(slots.every((e) => !e.visible), isTrue);
-    });
-
-    test('达到 5 分钟阈值且互不碰撞时可见', () {
+    test('低缩放但互不碰撞时仍可见（贪心无阈值）', () {
       final slots = assignDayNames(
         [_task('a', at(9), title: '站会'), _task('b', at(14), title: '评审')],
-        minutesPerNode: 5,
+        pxPerMinute: 14 / 10, // 每 10 分钟一个节点的密度（旧阈值下全隐藏）
+      );
+      expect(slots.every((e) => e.visible), isTrue);
+    });
+
+    test('互不碰撞时可见', () {
+      final slots = assignDayNames(
+        [_task('a', at(9), title: '站会'), _task('b', at(14), title: '评审')],
+        pxPerMinute: 2.8,
       );
       expect(slots.every((e) => e.visible), isTrue);
       expect(slots[0].centerMinutes, 9 * 60);
@@ -160,7 +159,7 @@ void main() {
           _task('a', at(9, 0), title: '晨会'),
           _task('b', at(9, 2), title: '讨论'), // 2 分钟后，斜文本带必然碰撞
         ],
-        minutesPerNode: 5,
+        pxPerMinute: 2.8,
       );
       final byId = {for (final e in slots) e.taskId: e};
       expect(byId['a']!.visible, isTrue);
@@ -175,7 +174,7 @@ void main() {
           // 晨会的斜文本带挡住，09:10 放得下
           _task('b', at(9, 0), endMs: at(10, 0), title: ' workshops '),
         ],
-        minutesPerNode: 5,
+        pxPerMinute: 2.8,
       );
       final b = slots.firstWhere((e) => e.taskId == 'b');
       expect(b.visible, isTrue);
@@ -185,9 +184,77 @@ void main() {
     test('标题过长超出名称层高度时不显示', () {
       final slots = assignDayNames(
         [_task('a', at(9), title: '这是一个名字特别特别长的任务标题啊啊啊')],
-        minutesPerNode: 5,
+        pxPerMinute: 2.8,
       );
       expect(slots.single.visible, isFalse);
+    });
+  });
+
+  group('assignAngledNames（年度视图轴=年小数）', () {
+    test('同年两个节点任务：先放下的可见，后到的碰撞隐藏', () {
+      final slots = assignAngledNames(
+        [_task('a', _ms(2026, 3)), _task('b', _ms(2026, 4))],
+        axisOf: (t) {
+          final d = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
+          final y = d.year +
+              (t.startAt! - DateTime(d.year).millisecondsSinceEpoch) /
+                  (DateTime(d.year + 1).millisecondsSinceEpoch -
+                      DateTime(d.year).millisecondsSinceEpoch);
+          return (y, y);
+        },
+        axisPerPx: 1 / 100, // 每年 100px
+        anchorStep: 1 / 12,
+      );
+      expect(slots[0].visible, isTrue);
+      expect(slots[1].visible, isFalse);
+    });
+
+    test('相距足够远的年份都可见', () {
+      final slots = assignAngledNames(
+        [_task('a', _ms(2026, 3), title: '甲'), _task('b', _ms(2030, 3), title: '乙')],
+        axisOf: (t) {
+          final d = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
+          return (d.year.toDouble(), d.year.toDouble());
+        },
+        axisPerPx: 1 / 100,
+        anchorStep: 1 / 12,
+      );
+      expect(slots.every((e) => e.visible), isTrue);
+    });
+
+    test('缩放变密（每年 px 变小）时碰撞增多、可见名减少', () {
+      final tasks = [
+        _task('a', _ms(2026, 1), title: '任务甲'),
+        _task('b', _ms(2026, 4), title: '任务乙'),
+        _task('c', _ms(2026, 7), title: '任务丙'),
+      ];
+      double yearOf(Task t) =>
+          DateTime.fromMillisecondsSinceEpoch(t.startAt!).year.toDouble() +
+          (DateTime.fromMillisecondsSinceEpoch(t.startAt!).month - 1) / 12;
+      final dense = assignAngledNames(tasks,
+          axisOf: (t) => (yearOf(t), yearOf(t)),
+          axisPerPx: 1 / 100,
+          anchorStep: 1 / 12);
+      final sparse = assignAngledNames(tasks,
+          axisOf: (t) => (yearOf(t), yearOf(t)),
+          axisPerPx: 1 / 20,
+          anchorStep: 1 / 12);
+      final denseVisible = dense.where((e) => e.visible).length;
+      final sparseVisible = sparse.where((e) => e.visible).length;
+      expect(sparseVisible, lessThan(denseVisible));
+    });
+  });
+
+  group('无限滚动索引映射（v2.3）', () {
+    test('itemIndex ↔ 单位序号往返一致（含负序号）', () {
+      for (final u in [-10000, -5, 0, 7, 99999]) {
+        expect(unitIndexForItem(itemIndexForUnit(u)), u);
+      }
+    });
+
+    test('基准单位落在大初始偏移处', () {
+      expect(itemIndexForUnit(0), infiniteScrollOffset);
+      expect(unitIndexForItem(infiniteScrollOffset), 0);
     });
   });
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../main.dart' show themeModeNotifier, themeModeFromString;
+import 'shared/segmented_selector.dart';
 import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
@@ -407,9 +408,11 @@ class _SettingsPageState extends State<SettingsPage> {
         padding: const EdgeInsets.all(16),
         children: [
           _section('外观', [
-            _EqualSegments<String>(
-              options: const [('system', '跟随系统'), ('light', '浅色'), ('dark', '深色')],
-              value: _themeMode,
+            SegmentedSelector<String>(
+              values: const ['system', 'light', 'dark'],
+              labels: const ['跟随系统', '浅色', '深色'],
+              height: 40,
+              selected: _themeMode,
               onChanged: _setThemeMode,
             ),
           ]),
@@ -539,12 +542,14 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
             const SizedBox(height: 12),
-            _EqualSegments<String>(
-              options: const [
-                (AppFilterConfig.modeAll, '全部应用'),
-                (AppFilterConfig.modeAllowlist, '仅指定应用'),
+            SegmentedSelector<String>(
+              values: const [
+                AppFilterConfig.modeAll,
+                AppFilterConfig.modeAllowlist,
               ],
-              value: _filterConfig.mode,
+              labels: const ['全部应用', '仅指定应用'],
+              height: 40,
+              selected: _filterConfig.mode,
               onChanged: (v) => _saveFilter(_filterConfig.copyWith(mode: v)),
             ),
             if (_filterConfig.isAllowlist) ...[
@@ -605,65 +610,6 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
           ]),
         ],
-      ),
-    );
-  }
-}
-
-/// 等宽分段控件（设计 §10.1）：固定总宽内均分，选中只改底色不改宽度，不换行。
-class _EqualSegments<T> extends StatelessWidget {
-  final List<(T, String)> options;
-  final T value;
-  final ValueChanged<T> onChanged;
-
-  const _EqualSegments({
-    required this.options,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return SizedBox(
-      width: double.infinity,
-      height: 40,
-      child: Container(
-        decoration: BoxDecoration(
-          border: Border.all(color: cs.outlineVariant),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Row(
-          children: [
-            for (var i = 0; i < options.length; i++) ...[
-              if (i > 0) Container(width: 1, color: cs.outlineVariant),
-              Expanded(
-                child: Material(
-                  color: options[i].$1 == value
-                      ? cs.secondaryContainer
-                      : Colors.transparent,
-                  child: InkWell(
-                    onTap: () => onChanged(options[i].$1),
-                    child: Center(
-                      child: Text(
-                        options[i].$2,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: options[i].$1 == value
-                              ? cs.onSecondaryContainer
-                              : cs.onSurface,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
       ),
     );
   }

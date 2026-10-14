@@ -1,39 +1,195 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
+import 'layout.dart';
 import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
-/// 月视图（设计 §2.2）：4-6 行周网格（星期日→星期六），日格内沿用
-/// 节点/线段（高度受限只画节点，名称层省略），跨日任务画跨格线段。
+/// 月视图（v2.3）：纵向无限滚动，按月分段；每月固定 6 行周网格
+///（星期日→星期六，前后月溢出日淡显），月与月按周衔接。
+/// 日格内沿用 v2.2 的节点/线段标记；选中-调整（仅已选中的任务可拖拽，
+/// 未选中时任务上的拖动手势落入列表滚动）；点空白格：有选中=取消，
+/// 无选中=下钻日视图。
 class MonthView extends StatefulWidget {
-  final int year;
-  final int month;
   final List<Task> tasks;
-  final ValueChanged<DateTime> onDayTap;
-  final ValueChanged<Task> onTaskTap;
+  final String? selectedTaskId;
+  final ValueChanged<Task?> onTaskSelected;
+
+  /// 点空白日格下钻：参数为该日 0 点时间戳。
+  final ValueChanged<int> onDayTap;
 
   /// 拖拽落库回调：(原任务, 新 startAt, 新 endAt)。
   final void Function(Task task, int newStartMs, int? newEndMs) onTaskMoved;
-  final ValueChanged<DateTime> onBlankLongPress;
+
+  /// 长按空白日格：参数为该日 0 点时间戳。
+  final ValueChanged<int> onBlankLongPress;
+  final void Function(int startMs, int endMs) onVisibleWindowChanged;
+  final ValueChanged<DateTime> onCenterChanged;
 
   const MonthView({
     super.key,
+    required this.tasks,
+    required this.selectedTaskId,
+    required this.onTaskSelected,
+    required this.onDayTap,
+    required this.onTaskMoved,
+    required this.onBlankLongPress,
+    required this.onVisibleWindowChanged,
+    required this.onCenterChanged,
+  });
+
+  @override
+  State<MonthView> createState() => MonthViewState();
+}
+
+class MonthViewState extends State<MonthView> {
+  static const int _baseYear = 2000; // item 0 = 2000 年 1 月
+  static const double _labelH = 24;
+  static const double _cellH = 56;
+  static const int _rows = 6; // 固定 6 行保证 itemExtent 恒定
+
+  static double get _itemExtent =>
+      _labelH + _MonthLayout.headerH + _rows * _cellH;
+
+  final ScrollController _ctrl = ScrollController();
+  Timer? _pulseTimer;
+  DateTime? _pulseDay; // 「现在」脉冲：今天所在格
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) scrollToNow();
+    });
+  }
+
+  @override
+  void dispose() {
+    _pulseTimer?.cancel();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  int _monthIndexOf(DateTime d) => (d.year - _baseYear) * 12 + d.month - 1;
+  DateTime _monthOfIndex(int i) => DateTime(_baseYear + i ~/ 12, i % 12 + 1);
+
+  void _reportWindow() {
+    if (!_ctrl.hasClients) return;
+    final first =
+        (_ctrl.offset / _itemExtent).floor() + infiniteScrollOffset;
+    final count =
+        (_ctrl.position.viewportDimension / _itemExtent).ceil() + 1;
+    final a = _monthOfIndex(first - infiniteScrollOffset);
+    final b = DateTime(a.year, a.month + count);
+    widget.onVisibleWindowChanged(
+        a.millisecondsSinceEpoch, b.millisecondsSinceEpoch);
+    final centerIdx =
+        ((_ctrl.offset + _ctrl.position.viewportDimension / 2) / _itemExtent)
+            .floor();
+    final c = _monthOfIndex(centerIdx);
+    widget.onCenterChanged(DateTime(c.year, c.month, 15));
+  }
+
+  void scrollToNow() {
+    final now = DateTime.now();
+    _jumpToMonth(_monthIndexOf(now));
+    _pulseTimer?.cancel();
+    setState(() => _pulseDay = DateTime(now.year, now.month, now.day));
+    _pulseTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _pulseDay = null);
+    });
+  }
+
+  void scrollTo(DateTime target) => _jumpToMonth(_monthIndexOf(target));
+
+  void scrollToTask(Task t) {
+    final s = t.startAt;
+    if (s == null) return;
+    _jumpToMonth(_monthIndexOf(DateTime.fromMillisecondsSinceEpoch(s)));
+  }
+
+  void _jumpToMonth(int index) {
+    if (!_ctrl.hasClients) return;
+    final max = _ctrl.position.maxScrollExtent;
+    _ctrl.jumpTo((index * _itemExtent - 8).clamp(0.0, max));
+    _reportWindow();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, cons) {
+      return NotificationListener<ScrollNotification>(
+        onNotification: (n) {
+          if (n is ScrollUpdateNotification || n is ScrollEndNotification) {
+            _reportWindow();
+          }
+          return false;
+        },
+        child: ListView.builder(
+          controller: _ctrl,
+          itemExtent: _itemExtent,
+          itemBuilder: (context, i) {
+            final m = _monthOfIndex(i - infiniteScrollOffset);
+            return _MonthItem(
+              key: ValueKey('${m.year}-${m.month}'),
+              year: m.year,
+              month: m.month,
+              width: cons.maxWidth,
+              cellH: _cellH,
+              rows: _rows,
+              tasks: widget.tasks,
+              selectedTaskId: widget.selectedTaskId,
+              pulseDay: _pulseDay,
+              onTaskSelected: widget.onTaskSelected,
+              onDayTap: widget.onDayTap,
+              onTaskMoved: widget.onTaskMoved,
+              onBlankLongPress: widget.onBlankLongPress,
+            );
+          },
+        ),
+      );
+    });
+  }
+}
+
+class _MonthItem extends StatefulWidget {
+  final int year;
+  final int month;
+  final double width;
+  final double cellH;
+  final int rows;
+  final List<Task> tasks;
+  final String? selectedTaskId;
+  final DateTime? pulseDay;
+  final ValueChanged<Task?> onTaskSelected;
+  final ValueChanged<int> onDayTap;
+  final void Function(Task task, int newStartMs, int? newEndMs) onTaskMoved;
+  final ValueChanged<int> onBlankLongPress;
+
+  const _MonthItem({
+    super.key,
     required this.year,
     required this.month,
+    required this.width,
+    required this.cellH,
+    required this.rows,
     required this.tasks,
+    required this.selectedTaskId,
+    required this.pulseDay,
+    required this.onTaskSelected,
     required this.onDayTap,
-    required this.onTaskTap,
     required this.onTaskMoved,
     required this.onBlankLongPress,
   });
 
   @override
-  State<MonthView> createState() => _MonthViewState();
+  State<_MonthItem> createState() => _MonthItemState();
 }
 
-class _MonthViewState extends State<MonthView> {
+class _MonthItemState extends State<_MonthItem> {
   Task? _dragOriginal;
   _DragMode? _dragMode;
   int _deltaStart = 0; // 预览位移（天）
@@ -43,13 +199,6 @@ class _MonthViewState extends State<MonthView> {
   int _origEndIdx = 0;
 
   late final DateTime _gridStart;
-  late final int _rows;
-
-  (int, int) get _gridRange {
-    final end = DateTime(_gridStart.year, _gridStart.month,
-        _gridStart.day + _rows * 7);
-    return (_gridStart.millisecondsSinceEpoch, end.millisecondsSinceEpoch);
-  }
 
   @override
   void initState() {
@@ -57,8 +206,12 @@ class _MonthViewState extends State<MonthView> {
     final first = DateTime(widget.year, widget.month);
     _gridStart =
         DateTime(first.year, first.month, first.day - first.weekday % 7);
-    final last = DateTime(widget.year, widget.month + 1, 0);
-    _rows = ((first.day - 1 + first.weekday % 7) + last.day + 6) ~/ 7;
+  }
+
+  (int, int) get _gridRange {
+    final end = DateTime(_gridStart.year, _gridStart.month,
+        _gridStart.day + widget.rows * 7);
+    return (_gridStart.millisecondsSinceEpoch, end.millisecondsSinceEpoch);
   }
 
   List<Task> _displayTasks() {
@@ -86,22 +239,31 @@ class _MonthViewState extends State<MonthView> {
     final hit = layout.hitTest(d.localPosition);
     if (hit != null) {
       final original = layout.originals[hit.taskId];
-      if (original != null) widget.onTaskTap(original);
+      if (original != null) widget.onTaskSelected(original);
+      return;
+    }
+    if (widget.selectedTaskId != null) {
+      widget.onTaskSelected(null); // 有选中时点空白 = 取消选中
       return;
     }
     final day = layout.dayAt(d.localPosition);
-    if (day != null) widget.onDayTap(day);
+    if (day != null) {
+      widget.onDayTap(day.millisecondsSinceEpoch);
+    }
   }
 
   void _onLongPress(LongPressStartDetails d, _MonthLayout layout) {
     if (layout.hitTest(d.localPosition) != null) return;
     final day = layout.dayAt(d.localPosition);
-    if (day != null) widget.onBlankLongPress(day);
+    if (day != null) {
+      widget.onBlankLongPress(day.millisecondsSinceEpoch);
+    }
   }
 
   void _onPanStart(DragStartDetails d, _MonthLayout layout) {
     final hit = layout.hitTest(d.localPosition);
-    if (hit == null) return;
+    // 选中-调整：仅已选中的任务可拖拽，否则手势落入列表滚动
+    if (hit == null || hit.taskId != widget.selectedTaskId) return;
     final original = layout.originals[hit.taskId];
     final span = layout.spanOf(hit.taskId);
     if (original == null || span == null) return;
@@ -120,17 +282,14 @@ class _MonthViewState extends State<MonthView> {
     if (_dragOriginal == null) return;
     final dp = layout.dayPosAt(d.localPosition);
     final span = _origEndIdx - _origStartIdx;
-    final maxIdx = _rows * 7 - 1;
+    final maxIdx = widget.rows * 7 - 1;
     setState(() {
       switch (_dragMode!) {
         case _DragMode.move:
-          final start0 = (dp - _grabOffset)
-              .round()
-              .clamp(0, maxIdx - span);
+          final start0 = (dp - _grabOffset).round().clamp(0, maxIdx - span);
           _deltaStart = start0 - _origStartIdx;
           _deltaEnd = _deltaStart;
         case _DragMode.resizeStart:
-          // v2.2 取消跨度钳制：只受网格界与本端点次序约束
           final start0 = dp.round().clamp(0, _origEndIdx);
           _deltaStart = start0 - _origStartIdx;
         case _DragMode.resizeEnd:
@@ -172,36 +331,45 @@ class _MonthViewState extends State<MonthView> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final gridH = _MonthLayout.headerH + widget.rows * widget.cellH;
     final display = _displayTasks();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final layout = _MonthLayout.build(
-          width: constraints.maxWidth,
-          height: constraints.maxHeight,
-          year: widget.year,
-          month: widget.month,
-          gridStart: _gridStart,
-          rows: _rows,
-          tasks: display,
-          originals: {for (final t in widget.tasks) t.id: t},
-          scheme: scheme,
-          now: DateTime.now(),
-        );
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapUp: (d) => _onTapUp(d, layout),
-          onLongPressStart: (d) => _onLongPress(d, layout),
-          onPanStart: (d) => _onPanStart(d, layout),
-          onPanUpdate: (d) => _onPanUpdate(d, layout),
-          onPanEnd: (_) => _onPanEnd(),
-          onPanCancel: _onPanEnd,
-          child: CustomPaint(
-            size: Size(constraints.maxWidth, constraints.maxHeight),
-            painter: _MonthPainter(layout),
-          ),
-        );
-      },
+    final layout = _MonthLayout.build(
+      width: widget.width,
+      height: gridH,
+      year: widget.year,
+      month: widget.month,
+      gridStart: _gridStart,
+      rows: widget.rows,
+      tasks: display,
+      originals: {for (final t in widget.tasks) t.id: t},
+      scheme: scheme,
+      now: DateTime.now(),
+      selectedTaskId: widget.selectedTaskId,
+      pulseDay: widget.pulseDay,
     );
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(
+        padding: const EdgeInsets.only(left: 12, top: 4, bottom: 2),
+        child: Text('${widget.year} 年 ${widget.month} 月',
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: scheme.onSurfaceVariant)),
+      ),
+      GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapUp: (d) => _onTapUp(d, layout),
+        onLongPressStart: (d) => _onLongPress(d, layout),
+        onPanStart: (d) => _onPanStart(d, layout),
+        onPanUpdate: (d) => _onPanUpdate(d, layout),
+        onPanEnd: (_) => _onPanEnd(),
+        onPanCancel: _onPanEnd,
+        child: CustomPaint(
+          size: Size(widget.width, gridH),
+          painter: _MonthPainter(layout),
+        ),
+      ),
+    ]);
   }
 }
 
@@ -261,6 +429,8 @@ class _MonthLayout {
   final Map<String, (int, int)> spans; // taskId -> (startCellIdx, endCellIdx)
   final ColorScheme scheme;
   final DateTime now;
+  final String? selectedTaskId;
+  final DateTime? pulseDay;
 
   _MonthLayout._({
     required this.width,
@@ -277,6 +447,8 @@ class _MonthLayout {
     required this.spans,
     required this.scheme,
     required this.now,
+    required this.selectedTaskId,
+    required this.pulseDay,
   });
 
   static const _priorities = [
@@ -301,6 +473,8 @@ class _MonthLayout {
     required Map<String, Task> originals,
     required ColorScheme scheme,
     required DateTime now,
+    String? selectedTaskId,
+    DateTime? pulseDay,
   }) {
     final cellW = width / 7;
     final cellH = (height - headerH) / rows;
@@ -390,7 +564,10 @@ class _MonthLayout {
     }
 
     // 命中区域：子任务在前（与父同 y 叠加时优先命中子任务）
-    for (final m in [...marks.where((x) => x.isSubtask), ...marks.where((x) => !x.isSubtask)]) {
+    for (final m in [
+      ...marks.where((x) => x.isSubtask),
+      ...marks.where((x) => !x.isSubtask)
+    ]) {
       if (m.isPoint) {
         hitRegions.add(_HitRegion(
             Rect.fromCircle(center: Offset(m.x1, m.y), radius: 10),
@@ -431,6 +608,8 @@ class _MonthLayout {
       spans: spans,
       scheme: scheme,
       now: now,
+      selectedTaskId: selectedTaskId,
+      pulseDay: pulseDay,
     );
   }
 
@@ -478,31 +657,49 @@ class _MonthPainter extends CustomPainter {
         text: TextSpan(text: weekdays[i], style: headerStyle),
         textDirection: TextDirection.ltr,
       )..layout();
-      tp.paint(canvas,
-          Offset((i + 0.5) * layout.cellW - tp.width / 2, 4));
+      tp.paint(
+          canvas, Offset((i + 0.5) * layout.cellW - tp.width / 2, 4));
     }
 
-    final today = DateTime(
-        layout.now.year, layout.now.month, layout.now.day);
+    final today =
+        DateTime(layout.now.year, layout.now.month, layout.now.day);
     final dateStyle = TextStyle(fontSize: 11, color: scheme.onSurface);
-    final outsideStyle =
-        TextStyle(fontSize: 11, color: scheme.onSurfaceVariant.withValues(alpha: 0.5));
+    final outsideStyle = TextStyle(
+        fontSize: 11,
+        color: scheme.onSurfaceVariant.withValues(alpha: 0.5));
     final gridLine = Paint()
       ..color = scheme.outlineVariant.withValues(alpha: 0.5)
-      ..strokeWidth = 0.5;
+      ..strokeWidth = 0.5
+      ..style = PaintingStyle.stroke;
 
+    final pulse = layout.pulseDay;
     for (var i = 0; i < layout.rows * 7; i++) {
-      final rect = Rect.fromLTWH((i % 7) * layout.cellW,
-          _MonthLayout.headerH + (i ~/ 7) * layout.cellH, layout.cellW, layout.cellH);
-      canvas.drawRect(rect, gridLine..style = PaintingStyle.stroke);
+      final rect = Rect.fromLTWH(
+          (i % 7) * layout.cellW,
+          _MonthLayout.headerH + (i ~/ 7) * layout.cellH,
+          layout.cellW,
+          layout.cellH);
       final day = DateTime(layout.gridStart.year, layout.gridStart.month,
           layout.gridStart.day + i);
       final isToday = day == today;
-      if (isToday) {
+      final isPulse = pulse != null && day == pulse;
+      if (isPulse) {
+        canvas.drawRect(
+            rect, Paint()..color = scheme.primary.withValues(alpha: 0.15));
+      } else if (isToday) {
         canvas.drawRect(
             rect.deflate(1),
             Paint()
               ..color = scheme.primaryContainer.withValues(alpha: 0.45));
+      }
+      canvas.drawRect(rect, gridLine);
+      if (isPulse) {
+        canvas.drawRect(
+            rect,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2
+              ..color = scheme.primary.withValues(alpha: 0.7));
       }
       final tp = TextPainter(
         text: TextSpan(
@@ -522,9 +719,29 @@ class _MonthPainter extends CustomPainter {
       final done = m.task.status == TaskStatus.done;
       final color = m.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
       final r = m.isSubtask ? 2.0 : 3.0;
+      final selected = m.task.id == layout.selectedTaskId;
       if (m.isPoint) {
+        if (selected) {
+          canvas.drawCircle(
+              Offset(m.x1, m.y),
+              r + 3,
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1.5
+                ..color = scheme.primary);
+        }
         canvas.drawCircle(Offset(m.x1, m.y), r, Paint()..color = color);
       } else {
+        if (selected) {
+          canvas.drawLine(
+            Offset(m.x1, m.y),
+            Offset(m.x2, m.y),
+            Paint()
+              ..color = scheme.primary.withValues(alpha: 0.5)
+              ..strokeWidth = m.isSubtask ? 5.5 : 7
+              ..strokeCap = StrokeCap.round,
+          );
+        }
         canvas.drawLine(
           Offset(m.x1, m.y),
           Offset(m.x2, m.y),

@@ -550,6 +550,23 @@ class AppDatabase {
     return rows.map(Task.fromRow).toList();
   }
 
+  /// 全部父任务的直接子任务进度：parentId -> (done, total)（设计 §3，v2.3）。
+  Future<Map<String, (int, int)>> getSubtaskProgress() async {
+    final db = await database;
+    final rows = await db.query('tasks',
+        columns: ['parent_id', 'status'], where: 'parent_id IS NOT NULL');
+    final result = <String, (int, int)>{};
+    for (final r in rows) {
+      final p = r['parent_id'] as String;
+      final cur = result[p] ?? (0, 0);
+      result[p] = (
+        cur.$1 + (r['status'] == TaskStatus.done ? 1 : 0),
+        cur.$2 + 1,
+      );
+    }
+    return result;
+  }
+
   Future<void> setTaskStatus(List<String> ids, String status) async {
     if (ids.isEmpty) return;
     final db = await database;
