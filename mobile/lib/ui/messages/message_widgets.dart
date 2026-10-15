@@ -9,22 +9,32 @@ import '../shared/priority_dot.dart';
 /// 未处理分组键（设计 §5.1）。
 const String kGroupPending = 'pending';
 
+/// 已处理分组键（v2.6.3）：status=processed 且非垃圾的消息（AI 处理并确认过，
+/// 关联任务未必完成；与「已完成」筛选键是两个维度）。
+const String kGroupProcessed = 'processed';
+
 /// 「已完成」筛选键（v2.4）：不占分组，选中时额外显示关联任务已完成的消息。
 const String kFilterDone = 'done';
 
-/// 分组展示顺序：未处理 → 垃圾（v2.6 去颜色化：红/黄/绿分组下线，
-/// AI 评估的 priority 仍落库，只是列表不再按它分组/染色）。
+/// 分组展示顺序：未处理 → 已处理 → 垃圾（v2.6 去颜色化：红/黄/绿分组下线，
+/// AI 评估的 priority 仍落库，只是列表不再按它分组/染色；v2.6.3 增已处理组）。
 const List<String> kGroupOrder = [
   kGroupPending,
+  kGroupProcessed,
   MessagePriority.junk,
 ];
 
-/// 分组键规则：垃圾单独一组，其余全部归未处理（v2.6）。
-String messageGroupKey(Message m) =>
-    m.priority == MessagePriority.junk ? MessagePriority.junk : kGroupPending;
+/// 分组键规则（三组互斥）：垃圾（priority=junk）单独一组；status=processed
+/// 归已处理；其余全部归未处理。
+String messageGroupKey(Message m) {
+  if (m.priority == MessagePriority.junk) return MessagePriority.junk;
+  if (m.status == MessageStatus.processed) return kGroupProcessed;
+  return kGroupPending;
+}
 
 String messageGroupLabel(String key) => switch (key) {
       kGroupPending => '未处理',
+      kGroupProcessed => '已处理',
       MessagePriority.junk => '垃圾',
       kFilterDone => '已完成',
       _ => key,
