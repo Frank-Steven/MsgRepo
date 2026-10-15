@@ -519,3 +519,12 @@ process(messages):
    - **本地垃圾规则预过滤**：送模型前命中规则直接判 junk（reason 标「规则判定」），不消耗 Token。关键词：退订/回T退订/TD退订/限时秒杀/秒杀价/免费领取/点击领取/现金红包/刷单兼职/兼职日结/低价开发票/0元购；另 106 开头长服务号（`^106\d{5,}$`）+ 含退订字样直接判垃圾。宁漏勿错，只收命中率极高的 boilerplate。规则两端逐条一致（mobile `services/junk_rules.dart` / desktop `src/ai/junk-rules.ts`），改任何一端必须同步另一端。
    - **上下文裁剪**：标题 100 字符、正文 500 字符截断（超出追加「…（已截断）」）；mobile 按 grapheme cluster（characters 包），desktop 按码点（Array.from），差异仅限 emoji 组合序列边界。
    - **content_hash 去重跳过**（mobile 消息页 `_processWithAi`）：送 AI 前查 status='processed' 的 content_hash 集，pending 且同内容已有 processed 记录的消息跳过并 SnackBar 提示「跳过 n 条已处理过的重复消息」；已 processed 消息由用户显式「重新处理」时照常放行。
+
+### v2.6.2（2026-10-16）
+
+真机反馈批：AI 后台处理、消息处理中状态、重复处理拦截、导入图标语义。DB schema 不变（处理中状态为内存态，不落库）。
+
+1. **AI 处理支持后台运行**（§8.3）：新增 `AiProcessingService`（ChangeNotifier 单例，`services/ai_processing.dart）——AI 处理会话（消息列表、逐条结果/错误、流式原文、确认状态）从面板抽到服务层常驻，面板只是它的视图。处理中头部新增「后台」按钮：收起面板、处理继续；消息页顶部出现全局指示条（处理中显示「AI 处理中 x/y，点击查看」，跑完显示「AI 处理完成：N 条结果待确认」），点击回到面板继续确认流；汇总页「关闭」在仍有未确认结果时显示为「稍后确认」（会话保留），全部确认后关闭才清空会话。上一批仍在处理或有待确认结果时拒绝发起新批（SnackBar 说明原因）。后台跑完且有待确认结果时发一次性系统通知（ReminderService 新增 msgrepo_ai 渠道，普通通知、不引入前台服务；注意会被任务提醒重排的 cancelAll 一并清掉，应用内指示条是可靠入口）。未确认结果为内存态，应用重启即丢——确认动作必须用户在场完成。
+2. **消息「正在处理」状态**（§5、§8.3）：状态来源 = AiProcessingService 的内存 processingIds 集（会话 running 时尚未出结果的消息 id），不落库、页面间天然一致。消息列表行标题行显示旋转标记 + 「处理中」小字，期间该行左滑整体禁用。消息页监听服务 revision（粗粒度版本号：开始/逐条结果/完成/确认/清空才 +1，token 高频事件不触发整页重建）。
+3. **不重复处理消息**（§8.3）：选择集构建处统一过滤（`filterProcessable` 纯函数，不依赖面板拦截）——正在处理中的跳过；已 processed 的跳过，只有单条左滑「重新处理」（reprocess=true，判定由分组键改为 status==pending）才放行；pending 且同 content_hash 已有 processed 记录的重复消息跳过（沿用 v2.6.1）。跳过按原因分别计数合并提示（「跳过 n 条已处理、n 条正在处理、n 条重复内容」）。
+4. **导入图标语义修正**（§5）：`Icons.file_upload_outlined`（箭头向上出托盘，像导出/分享）→ `Icons.move_to_inbox_outlined`（箭头向下入托盘）——消息页 AppBar 导入入口与二级导入页「导入 N 条」确认按钮两处统一；设置页无同类导入/导出图标。
