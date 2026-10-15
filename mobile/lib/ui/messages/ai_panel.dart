@@ -1,20 +1,17 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:uuid/uuid.dart';
 
 import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/ai_client.dart';
-import '../../services/database.dart';
-import '../../services/undo_service.dart';
+import '../../services/ai_processing.dart';
 import 'message_widgets.dart';
 
 /// 从消息页升起「AI 处理中」面板（设计 §8.3）：实时滚动原始输出 → 完成后汇总确认。
+/// 会话状态常驻 [AiProcessingService]（v2.6.2 后台处理），面板只是它的视图——
+/// 收起（「后台」按钮）处理继续，重开看到同一会话。
 /// [onChanged] 在数据落库或撤销后回调（消息页 reload）。
 Future<void> showAiProcessPanel(
-  BuildContext context,
-  List<Message> messages, {
+  BuildContext context, {
   VoidCallback? onChanged,
 }) {
   return showModalBottomSheet(
@@ -22,27 +19,14 @@ Future<void> showAiProcessPanel(
     isDismissible: false,
     enableDrag: false,
     isScrollControlled: true,
-    builder: (_) => AiProcessPanel(messages: messages, onChanged: onChanged),
+    builder: (_) => AiProcessPanel(onChanged: onChanged),
   );
 }
 
-class _Outcome {
-  final Message message;
-  AiProcessResult? result;
-  String? error;
-  bool confirmed = false;
-
-  /// 汇总页勾选状态（v2.4：checkbox + 「确认选中」）；默认勾选。
-  bool checked = true;
-
-  _Outcome(this.message);
-}
-
 class AiProcessPanel extends StatefulWidget {
-  final List<Message> messages;
   final VoidCallback? onChanged;
 
-  const AiProcessPanel({super.key, required this.messages, this.onChanged});
+  const AiProcessPanel({super.key, this.onChanged});
 
   @override
   State<AiProcessPanel> createState() => _AiProcessPanelState();
@@ -52,79 +36,40 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _scroll = ScrollController();
 
-  /// 每条消息的流式原始输出（v2.4 卡片化：各自独立成卡）。
-  final Map<String, StringBuffer> _rawById = {};
-  late final List<_Outcome> _outcomes;
+  AiProcessingService get _svc => AiProcessingService.instance;
+  int _tokenRevision = 0;
 
-  StreamSubscription<AiEvent>? _sub;
-  bool _running = true;
-  String? _currentId;
-  String? _fatalError;
-
-  int get _doneCount =>
-      _outcomes.where((o) => o.result != null || o.error != null).length;
-  int get _resultCount => _outcomes.where((o) => o.result != null).length;
-  int get _junkCount => _outcomes
-      .where((o) => o.result?.priority == MessagePriority.junk)
-      .length;
-  int get _draftCount =>
-      _outcomes.where((o) => o.result?.taskDraft != null).length;
-  int get _failCount => _outcomes.where((o) => o.error != null).length;
-  int get _unconfirmedCount =>
-      _outcomes.where((o) => o.result != null && !o.confirmed).length;
-
-  /// 勾选且待确认的条数（v2.4「确认选中」）。
-  int get _checkedCount => _outcomes
-      .where((o) => o.result != null && !o.confirmed && o.checked)
-      .length;
+  AiProcessingSession? get _session => _svc.session;
 
   @override
   void initState() {
     super.initState();
-    _outcomes = [for (final m in widget.messages) _Outcome(m)];
-    if (widget.messages.isNotEmpty) _currentId = widget.messages.first.id;
-    _sub = AiClient.instance.process(widget.messages).listen(
-      _onEvent,
-      onError: (Object e) => setState(() {
-        _running = false;
-        _fatalError = '$e';
-      }),
-      onDone: () {
-        if (mounted) setState(() => _running = false);
-      },
-    );
+    _tokenRevision = _svc.tokenRevision;
+    _svc.attachPanel();
+    _svc.addListener(_onService);
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
+    _svc.removeListener(_onService);
+    _svc.detachPanel();
     _scroll.dispose();
     super.dispose();
   }
 
-  void _onEvent(AiEvent ev) {
+  void _onService() {
     if (!mounted) return;
-    setState(() {
-      switch (ev) {
-        case AiTokenDelta(:final messageId, :final delta):
-          _currentId = messageId;
-          _rawById.putIfAbsent(messageId, StringBuffer.new).write(delta);
-          _scrollToEnd();
-        case AiMessageResult(:final result):
-          _outcomeOf(result.messageId)?.result = result;
-        case AiMessageError(:final messageId, :final error):
-          _outcomeOf(messageId)?.error = error;
-        case AiAllDone():
-          _running = false;
-      }
-    });
-  }
-
-  _Outcome? _outcomeOf(String messageId) {
-    for (final o in _outcomes) {
-      if (o.message.id == messageId) return o;
+    final session = _session;
+    if (session == null) {
+      // 会话被清空（别处关闭/收尾），面板随之退出
+      Navigator.of(context).maybePop();
+      return;
     }
-    return null;
+    if (_svc.tokenRevision != _tokenRevision) {
+      _tokenRevision = _svc.tokenRevision;
+      _scrollToEnd();
+    }
+    setState(() {});
   }
 
   void _scrollToEnd() {
@@ -135,12 +80,11 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     });
   }
 
+  /// 后台（v2.6.2）：收起面板，处理在服务层继续；消息页顶部有全局指示可回来。
+  void _goBackground() => Navigator.of(context).pop();
+
   /// 取消：中断流，已产出的结果保留在汇总面板。
-  Future<void> _cancel() async {
-    AiClient.instance.cancelActive();
-    await _sub?.cancel();
-    if (mounted) setState(() => _running = false);
-  }
+  Future<void> _cancel() => _svc.cancel();
 
   void _showUndoSnack(String label) {
     showUndoSnackBar(context, label,
@@ -148,70 +92,18 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         onUndone: () => widget.onChanged?.call());
   }
 
-  /// 确认 = 写回 priority + status(processed)；有任务草稿则建任务并互链。
-  /// 每次确认作为一个复合逆操作进撤销队列（设计 §5.2/§6）。
-  Future<void> _confirm(List<_Outcome> targets) async {
-    final db = AppDatabase.instance;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final undoItems = <({
-      String messageId,
-      String oldPriority,
-      String oldStatus,
-      String? oldLinkedTaskId,
-      String? createdTaskId,
-    })>[];
-    for (final o in targets) {
-      final r = o.result;
-      if (r == null || o.confirmed) continue;
-      final m = o.message;
-      String? taskId;
-      final draft = r.taskDraft;
-      if (draft != null && draft.title.isNotEmpty) {
-        final task = Task(
-          id: const Uuid().v4(),
-          title: draft.title,
-          description: draft.description,
-          kind: draft.kind,
-          startAt: draft.startAt?.millisecondsSinceEpoch,
-          endAt: draft.endAt?.millisecondsSinceEpoch,
-          priority: draft.priority,
-          sourceMessageId: m.id,
-          status: TaskStatus.active,
-          createdAt: now,
-          updatedAt: now,
-        );
-        await db.insertTask(task);
-        taskId = task.id;
-      }
-      await db.updateMessagePriority([m.id], r.priority);
-      await db.updateMessageStatus([m.id], MessageStatus.processed);
-      await db.setMessageLinkedTask(m.id, taskId);
-      undoItems.add((
-        messageId: m.id,
-        oldPriority: m.priority,
-        oldStatus: m.status,
-        oldLinkedTaskId: m.linkedTaskId,
-        createdTaskId: taskId,
-      ));
-      o.confirmed = true;
-    }
-    if (undoItems.isEmpty) return;
-    final count = undoItems.length;
-    UndoService.instance.register(
-      label: '已确认 $count 条 AI 结果',
-      undo: () async {
-        for (final u in undoItems.reversed) {
-          final taskId = u.createdTaskId;
-          if (taskId != null) await db.deleteTasks([taskId]);
-          await db.updateMessagePriority([u.messageId], u.oldPriority);
-          await db.updateMessageStatus([u.messageId], u.oldStatus);
-          await db.setMessageLinkedTask(u.messageId, u.oldLinkedTaskId);
-        }
-      },
-    );
+  /// 确认选中：写库委托服务层（复合撤销在服务层注册），面板负责提示与刷新。
+  Future<void> _confirm(List<AiOutcome> targets) async {
+    final count = await _svc.confirm(targets);
+    if (count == 0) return;
     widget.onChanged?.call();
-    if (mounted) setState(() {});
     _showUndoSnack('已确认 $count 条 AI 结果');
+  }
+
+  /// 关闭：还有待确认结果时会话保留（消息页入口可回来继续确认），否则收尾清空。
+  void _close() {
+    if (_svc.pendingConfirmCount == 0) _svc.clear();
+    Navigator.of(context).pop();
   }
 
   // ---- UI ----
@@ -240,7 +132,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     return parts.join(' · ');
   }
 
-  Widget _buildProcessing() {
+  Widget _buildProcessing(AiProcessingSession session) {
     final cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -256,9 +148,10 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text('AI 处理中',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
-            Text('已完成 $_doneCount/共 ${widget.messages.length} 条',
+            Text('已完成 ${session.doneCount}/共 ${session.total} 条',
                 style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
             TextButton(onPressed: _cancel, child: const Text('取消')),
+            TextButton(onPressed: _goBackground, child: const Text('后台')),
           ],
         ),
         const SizedBox(height: 8),
@@ -267,21 +160,23 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         Expanded(
           child: ListView(
             controller: _scroll,
-            children: [for (final o in _outcomes) _buildProcessingCard(o)],
+            children: [
+              for (final o in session.outcomes) _buildProcessingCard(session, o)
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _buildProcessingCard(_Outcome o) {
+  Widget _buildProcessingCard(AiProcessingSession session, AiOutcome o) {
     final cs = Theme.of(context).colorScheme;
     final m = o.message;
     final title = m.title.isEmpty ? '(无标题)' : m.title;
-    final isCurrent = o.message.id == _currentId &&
+    final isCurrent = o.message.id == session.currentId &&
         o.result == null &&
         o.error == null &&
-        _running;
+        session.running;
 
     final Widget statusIcon;
     if (o.error != null) {
@@ -296,7 +191,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
       statusIcon = Icon(Icons.schedule, size: 20, color: cs.outline);
     }
 
-    final raw = _rawById[o.message.id]?.toString() ?? '';
+    final raw = session.rawById[o.message.id]?.toString() ?? '';
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -376,7 +271,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     );
   }
 
-  Widget _buildOutcomeTile(_Outcome o) {
+  Widget _buildOutcomeTile(AiOutcome o) {
     final cs = Theme.of(context).colorScheme;
     final m = o.message;
     final error = o.error;
@@ -466,13 +361,25 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     );
   }
 
-  Widget _buildSummary() {
+  Widget _buildSummary(AiProcessingSession session) {
     final cs = Theme.of(context).colorScheme;
+    final outcomes = session.outcomes;
+    final resultCount = outcomes.where((o) => o.result != null).length;
+    final junkCount = outcomes
+        .where((o) => o.result?.priority == MessagePriority.junk)
+        .length;
+    final draftCount =
+        outcomes.where((o) => o.result?.taskDraft != null).length;
+    final unconfirmedCount =
+        outcomes.where((o) => o.result != null && !o.confirmed).length;
+    final checkedCount = outcomes
+        .where((o) => o.result != null && !o.confirmed && o.checked)
+        .length;
     final parts = <String>[
-      '评估 $_resultCount 条',
-      '垃圾 $_junkCount 条',
-      '任务草稿 $_draftCount 条',
-      if (_failCount > 0) '失败 $_failCount 条',
+      '评估 $resultCount 条',
+      '垃圾 $junkCount 条',
+      '任务草稿 $draftCount 条',
+      if (session.failCount > 0) '失败 ${session.failCount} 条',
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -483,55 +390,56 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text('处理结果',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
-            if (_unconfirmedCount > 0)
+            if (unconfirmedCount > 0)
               TextButton(
                 onPressed: () {
                   // 全选 / 全不选切换（只作用于未确认且有结果的条目）
-                  final anyUnchecked = _outcomes.any(
+                  final anyUnchecked = outcomes.any(
                       (o) => o.result != null && !o.confirmed && !o.checked);
                   setState(() {
-                    for (final o in _outcomes) {
+                    for (final o in outcomes) {
                       if (o.result != null && !o.confirmed) {
                         o.checked = anyUnchecked;
                       }
                     }
                   });
                 },
-                child: Text(_checkedCount < _unconfirmedCount
+                child: Text(checkedCount < unconfirmedCount
                     ? '全选'
                     : '全不选'),
               ),
             FilledButton(
-              onPressed: _checkedCount == 0
+              onPressed: checkedCount == 0
                   ? null
                   : () => _confirm([
-                        for (final o in _outcomes)
+                        for (final o in outcomes)
                           if (o.result != null && !o.confirmed && o.checked) o,
                       ]),
-              child: Text(_checkedCount == 0
+              child: Text(checkedCount == 0
                   ? '确认选中'
-                  : '确认选中（$_checkedCount）'),
+                  : '确认选中（$checkedCount）'),
             ),
             const SizedBox(width: 8),
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('关闭'),
+              onPressed: _close,
+              child: Text(
+                  unconfirmedCount > 0 ? '稍后确认' : '关闭'),
             ),
           ],
         ),
         const SizedBox(height: 4),
         Text(parts.join(' / '),
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-        if (_fatalError != null)
+        if (session.fatalError != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child:
-                Text(_fatalError!, style: TextStyle(fontSize: 13, color: cs.error)),
+            child: Text(session.fatalError!,
+                style: TextStyle(fontSize: 13, color: cs.error)),
           ),
         const Divider(height: 16),
         Expanded(
           child: ListView(
-            children: [for (final o in _outcomes) _buildOutcomeTile(o)],
+            children: [for (final o in outcomes) _buildOutcomeTile(o)],
           ),
         ),
       ],
@@ -540,6 +448,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
 
   @override
   Widget build(BuildContext context) {
+    final session = _session;
     final height = MediaQuery.of(context).size.height * 0.8;
     // showModalBottomSheet 会从 MediaQuery 移除顶部 padding（removeTop: true），
     // 普通 SafeArea 拿不到状态栏高度，需直接从 View 读取。
@@ -554,7 +463,11 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
             height: height - topPad,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-              child: _running ? _buildProcessing() : _buildSummary(),
+              child: session == null
+                  ? const Center(child: Text('没有进行中的 AI 处理'))
+                  : session.running
+                      ? _buildProcessing(session)
+                      : _buildSummary(session),
             ),
           ),
         ),

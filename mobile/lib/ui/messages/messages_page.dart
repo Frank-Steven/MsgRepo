@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/message.dart';
 import '../../models/task.dart';
+import '../../services/ai_processing.dart';
 import '../../services/database.dart';
 import '../../services/import_service.dart';
 import '../../services/notification_bridge.dart';
@@ -48,17 +49,31 @@ class MessagesPageState extends State<MessagesPage> {
 
   StreamSubscription<int>? _sub;
 
+  /// AI 处理服务的粗粒度版本号快照（v2.6.2）：token 高频事件不重建整页，
+  /// 只在会话状态变化（开始/逐条结果/完成/确认/清空）时 setState。
+  int _aiRevision = 0;
+
   @override
   void initState() {
     super.initState();
     _sub = NotificationBridge.instance.onNewMessages.listen((_) => reload());
+    _aiRevision = AiProcessingService.instance.revision;
+    AiProcessingService.instance.addListener(_onAiProcessingChanged);
     reload();
   }
 
   @override
   void dispose() {
+    AiProcessingService.instance.removeListener(_onAiProcessingChanged);
     _sub?.cancel();
     super.dispose();
+  }
+
+  void _onAiProcessingChanged() {
+    final rev = AiProcessingService.instance.revision;
+    if (!mounted || rev == _aiRevision) return;
+    _aiRevision = rev;
+    setState(() {});
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
@@ -122,33 +137,46 @@ class MessagesPageState extends State<MessagesPage> {
 
   // ---- AI 处理（设计 §8：路由 + 流式面板）----
 
-  Future<void> _processWithAi(List<String> ids) async {
+  /// 发起 AI 处理。[reprocess]=true 仅用于单条左滑「重新处理」——
+  /// 已 processed 的消息只有这条路径允许再次发起（v2.6.2）。
+  Future<void> _processWithAi(List<String> ids, {bool reprocess = false}) async {
     final msgs = await _db.getMessagesByIds(ids);
     if (msgs.isEmpty || !mounted) return;
     // 保持传入顺序（多选时为用户点选顺序）
     final order = {for (var i = 0; i < ids.length; i++) ids[i]: i};
     msgs.sort(
         (a, b) => (order[a.id] ?? ids.length).compareTo(order[b.id] ?? ids.length));
-    // v2.6.1 省 Token：pending 且同内容已有 processed 记录的消息跳过送模型；
-    // 已 processed 的消息是用户显式「重新处理」，照常放行
+    // v2.6.1/v2.6.2：选择集构建处统一过滤（不依赖面板拦截）——正在处理中/
+    // 已 processed（非显式重新处理）/同内容已有 processed 记录的重复消息跳过
+    final svc = AiProcessingService.instance;
     final processedHashes = await _db.getProcessedContentHashes();
     if (!mounted) return;
-    final toProcess = <Message>[];
-    var skipped = 0;
-    for (final m in msgs) {
-      if (m.status == MessageStatus.pending &&
-          processedHashes.contains(m.contentHash)) {
-        skipped++;
-      } else {
-        toProcess.add(m);
-      }
-    }
-    if (skipped > 0) {
+    final (toProcess, skipped) = filterProcessable(
+      msgs,
+      reprocess: reprocess,
+      processingIds: svc.processingIds,
+      processedHashes: processedHashes,
+    );
+    final parts = <String>[
+      if (skipped['processed'] case final n?) '$n 条已处理',
+      if (skipped['processing'] case final n?) '$n 条正在处理',
+      if (skipped['duplicate'] case final n?) '$n 条重复内容',
+    ];
+    if (parts.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('跳过 $skipped 条已处理过的重复消息')));
+          SnackBar(content: Text('跳过 ${parts.join('、')}')));
     }
     if (toProcess.isEmpty) return;
-    await showAiProcessPanel(context, toProcess, onChanged: reload);
+    // 会话交给服务层常驻（v2.6.2 后台处理）；上一批未收尾时拒绝发起
+    final error = svc.start(toProcess);
+    if (error != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error)));
+      }
+      return;
+    }
+    await showAiProcessPanel(context, onChanged: reload);
     await reload();
   }
 
@@ -320,7 +348,8 @@ class MessagesPageState extends State<MessagesPage> {
   List<SwipeAction> _actionsFor(Message m) {
     final cs = Theme.of(context).colorScheme;
     final isJunk = m.priority == MessagePriority.junk;
-    final isPending = messageGroupKey(m) == kGroupPending;
+    // v2.6.2：pending 才是「自动处理」；已处理/其他状态 = 显式「重新处理」
+    final isPending = m.status == MessageStatus.pending;
     if (isJunk) {
       return [
         SwipeAction(
@@ -348,7 +377,7 @@ class MessagesPageState extends State<MessagesPage> {
         icon: Icons.auto_awesome,
         label: isPending ? '自动处理' : '重新处理',
         color: cs.tertiary,
-        onTap: () => _processWithAi([m.id]),
+        onTap: () => _processWithAi([m.id], reprocess: !isPending),
       ),
       if (m.linkedTaskId == null)
         SwipeAction(
@@ -610,6 +639,53 @@ class MessagesPageState extends State<MessagesPage> {
     );
   }
 
+  /// AI 处理全局指示（v2.6.2）：处理中显示进度条，后台跑完显示「N 条待确认」；
+  /// 点击回到面板继续确认流。会话状态变化经 _onAiProcessingChanged 触发重建。
+  Widget _buildAiIndicator(BuildContext context) {
+    final session = AiProcessingService.instance.session;
+    if (session == null) return const SizedBox.shrink();
+    final running = session.running;
+    final pending = session.pendingConfirmCount;
+    if (!running && pending == 0) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.primaryContainer,
+      child: InkWell(
+        onTap: () async {
+          await showAiProcessPanel(context, onChanged: reload);
+          await reload();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            children: [
+              if (running)
+                const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+              else
+                Icon(Icons.fact_check_outlined,
+                    size: 18, color: cs.onPrimaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  running
+                      ? 'AI 处理中 ${session.doneCount}/${session.total}，点击查看'
+                      : 'AI 处理完成：$pending 条结果待确认',
+                  style:
+                      TextStyle(fontSize: 13, color: cs.onPrimaryContainer),
+                ),
+              ),
+              Icon(Icons.chevron_right,
+                  size: 18, color: cs.onPrimaryContainer),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildList() {
     final grouped = _grouped;
     final empty = grouped.values.every((l) => l.isEmpty);
@@ -644,11 +720,16 @@ class MessagesPageState extends State<MessagesPage> {
                 itemCount: grouped[key]!.length,
                 itemBuilder: (context, i) {
                   final m = grouped[key]![i];
+                  // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
+                  final processing =
+                      AiProcessingService.instance.isProcessing(m.id);
                   return MessageTile(
                     key: ValueKey(m.id),
                     message: m,
                     selecting: _selecting,
                     selected: _selected.contains(m.id),
+                    processing: processing,
+                    swipeEnabled: !processing,
                     linkedTaskDone: _isLinkedDone(m),
                     linkedTaskPriority: _tasksById[m.linkedTaskId]?.priority,
                     actions: _actionsFor(m),
@@ -738,6 +819,7 @@ class MessagesPageState extends State<MessagesPage> {
       body: Column(
         children: [
           if (_listenerEnabled == false) _buildListenerBanner(context),
+          _buildAiIndicator(context),
           _buildFilterRow(context),
           const Divider(height: 1),
           Expanded(

@@ -19,6 +19,11 @@ class ReminderService {
   static const _channelName = '任务提醒';
   static const _channelDesc = '有开始时间的任务到点本地提醒';
 
+  static const _aiChannelId = 'msgrepo_ai';
+  static const _aiChannelName = 'AI 处理';
+  static const _aiChannelDesc = 'AI 后台处理完成提醒';
+  static const _aiNotificationId = 0xA1;
+
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
@@ -103,4 +108,24 @@ class ReminderService {
           priority: Priority.high,
         ),
       );
+
+  /// AI 后台处理完成的一次性通知（v2.6.2）：面板收起期间跑完时提醒回来确认结果。
+  /// 普通通知即可，不引入前台服务；注意会被任务提醒重排（rescheduleAll 的
+  /// cancelAll）一并清掉，应用内顶部指示条才是可靠入口。
+  Future<void> notifyAiProcessingDone(int pendingConfirm, int failed) async {
+    if (!_initialized) return;
+    await _plugin.show(
+      _aiNotificationId,
+      'AI 处理完成',
+      '$pendingConfirm 条结果待确认${failed > 0 ? '，$failed 条失败' : ''}',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _aiChannelId,
+          _aiChannelName,
+          channelDescription: _aiChannelDesc,
+          importance: Importance.defaultImportance,
+        ),
+      ),
+    );
+  }
 }

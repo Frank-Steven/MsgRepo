@@ -308,6 +308,10 @@ class MessageTile extends StatefulWidget {
 
   /// 关联任务的优先级（v2.6：绑定任务的消息标记显示任务优先级色点）。
   final String? linkedTaskPriority;
+
+  /// 正在被 AI 处理（v2.6.2，AiProcessingService 内存态）：标题行显示
+  /// 旋转标记；左滑由调用方一并禁用。
+  final bool processing;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -320,6 +324,7 @@ class MessageTile extends StatefulWidget {
     this.actions = const [],
     this.linkedTaskDone = false,
     this.linkedTaskPriority,
+    this.processing = false,
     this.onTap,
     this.onLongPress,
   });
@@ -431,6 +436,19 @@ class _MessageTileState extends State<MessageTile> {
                             style: titleStyle,
                           ),
                         ),
+                        if (widget.processing) ...[
+                          const SizedBox(width: 6),
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 1.5, color: cs.primary),
+                          ),
+                          const SizedBox(width: 2),
+                          Text('处理中',
+                              style: TextStyle(
+                                  fontSize: 11, color: cs.primary)),
+                        ],
                         const SizedBox(width: 8),
                         Text(formatMessageTime(message.postedAt),
                             style: subStyle),
