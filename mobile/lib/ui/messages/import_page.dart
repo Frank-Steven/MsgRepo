@@ -224,7 +224,7 @@ class _ImportPageState extends State<ImportPage> {
             if (!_importing && report == null)
               FilledButton.icon(
                 onPressed: _runImport,
-                icon: const Icon(Icons.file_upload_outlined),
+                icon: const Icon(Icons.move_to_inbox_outlined),
                 label: Text('导入 ${parsed.messages.length} 条'),
               ),
           ],

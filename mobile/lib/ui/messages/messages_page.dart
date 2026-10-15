@@ -486,7 +486,7 @@ class MessagesPageState extends State<MessagesPage> {
         ),
         IconButton(
           tooltip: '导入',
-          icon: const Icon(Icons.file_upload_outlined),
+          icon: const Icon(Icons.move_to_inbox_outlined),
           onPressed: _showImportSheet,
         ),
         IconButton(
