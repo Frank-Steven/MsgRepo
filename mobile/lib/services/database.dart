@@ -466,6 +466,18 @@ class AppDatabase {
     await db.delete('messages', where: 'id IN ($placeholders)', whereArgs: ids);
   }
 
+  /// 撤销删除用：整体回插（replace 覆盖同 id 残留）。
+  Future<void> restoreMessages(List<Message> messages) async {
+    if (messages.isEmpty) return;
+    final db = await database;
+    final batch = db.batch();
+    for (final m in messages) {
+      batch.insert('messages', m.toRow(),
+          conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    await batch.commit(noResult: true);
+  }
+
   // ---- v2: tasks ----
 
   Future<void> insertTask(Task task) async {

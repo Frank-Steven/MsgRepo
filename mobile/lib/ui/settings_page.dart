@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../main.dart' show themeModeNotifier, themeModeFromString;
+import 'shared/app_icon.dart';
 import 'shared/segmented_selector.dart';
 import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
@@ -286,12 +287,23 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _addFilteredApps() async {
-    final seenApps = await AppFilterService.instance.getSeenApps();
+    // v2.4：应用选择页以 PackageManager 全量可启动应用为主，
+    // 补充"已见但已卸载/无启动器入口"的历史应用
+    final results = await Future.wait([
+      AppFilterService.instance.getInstalledApps(),
+      AppFilterService.instance.getSeenApps(),
+    ]);
+    final installed = results[0];
+    final seen = results[1];
+    final installedPkgs = {for (final a in installed) a.packageName};
+    final extra = seen.where((a) => !installedPkgs.contains(a.packageName));
+    final apps = [...installed, ...extra];
     if (!mounted) return;
     final selected = await Navigator.of(context).push<Set<String>>(
       MaterialPageRoute(
         builder: (_) => _AppPickerPage(
-          seenApps: seenApps,
+          title: _filterConfig.isBlacklist ? '选择要屏蔽的应用' : '选择要采集的应用',
+          apps: apps,
           initiallySelected: _filterConfig.packages.toSet(),
         ),
       ),
@@ -299,7 +311,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (selected == null) return;
     final packages = _filterConfig.packages.toSet()..addAll(selected);
     final names = Map<String, String?>.of(_knownAppNames);
-    for (final a in seenApps) {
+    for (final a in apps) {
       names[a.packageName] = a.appName;
     }
     await _saveFilter(_filterConfig.copyWith(packages: packages.toList()));
@@ -546,15 +558,16 @@ class _SettingsPageState extends State<SettingsPage> {
               values: const [
                 AppFilterConfig.modeAll,
                 AppFilterConfig.modeAllowlist,
+                AppFilterConfig.modeBlacklist,
               ],
-              labels: const ['全部应用', '仅指定应用'],
+              labels: const ['全部应用', '仅指定应用', '屏蔽指定应用'],
               height: 40,
               selected: _filterConfig.mode,
               onChanged: (v) => _saveFilter(_filterConfig.copyWith(mode: v)),
             ),
-            if (_filterConfig.isAllowlist) ...[
+            if (_filterConfig.isAllowlist || _filterConfig.isBlacklist) ...[
               const SizedBox(height: 12),
-              if (_filterConfig.packages.isEmpty)
+              if (_filterConfig.isAllowlist && _filterConfig.packages.isEmpty)
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -585,6 +598,9 @@ class _SettingsPageState extends State<SettingsPage> {
                       Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: InputChip(
+                          avatar: AppIcon(
+                              packageName: pkg,
+                              appName: _knownAppNames[pkg]),
                           label: Text(_appDisplayName(pkg)),
                           onDeleted: () {
                             final packages = _filterConfig.packages.toList()
@@ -596,7 +612,9 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ActionChip(
                       avatar: const Icon(Icons.add, size: 18),
-                      label: const Text('添加应用'),
+                      label: Text(_filterConfig.isBlacklist
+                          ? '添加屏蔽应用'
+                          : '添加应用'),
                       onPressed: _addFilteredApps,
                     ),
                   ],
@@ -615,13 +633,16 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-/// 从"已见应用"中选择要采集的应用（支持搜索），并可手动输入包名。
+/// 应用选择页（v2.4 改为 PackageManager 全量列表 + 已见历史应用），
+/// 支持搜索、图标展示，并可手动输入包名。
 class _AppPickerPage extends StatefulWidget {
-  final List<SeenApp> seenApps;
+  final String title;
+  final List<SeenApp> apps;
   final Set<String> initiallySelected;
 
   const _AppPickerPage({
-    required this.seenApps,
+    required this.title,
+    required this.apps,
     required this.initiallySelected,
   });
 
@@ -652,7 +673,7 @@ class _AppPickerPageState extends State<_AppPickerPage> {
           decoration: const InputDecoration(
             labelText: '包名',
             hintText: '如 com.tencent.mm',
-            helperText: '未发过通知的应用不会出现在列表中，可在此手动添加',
+            helperText: '无启动器入口的应用不出现在列表中，可在此手动添加',
           ),
         ),
         actions: [
@@ -675,20 +696,20 @@ class _AppPickerPageState extends State<_AppPickerPage> {
   @override
   Widget build(BuildContext context) {
     final query = _query.toLowerCase();
-    final visible = widget.seenApps
+    final visible = widget.apps
         .where((a) =>
             query.isEmpty ||
             a.displayName.toLowerCase().contains(query) ||
             a.packageName.toLowerCase().contains(query))
         .toList();
-    // 已选但不在 seen apps 里的（手动输入的包名）也要显示，便于取消勾选
-    final seenPackages = widget.seenApps.map((a) => a.packageName).toSet();
+    // 已选但不在应用列表里的（手动输入的包名）也要显示，便于取消勾选
+    final listedPackages = widget.apps.map((a) => a.packageName).toSet();
     final manualOnly =
-        _selected.where((p) => !seenPackages.contains(p)).toList();
+        _selected.where((p) => !listedPackages.contains(p)).toList();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('选择要采集的应用'),
+        title: Text(widget.title),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(_selected),
@@ -732,6 +753,10 @@ class _AppPickerPageState extends State<_AppPickerPage> {
                     onChanged: (v) => setState(() => v == true
                         ? _selected.add(app.packageName)
                         : _selected.remove(app.packageName)),
+                    secondary: AppIcon(
+                        packageName: app.packageName,
+                        appName: app.appName,
+                        size: 28),
                     title: Text(app.displayName),
                     subtitle: Text(app.packageName),
                   ),
@@ -739,7 +764,7 @@ class _AppPickerPageState extends State<_AppPickerPage> {
                   const Padding(
                     padding: EdgeInsets.all(24),
                     child: Center(
-                        child: Text('暂无记录；应用发过通知后会出现在这里，'
+                        child: Text('无匹配应用；'
                             '也可点搜索框右侧按钮手动输入包名')),
                   ),
               ],

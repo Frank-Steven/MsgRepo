@@ -57,11 +57,7 @@ class _ArchivedMessagesPageState extends State<ArchivedMessagesPage> {
     await _db.deleteMessages([for (final m in targets) m.id]);
     UndoService.instance.register(
       label: '已删除',
-      undo: () async {
-        for (final m in targets) {
-          await _db.insertMessageIfNew(m);
-        }
-      },
+      undo: () => _db.restoreMessages(targets),
     );
     if (!mounted) return;
     showUndoSnackBar(context, '已删除', onUndone: reload);

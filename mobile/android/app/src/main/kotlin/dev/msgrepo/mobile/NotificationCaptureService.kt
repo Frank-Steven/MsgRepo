@@ -18,8 +18,9 @@ import java.util.UUID
  *
  * 采集过滤：读取 Dart 侧 shared_preferences 写入的配置（SharedPreferences 文件
  * "FlutterSharedPreferences"，key "flutter.app_filter_config"，值为
- * {"mode": "all"|"allowlist", "packages": [...]}）。allowlist 模式只放行
- * packages 中的应用，被拦截的直接丢弃、不进队列。
+ * {"mode": "all"|"allowlist"|"blacklist", "packages": [...]}）。allowlist 模式
+ * 只放行 packages 中的应用；blacklist 模式拦截 packages 中的应用；被拦截的
+ * 直接丢弃、不进队列。
  *
  * 已见应用：无论是否放行，把 {packageName, appName, lastSeenAt} 更新到
  * filesDir/seen_apps.json（顶层为 packageName -> 条目 的 JSON 对象，
@@ -128,6 +129,8 @@ class NotificationCaptureService : NotificationListenerService() {
 
     /**
      * 按应用过滤。配置缺失/解析失败一律按 mode=all 放行（向后兼容）。
+     * mode=allowlist：只放行 packages 中的应用；mode=blacklist：拦截
+     * packages 中的应用、其余放行。
      * SharedPreferences 有内存缓存，每次读取开销可忽略。
      */
     private fun isAllowed(packageName: String): Boolean {
@@ -136,12 +139,18 @@ class NotificationCaptureService : NotificationListenerService() {
             val json = prefs.getString("flutter.app_filter_config", null)
                 ?: return true
             val config = JSONObject(json)
-            if (config.optString("mode", "all") != "allowlist") return true
-            val packages = config.optJSONArray("packages") ?: return false
+            val mode = config.optString("mode", "all")
+            if (mode != "allowlist" && mode != "blacklist") return true
+            val packages = config.optJSONArray("packages")
+                ?: return mode == "blacklist"
+            var listed = false
             for (i in 0 until packages.length()) {
-                if (packages.optString(i) == packageName) return true
+                if (packages.optString(i) == packageName) {
+                    listed = true
+                    break
+                }
             }
-            false
+            if (mode == "allowlist") listed else !listed
         } catch (t: Throwable) {
             true
         }

@@ -3,9 +3,13 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../models/message.dart';
 import '../../services/undo_service.dart';
+import '../shared/app_icon.dart';
 
 /// 未处理分组键（设计 §5.1）。
 const String kGroupPending = 'pending';
+
+/// 「已完成」筛选键（v2.4）：不占分组，选中时额外显示关联任务已完成的消息。
+const String kFilterDone = 'done';
 
 /// 分组展示顺序：未处理 → 红 → 黄 → 绿 → 垃圾。
 const List<String> kGroupOrder = [
@@ -36,6 +40,7 @@ String messageGroupLabel(String key) => switch (key) {
       MessagePriority.yellow => '黄',
       MessagePriority.green => '绿',
       MessagePriority.junk => '垃圾',
+      kFilterDone => '已完成',
       _ => key,
     };
 
@@ -202,14 +207,18 @@ class _SwipeActionRowState extends State<SwipeActionRow>
   }
 }
 
-/// 消息行内容：左侧标记 + 标题/摘要/来源 + 右侧时间。
-/// 垃圾消息整行渲染为降饱和灰色块 + 标题划线。
-class MessageTile extends StatelessWidget {
+/// 消息卡片（v2.4 卡片化）：左侧标记 + 标题/摘要/来源（含应用图标）+ 右侧时间。
+/// 点击卡片行内展开/收起全文（选择模式下点击 = 勾选）。
+/// 垃圾消息卡片降饱和灰底 + 标题划线；关联任务已完成的消息标题划线变淡。
+class MessageTile extends StatefulWidget {
   final Message message;
   final bool selecting;
   final bool selected;
   final bool swipeEnabled;
   final List<SwipeAction> actions;
+
+  /// 关联任务已完成（v2.4「已完成」筛选）：标题划线降色。
+  final bool linkedTaskDone;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -220,13 +229,29 @@ class MessageTile extends StatelessWidget {
     this.selected = false,
     this.swipeEnabled = true,
     this.actions = const [],
+    this.linkedTaskDone = false,
     this.onTap,
     this.onLongPress,
   });
 
+  @override
+  State<MessageTile> createState() => _MessageTileState();
+}
+
+class _MessageTileState extends State<MessageTile> {
+  bool _expanded = false;
+
+  void _handleTap() {
+    if (widget.selecting) {
+      widget.onTap?.call();
+    } else {
+      setState(() => _expanded = !_expanded);
+    }
+  }
+
   Widget _marker(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final dotColor = messageGroupDotColor(messageGroupKey(message));
+    final dotColor = messageGroupDotColor(messageGroupKey(widget.message));
     final Widget dot = dotColor == null
         ? Container(
             width: 14,
@@ -241,7 +266,7 @@ class MessageTile extends StatelessWidget {
             height: 14,
             decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
           );
-    if (message.linkedTaskId == null) return dot;
+    if (widget.message.linkedTaskId == null) return dot;
     return SizedBox(
       width: 20,
       height: 20,
@@ -251,7 +276,9 @@ class MessageTile extends StatelessWidget {
           Positioned(
             right: 0,
             bottom: 0,
-            child: Icon(Icons.task_alt, size: 12, color: cs.primary),
+            child: Icon(Icons.task_alt,
+                size: 12,
+                color: widget.linkedTaskDone ? cs.outline : cs.primary),
           ),
         ],
       ),
@@ -261,100 +288,113 @@ class MessageTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final message = widget.message;
     final isJunk = message.priority == MessagePriority.junk;
     final titleStyle = TextStyle(
       fontSize: 15,
       fontWeight: FontWeight.w500,
-      color: isJunk ? cs.outline : null,
-      decoration: isJunk ? TextDecoration.lineThrough : null,
+      color: isJunk
+          ? cs.outline
+          : (widget.linkedTaskDone ? cs.onSurfaceVariant : null),
+      decoration:
+          (isJunk || widget.linkedTaskDone) ? TextDecoration.lineThrough : null,
     );
     final subStyle = TextStyle(fontSize: 13, color: cs.onSurfaceVariant);
 
-    final sourceLabel = StringBuffer(
-        message.appName?.isNotEmpty == true
-            ? message.appName!
-            : message.packageName);
-    if (message.conversationTitle?.isNotEmpty == true) {
-      sourceLabel.write(' · ${message.conversationTitle}');
-    }
-
-    Widget row = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: _marker(context),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      clipBehavior: Clip.antiAlias,
+      elevation: 0,
+      color: isJunk ? cs.surfaceContainerHighest : cs.surfaceContainerLow,
+      child: SwipeActionRow(
+        actions: widget.actions,
+        swipeEnabled: widget.swipeEnabled && !widget.selecting,
+        onTap: _handleTap,
+        onLongPress: widget.onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: _marker(context),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Text(
-                        message.title.isEmpty ? '(无标题)' : message.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: titleStyle,
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            message.title.isEmpty ? '(无标题)' : message.title,
+                            maxLines: _expanded ? null : 1,
+                            overflow:
+                                _expanded ? null : TextOverflow.ellipsis,
+                            style: titleStyle,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(formatMessageTime(message.postedAt),
+                            style: subStyle),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Text(formatMessageTime(message.postedAt), style: subStyle),
+                    if (message.body.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        message.body,
+                        maxLines: _expanded ? null : 2,
+                        overflow: _expanded ? null : TextOverflow.ellipsis,
+                        style: subStyle,
+                      ),
+                    ],
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        AppIcon(
+                            packageName: message.packageName,
+                            appName: message.appName,
+                            size: 14),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            (message.appName?.isNotEmpty == true
+                                    ? message.appName!
+                                    : message.packageName) +
+                                (message.conversationTitle?.isNotEmpty == true
+                                    ? ' · ${message.conversationTitle}'
+                                    : ''),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 12, color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                        if (_expanded)
+                          Icon(Icons.expand_less,
+                              size: 16, color: cs.onSurfaceVariant),
+                      ],
+                    ),
                   ],
                 ),
-                if (message.body.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    message.body,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: subStyle,
-                  ),
-                ],
-                const SizedBox(height: 2),
-                Text(
-                  sourceLabel.toString(),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                ),
-              ],
-            ),
-          ),
-          if (selecting)
-            Padding(
-              padding: const EdgeInsets.only(left: 8, top: 2),
-              child: Icon(
-                selected ? Icons.check_circle : Icons.radio_button_unchecked,
-                size: 20,
-                color: selected ? cs.primary : cs.outline,
               ),
-            ),
-        ],
-      ),
-    );
-
-    if (isJunk) {
-      row = Container(
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
+              if (widget.selecting)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 2),
+                  child: Icon(
+                    widget.selected
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    size: 20,
+                    color: widget.selected ? cs.primary : cs.outline,
+                  ),
+                ),
+            ],
+          ),
         ),
-        child: row,
-      );
-    }
-
-    return SwipeActionRow(
-      actions: actions,
-      swipeEnabled: swipeEnabled && !selecting,
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: row,
+      ),
     );
   }
 }

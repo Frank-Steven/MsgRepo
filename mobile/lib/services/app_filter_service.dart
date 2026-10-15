@@ -9,12 +9,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// - shared_preferences key：`app_filter_config`（插件在 Android 上写入名为
 ///   `FlutterSharedPreferences` 的 SharedPreferences 文件，实际 key 带前缀
 ///   `flutter.app_filter_config`，Kotlin 端按此读取）；
-/// - 值为 JSON 字符串：`{"mode": "all" | "allowlist", "packages": ["com.x.y", ...]}`；
+/// - 值为 JSON 字符串：`{"mode": "all" | "allowlist" | "blacklist", "packages": ["com.x.y", ...]}`；
 /// - mode=all 收集全部（默认）；mode=allowlist 时只收集 packages 中的应用，
-///   空列表 = 什么都不收集。手动添加的消息（packageName="manual"）不受影响。
+///   空列表 = 什么都不收集；mode=blacklist 时屏蔽 packages 中的应用、其余全收。
+///   手动添加的消息（packageName="manual"）不受影响。
 class AppFilterConfig {
   static const modeAll = 'all';
   static const modeAllowlist = 'allowlist';
+  static const modeBlacklist = 'blacklist';
 
   final String mode;
   final List<String> packages;
@@ -22,6 +24,7 @@ class AppFilterConfig {
   const AppFilterConfig({this.mode = modeAll, this.packages = const []});
 
   bool get isAllowlist => mode == modeAllowlist;
+  bool get isBlacklist => mode == modeBlacklist;
 
   factory AppFilterConfig.fromJson(Map<String, dynamic> json) =>
       AppFilterConfig(
@@ -98,6 +101,29 @@ class AppFilterService {
       }
       apps.sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
       return apps;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 已安装的可启动应用（PackageManager 全量，v2.4 设置页应用筛选用），
+  /// 按应用名排序。
+  Future<List<SeenApp>> getInstalledApps() async {
+    try {
+      final json = await _channel.invokeMethod<String>('getInstalledApps');
+      if (json == null || json.isEmpty) return [];
+      final list = jsonDecode(json) as List;
+      return [
+        for (final e in list)
+          SeenApp(
+            packageName:
+                (e as Map)['packageName']?.toString() ?? '',
+            appName: e['appName']?.toString(),
+            lastSeenAt: 0,
+          ),
+      ]..sort((a, b) => a.displayName
+          .toLowerCase()
+          .compareTo(b.displayName.toLowerCase()));
     } catch (_) {
       return [];
     }

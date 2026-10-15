@@ -27,9 +27,12 @@ class MessagesPageState extends State<MessagesPage> {
 
   List<Message> _messages = [];
   List<SourceApp> _sources = [];
+
+  /// 已完成任务的 id 集（v2.4「已完成」筛选 + 行划线样式）。
+  Set<String> _doneTaskIds = {};
   bool _loading = true;
 
-  /// 状态分组多选筛选（默认全选）。
+  /// 状态分组多选筛选（默认全选）；另含特殊键 [kFilterDone]（已完成）。
   final Set<String> _groupFilter = Set.of(kGroupOrder);
   String? _appFilter; // null = 全部应用
 
@@ -54,14 +57,21 @@ class MessagesPageState extends State<MessagesPage> {
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
   Future<void> reload() async {
-    final messages = await _db.getMessages(packageName: _appFilter);
-    final sources = await _db.getDistinctMessageSources();
+    final results = await Future.wait([
+      _db.getMessages(packageName: _appFilter),
+      _db.getDistinctMessageSources(),
+      _db.getTasks(status: TaskStatus.done),
+    ]);
+    final messages = results[0] as List<Message>;
+    final sources = results[1] as List<SourceApp>;
+    final doneTasks = results[2] as List<Task>;
     if (!mounted) return;
     setState(() {
       _messages = messages
           .where((m) => m.status != MessageStatus.archived)
           .toList();
       _sources = sources;
+      _doneTaskIds = {for (final t in doneTasks) t.id};
       _loading = false;
       // 所选应用的消息可能已不存在，回退到全部
       if (_appFilter != null &&
@@ -73,9 +83,14 @@ class MessagesPageState extends State<MessagesPage> {
     });
   }
 
-  List<Message> get _visible => _messages
-      .where((m) => _groupFilter.contains(messageGroupKey(m)))
-      .toList();
+  bool _isLinkedDone(Message m) =>
+      m.linkedTaskId != null && _doneTaskIds.contains(m.linkedTaskId);
+
+  List<Message> get _visible => _messages.where((m) {
+        if (_groupFilter.contains(messageGroupKey(m))) return true;
+        // 「已完成」筛选：额外放行关联任务已完成的消息（不占分组）
+        return _groupFilter.contains(kFilterDone) && _isLinkedDone(m);
+      }).toList();
 
   Map<String, List<Message>> get _grouped {
     final map = {for (final k in kGroupOrder) k: <Message>[]};
@@ -134,7 +149,7 @@ class MessagesPageState extends State<MessagesPage> {
     await reload();
   }
 
-  /// 删除选中消息各自关联的任务，并清除链接；撤销整体回滚。
+  /// 取消选中消息各自关联的任务（删除任务并清除链接）；撤销整体回滚。
   /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），
   /// 与删除合并为同一个复合撤销（设计 §7）。
   Future<void> _deleteLinkedTasks(List<Message> targets) async {
@@ -159,7 +174,7 @@ class MessagesPageState extends State<MessagesPage> {
       await _db.setMessageLinkedTask(m.id, null);
     }
     UndoService.instance.register(
-      label: '已删除任务',
+      label: '已取消任务',
       undo: () async {
         for (final (m, t) in pairs) {
           if (t != null) await _db.insertTask(t);
@@ -173,7 +188,19 @@ class MessagesPageState extends State<MessagesPage> {
       },
     );
     if (!mounted) return;
-    showUndoSnackBar(context, '已删除任务', onUndone: reload);
+    showUndoSnackBar(context, '已取消任务', onUndone: reload);
+    await reload();
+  }
+
+  /// 彻底删除消息（v2.4：垃圾消息左滑「删除」）；撤销 = 整体回插。
+  Future<void> _deleteMessagesForever(List<Message> targets) async {
+    await _db.deleteMessages([for (final m in targets) m.id]);
+    UndoService.instance.register(
+      label: '已删除',
+      undo: () => _db.restoreMessages(targets),
+    );
+    if (!mounted) return;
+    showUndoSnackBar(context, '已删除', onUndone: reload);
     await reload();
   }
 
@@ -269,6 +296,12 @@ class MessagesPageState extends State<MessagesPage> {
           color: cs.secondary,
           onTap: () => _archive([m]),
         ),
+        SwipeAction(
+          icon: Icons.delete_forever_outlined,
+          label: '删除',
+          color: cs.error,
+          onTap: () => _deleteMessagesForever([m]),
+        ),
       ];
     }
     return [
@@ -288,7 +321,7 @@ class MessagesPageState extends State<MessagesPage> {
       else
         SwipeAction(
           icon: Icons.delete_outline,
-          label: '删除任务',
+          label: '取消任务',
           color: cs.error,
           onTap: () => _deleteLinkedTasks([m]),
         ),
@@ -429,6 +462,29 @@ class MessagesPageState extends State<MessagesPage> {
                 ),
               ),
             ),
+          // 「已完成」（v2.4）：不占分组，额外显示关联任务已完成的消息
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: Text(messageGroupLabel(kFilterDone)),
+                selected: _groupFilter.contains(kFilterDone),
+                showCheckmark: false,
+                selectedColor: cs.secondaryContainer,
+                backgroundColor: cs.surfaceContainerHighest,
+                side: chipSide(_groupFilter.contains(kFilterDone)),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onSelected: (sel) => setState(() {
+                  if (sel) {
+                    _groupFilter.add(kFilterDone);
+                  } else {
+                    _groupFilter.remove(kFilterDone);
+                  }
+                }),
+              ),
+            ),
+          ),
           if (_sources.isNotEmpty)
             Center(
               child: Padding(
@@ -522,6 +578,7 @@ class MessagesPageState extends State<MessagesPage> {
                     message: m,
                     selecting: _selecting,
                     selected: _selected.contains(m.id),
+                    linkedTaskDone: _isLinkedDone(m),
                     actions: _actionsFor(m),
                     onTap: () {
                       if (_selecting) _toggleSelect(m);
@@ -575,7 +632,7 @@ class MessagesPageState extends State<MessagesPage> {
         ),
         SelectionAction(
           icon: Icons.delete_outline,
-          tooltip: '删除任务',
+          tooltip: '取消任务',
           enabled: allLinked,
           onTap: () => _runBatch(_deleteLinkedTasks),
         ),
