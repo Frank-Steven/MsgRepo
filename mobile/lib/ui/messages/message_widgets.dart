@@ -141,6 +141,9 @@ class _UndoSnackContentState extends State<_UndoSnackContent>
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // 与 SnackBar 主题联动的动作色（v2.6：深色模式深色底 + primary 动作色）
+    final actionColor = Theme.of(context).snackBarTheme.actionTextColor ??
+        cs.inversePrimary;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: (_) => _hold(),
@@ -158,6 +161,7 @@ class _UndoSnackContentState extends State<_UndoSnackContent>
                 Expanded(child: Text(widget.label)),
                 TextButton(
                   onPressed: widget.onUndo,
+                  style: TextButton.styleFrom(foregroundColor: actionColor),
                   child: const Text('撤销'),
                 ),
               ],
@@ -169,7 +173,7 @@ class _UndoSnackContentState extends State<_UndoSnackContent>
                 value: 1 - _ctrl.value,
                 minHeight: 2,
                 backgroundColor: Colors.transparent,
-                color: cs.inversePrimary,
+                color: actionColor,
               ),
             ),
           ],

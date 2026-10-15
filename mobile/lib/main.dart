@@ -81,6 +81,19 @@ Future<void> _appendDebugError(String kind, String message, StackTrace? stack) a
   } catch (_) {}
 }
 
+/// SnackBar 主题（v2.6）：深色模式不再用 M3 默认的浅反色底——
+/// 深色主题用深色 surface + 浅色文字，浅色主题保持反色底。
+/// 全局 ThemeData 统一设置，所有 SnackBar（含撤销进度条）自动走此封装。
+SnackBarThemeData snackBarThemeFor(ColorScheme cs) {
+  final dark = cs.brightness == Brightness.dark;
+  return SnackBarThemeData(
+    backgroundColor: dark ? cs.surfaceContainerHigh : cs.inverseSurface,
+    contentTextStyle:
+        TextStyle(color: dark ? cs.onSurface : cs.onInverseSurface),
+    actionTextColor: dark ? cs.primary : cs.inversePrimary,
+  );
+}
+
 class MsgRepoApp extends StatelessWidget {
   const MsgRepoApp({super.key});
 
@@ -88,21 +101,27 @@ class MsgRepoApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: themeModeNotifier,
-      builder: (context, mode, _) => MaterialApp(
-        title: 'MsgRepo',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        ),
-        darkTheme: ThemeData(
-          useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.indigo, brightness: Brightness.dark),
-        ),
-        themeMode: mode,
-        home: const HomeShell(),
-      ),
+      builder: (context, mode, _) {
+        final lightScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
+        final darkScheme = ColorScheme.fromSeed(
+            seedColor: Colors.indigo, brightness: Brightness.dark);
+        return MaterialApp(
+          title: 'MsgRepo',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: lightScheme,
+            snackBarTheme: snackBarThemeFor(lightScheme),
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            colorScheme: darkScheme,
+            snackBarTheme: snackBarThemeFor(darkScheme),
+          ),
+          themeMode: mode,
+          home: const HomeShell(),
+        );
+      },
     );
   }
 }
