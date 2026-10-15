@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <!-- 引导用户把应用加入电池优化白名单（v2.6 保活） -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <!-- 短信导入：读系统短信库（运行时授权，v2.6） -->
+    <uses-permission android:name="android.permission.READ_SMS"/>
 
     <application
         android:label="MsgRepo"

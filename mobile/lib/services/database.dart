@@ -378,6 +378,25 @@ class AppDatabase {
     return true;
   }
 
+  /// 全部消息的 content_hash 集（批量导入一次性查重用，v2.6）。
+  Future<Set<String>> getAllMessageContentHashes() async {
+    final db = await database;
+    final rows = await db.query('messages', columns: ['content_hash']);
+    return {for (final r in rows) r['content_hash'] as String};
+  }
+
+  /// 批量插入消息（单事务；调用方负责 content_hash 预去重，v2.6 导入用）。
+  Future<void> insertMessagesBatch(List<Message> messages) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final m in messages) {
+        batch.insert('messages', m.toRow());
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
   Future<List<Message>> getMessages(
       {String? status,
       String? packageName,

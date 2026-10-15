@@ -5,12 +5,14 @@ import 'package:flutter/material.dart';
 import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
+import '../../services/import_service.dart';
 import '../../services/notification_bridge.dart';
 import '../../services/undo_service.dart';
 import '../add_message_page.dart';
 import '../tasks/task_editor.dart';
 import 'ai_panel.dart';
 import 'archived_page.dart';
+import 'import_page.dart';
 import 'message_widgets.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
@@ -360,11 +362,17 @@ class MessagesPageState extends State<MessagesPage> {
 
   // ---- 导入 / 归档入口 ----
 
+  Future<void> _openImport(String source) async {
+    final imported = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => ImportPage(source: source)));
+    if (imported == true) await reload();
+  }
+
   void _showImportSheet() {
     const entries = [
-      (Icons.chat_bubble_outline, '微信'),
-      (Icons.forum_outlined, 'QQ'),
-      (Icons.sms_outlined, '短信'),
+      (Icons.chat_bubble_outline, '微信', ImportSource.wechat),
+      (Icons.forum_outlined, 'QQ', ImportSource.qq),
+      (Icons.sms_outlined, '短信', ImportSource.sms),
     ];
     showModalBottomSheet(
       context: context,
@@ -373,17 +381,13 @@ class MessagesPageState extends State<MessagesPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            for (final (icon, name) in entries)
+            for (final (icon, name, source) in entries)
               ListTile(
                 leading: Icon(icon),
                 title: Text('从$name导入'),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
-                  ScaffoldMessenger.of(context)
-                    ..hideCurrentSnackBar()
-                    ..showSnackBar(const SnackBar(
-                        content: Text('即将支持'),
-                        duration: Duration(seconds: 2)));
+                  _openImport(source);
                 },
               ),
           ],
