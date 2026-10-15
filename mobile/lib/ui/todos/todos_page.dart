@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
 import '../../services/task_scale.dart';
@@ -15,6 +16,11 @@ import '../tasks/task_tile.dart';
 /// 返回按钮/切换页签回列表模式；仅面板右上角编辑图标进编辑器；
 /// 有子任务的行尾显示「已完成数/总数」；面板中点击父/子任务跳转到对应
 /// 尺度页签并高亮定位。
+/// v2.6.1 批量操作：长按进入多选（与消息页同一范式：点选增减、顶部已选数
+/// +全选+取消、底部操作条）；已完成页签行尾加「归档」按钮。底部操作按所选
+/// 任务状态交集：全部已归档 → 删除/取出；全部未归档且全部 active → 归档/完成；
+/// 全部未归档且全部 done → 归档/取消完成；混合（active+done）→ 仅归档。
+/// 所有批量操作走 UndoService 可撤销。
 class TodosPage extends StatefulWidget {
   const TodosPage({super.key});
 
@@ -57,6 +63,10 @@ class TodosPageState extends State<TodosPage> {
 
   /// 详情模式下展示的任务（v2.5：内嵌 TaskDetailPanel，非空时替换 PageView）。
   Task? _detailTask;
+
+  /// 多选模式（v2.6.1，与消息页同一范式）：长按进入、点选增减。
+  bool _selecting = false;
+  final Set<String> _selected = {};
 
   final PageController _pageController = PageController(initialPage: 6);
   final ScrollController _tabScrollController = ScrollController();
@@ -106,6 +116,14 @@ class TodosPageState extends State<TodosPage> {
       _archived = archived;
       _progress = progress;
       _loading = false;
+      // 清理已不存在任务的多选（v2.6.1）
+      _selected.removeWhere((id) => ![
+            ...byScale.values,
+            untimed,
+            done,
+            archived,
+          ].expand((l) => l).any((t) => t.id == id));
+      if (_selected.isEmpty) _selecting = false;
       // 刷新详情模式中的任务（编辑/状态变化后同步；任务消失则退出详情模式）。
       final detail = _detailTask;
       if (detail != null) {
@@ -154,6 +172,143 @@ class TodosPageState extends State<TodosPage> {
     );
     await reload();
     if (mounted) _showUndoSnack('已取出');
+  }
+
+  /// 行内归档（v2.6.1：已完成页签行尾按钮）。
+  Future<void> _archiveTask(Task task) async {
+    final db = AppDatabase.instance;
+    await db.setTaskStatus([task.id], TaskStatus.archived);
+    UndoService.instance.register(
+      label: '已归档',
+      undo: () => db.setTaskStatus([task.id], task.status),
+    );
+    await reload();
+    if (mounted) _showUndoSnack('已归档');
+  }
+
+  // ---- 多选模式（v2.6.1，与消息页同一交互范式）----
+
+  List<Task> get _allTasks => [
+        for (final l in _byScale.values) ...l,
+        ..._untimed,
+        ..._done,
+        ..._archived,
+      ];
+
+  List<Task> get _selectedTasks =>
+      _allTasks.where((t) => _selected.contains(t.id)).toList();
+
+  List<Task> _tasksForTab(int tab) => switch (tab) {
+        7 => _done,
+        8 => _archived,
+        6 => _untimed,
+        _ => _byScale[_scaleTabs[tab]] ?? const [],
+      };
+
+  void _toggleSelect(Task t) {
+    setState(() {
+      if (!_selected.remove(t.id)) _selected.add(t.id);
+      if (_selected.isEmpty) _selecting = false;
+    });
+  }
+
+  void _enterSelection(Task t) {
+    setState(() {
+      _selecting = true;
+      _selected.add(t.id);
+      _detailTask = null;
+    });
+  }
+
+  void _exitSelection() {
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+    });
+  }
+
+  /// 批量置状态（归档/取出），撤销 = 恢复各自原状态（v2.6.1）。
+  Future<void> _batchSetStatus(
+      List<Task> targets, String status, String label) async {
+    final db = AppDatabase.instance;
+    await db.setTaskStatus([for (final t in targets) t.id], status);
+    UndoService.instance.register(
+      label: label,
+      undo: () async {
+        for (final t in targets) {
+          await db.setTaskStatus([t.id], t.status);
+        }
+      },
+    );
+    _exitSelection();
+    await reload();
+    if (mounted) _showUndoSnack(label);
+  }
+
+  /// 批量完成/取消完成（v2.6.1）：有来源消息时联动归档/恢复（与单行勾选
+  /// toggleTaskDoneWithUndo 同语义），整体复合撤销。
+  Future<void> _batchComplete(List<Task> targets, bool completing) async {
+    final db = AppDatabase.instance;
+    final oldMsgStatus = <String, String?>{};
+    for (final t in targets) {
+      final msgId = t.sourceMessageId;
+      if (msgId != null) {
+        oldMsgStatus[msgId] = (await db.getMessageById(msgId))?.status;
+      }
+    }
+    await db.setTaskStatus([for (final t in targets) t.id],
+        completing ? TaskStatus.done : TaskStatus.active);
+    for (final msgId in oldMsgStatus.keys) {
+      await db.updateMessageStatus([msgId],
+          completing ? MessageStatus.archived : MessageStatus.processed);
+    }
+    UndoService.instance.register(
+      label: completing ? '已完成' : '已恢复',
+      undo: () async {
+        for (final t in targets) {
+          await db.setTaskStatus([t.id], t.status);
+        }
+        for (final e in oldMsgStatus.entries) {
+          final old = e.value;
+          if (old != null) await db.updateMessageStatus([e.key], old);
+        }
+      },
+    );
+    _exitSelection();
+    await reload();
+    if (mounted) _showUndoSnack(completing ? '已完成' : '已恢复');
+  }
+
+  /// 批量删除已归档任务（v2.6.1）：删父前子任务先升级为普通任务，
+  /// 与单个删除同一复合撤销语义（设计 §7）。
+  Future<void> _batchDelete(List<Task> targets) async {
+    final db = AppDatabase.instance;
+    final childrenOf = <String, List<Task>>{};
+    for (final t in targets) {
+      final children = await db.getChildTasks(t.id);
+      if (children.isEmpty) continue;
+      childrenOf[t.id] = children;
+      for (final c in children) {
+        await db.updateTask(c.copyWith(parentId: () => null));
+      }
+    }
+    await db.deleteTasks([for (final t in targets) t.id]);
+    UndoService.instance.register(
+      label: '已删除',
+      undo: () async {
+        for (final t in targets) {
+          await db.insertTask(t);
+        }
+        for (final children in childrenOf.values) {
+          for (final c in children) {
+            await db.updateTask(c);
+          }
+        }
+      },
+    );
+    _exitSelection();
+    await reload();
+    if (mounted) _showUndoSnack('已删除');
   }
 
   Future<void> _createTask() async {
@@ -283,19 +438,96 @@ class TodosPageState extends State<TodosPage> {
     return now - task.updatedAt < _recentWindow.inMilliseconds;
   }
 
+  AppBar _buildAppBar() {
+    if (_selecting) {
+      return AppBar(
+        leading: IconButton(
+          tooltip: '退出',
+          icon: const Icon(Icons.close),
+          onPressed: _exitSelection,
+        ),
+        title: Text('已选 ${_selected.length} 项'),
+        actions: [
+          TextButton(
+            onPressed: () => setState(
+                () => _selected.addAll(_tasksForTab(_tab).map((t) => t.id))),
+            child: const Text('全选'),
+          ),
+          TextButton(
+            onPressed: _selected.isEmpty
+                ? null
+                : () => setState(() => _selected.clear()),
+            child: const Text('取消'),
+          ),
+        ],
+      );
+    }
+    return AppBar(
+      title: const Text('待办'),
+      actions: [
+        IconButton(
+          tooltip: '新建任务',
+          onPressed: _createTask,
+          icon: const Icon(Icons.add),
+        ),
+      ],
+    );
+  }
+
+  /// 多选底部操作条（v2.6.1）：按所选任务状态交集决定可用项——
+  /// 全部已归档 → 删除/取出；全部未归档且全 active → 归档/完成；
+  /// 全部未归档且全 done → 归档/取消完成；active+done 混合 → 仅归档。
+  Widget _buildSelectionBar() {
+    final sel = _selectedTasks;
+    final has = sel.isNotEmpty;
+    final allArchived =
+        has && sel.every((t) => t.status == TaskStatus.archived);
+    final noneArchived =
+        has && sel.every((t) => t.status != TaskStatus.archived);
+    final allDone =
+        noneArchived && sel.every((t) => t.status == TaskStatus.done);
+    final allActive =
+        noneArchived && sel.every((t) => t.status == TaskStatus.active);
+    return SelectionActionBar(
+      actions: [
+        SelectionAction(
+          icon: Icons.delete_outline,
+          tooltip: '删除',
+          enabled: allArchived,
+          onTap: () => _batchDelete(sel),
+        ),
+        SelectionAction(
+          icon: Icons.unarchive_outlined,
+          tooltip: '取出',
+          enabled: allArchived,
+          onTap: () => _batchSetStatus(sel, TaskStatus.active, '已取出'),
+        ),
+        SelectionAction(
+          icon: Icons.archive_outlined,
+          tooltip: '归档',
+          enabled: noneArchived,
+          onTap: () => _batchSetStatus(sel, TaskStatus.archived, '已归档'),
+        ),
+        SelectionAction(
+          icon: Icons.check_circle_outline,
+          tooltip: '完成',
+          enabled: allActive,
+          onTap: () => _batchComplete(sel, true),
+        ),
+        SelectionAction(
+          icon: Icons.undo_outlined,
+          tooltip: '取消完成',
+          enabled: allDone,
+          onTap: () => _batchComplete(sel, false),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('待办'),
-        actions: [
-          IconButton(
-            tooltip: '新建任务',
-            onPressed: _createTask,
-            icon: const Icon(Icons.add),
-          ),
-        ],
-      ),
+      appBar: _buildAppBar(),
       body: Column(
         children: [
           Padding(
@@ -346,6 +578,7 @@ class TodosPageState extends State<TodosPage> {
                         ),
             ),
           ),
+          if (_selecting) _buildSelectionBar(),
         ],
       ),
     );
@@ -426,10 +659,26 @@ class TodosPageState extends State<TodosPage> {
       }),
       progress: (progress != null && progress.$2 > 0) ? progress : null,
       selected: task.id == _selectedTaskId,
-      onTap: () => _showDetail(task),
-      onToggleDone: archived ? null : () => _toggleDone(task),
-      onUnarchive: archived ? () => _unarchive(task) : null,
-      onShowSource: task.sourceMessageId == null
+      selecting: _selecting,
+      multiSelected: _selected.contains(task.id),
+      onTap: () {
+        if (_selecting) {
+          _toggleSelect(task);
+        } else {
+          _showDetail(task);
+        }
+      },
+      onLongPress: () {
+        if (!_selecting) _enterSelection(task);
+      },
+      onToggleDone:
+          archived || _selecting ? null : () => _toggleDone(task),
+      onUnarchive:
+          archived && !_selecting ? () => _unarchive(task) : null,
+      onArchive: task.status == TaskStatus.done && !_selecting
+          ? () => _archiveTask(task)
+          : null,
+      onShowSource: _selecting || task.sourceMessageId == null
           ? null
           : () => _showSourceMessage(task.sourceMessageId!),
     );

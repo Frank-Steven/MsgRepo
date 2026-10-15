@@ -85,6 +85,18 @@ class TaskTile extends StatelessWidget {
   final VoidCallback? onUnarchive;
   final VoidCallback? onShowSource;
 
+  /// 行内归档按钮（v2.6.1：已完成页签行尾）。
+  final VoidCallback? onArchive;
+
+  /// 长按（v2.6.1：进入多选模式）。
+  final VoidCallback? onLongPress;
+
+  /// 多选模式（v2.6.1）：行尾显示勾选圈，点击 = 增减选择。
+  final bool selecting;
+
+  /// 多选模式下本行已选。
+  final bool multiSelected;
+
   const TaskTile({
     super.key,
     required this.task,
@@ -100,6 +112,10 @@ class TaskTile extends StatelessWidget {
     this.onToggleDone,
     this.onUnarchive,
     this.onShowSource,
+    this.onArchive,
+    this.onLongPress,
+    this.selecting = false,
+    this.multiSelected = false,
   });
 
   /// 行内尺度徽标（设计 §3）：派生尺度小字 chip。
@@ -128,6 +144,7 @@ class TaskTile extends StatelessWidget {
       color: selected ? scheme.secondaryContainer.withValues(alpha: 0.5) : null,
       child: InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Padding(
         padding: EdgeInsets.only(left: 12 + indent, right: 12),
         child: Padding(
@@ -245,6 +262,25 @@ class TaskTile extends StatelessWidget {
                   onPressed: onUnarchive,
                   icon: Icon(Icons.unarchive_outlined,
                       size: 20, color: scheme.onSurfaceVariant),
+                ),
+              if (onArchive != null)
+                IconButton(
+                  tooltip: '归档',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onArchive,
+                  icon: Icon(Icons.archive_outlined,
+                      size: 20, color: scheme.onSurfaceVariant),
+                ),
+              if (selecting)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Icon(
+                    multiSelected
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    size: 20,
+                    color: multiSelected ? scheme.primary : scheme.outline,
+                  ),
                 ),
             ],
           ),
