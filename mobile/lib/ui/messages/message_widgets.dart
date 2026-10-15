@@ -64,26 +64,119 @@ String formatMessageTime(int ms) {
   return '${two(d.month)}-${two(d.day)} $hm';
 }
 
-/// 操作成功后的撤销 SnackBar（设计 §6，v2.1）：「{label}」+ 撤销按钮，
-/// 时长 4 秒、不排队（先收起当前条）。撤销注册由调用方在调用本函数前完成。
+/// 操作成功后的撤销 SnackBar（设计 §6，v2.4 重做）：「{label}」+ 撤销按钮 +
+/// 底部细进度条（剩余时间，4 秒）。按住或鼠标悬停时暂停倒计时并回满，
+/// 松开/移出后继续；超时自动关闭。撤销注册由调用方在调用本函数前完成。
 void showUndoSnackBar(BuildContext context, String label,
-    {VoidCallback? onUndone}) {
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(
-      SnackBar(
-        content: Text(label),
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () async {
-            ScaffoldMessenger.of(context).hideCurrentSnackBar();
-            await UndoService.instance.undoLatest();
-            onUndone?.call();
-          },
+    {VoidCallback? onUndone, ScaffoldMessengerState? messenger}) {
+  final m = messenger ?? ScaffoldMessenger.of(context);
+  m.hideCurrentSnackBar();
+  m.showSnackBar(
+    SnackBar(
+      // 关闭时机由内容里的进度控制器自管，时长设长避免系统提前收起
+      duration: const Duration(days: 1),
+      content: _UndoSnackContent(
+        label: label,
+        onExpired: m.hideCurrentSnackBar,
+        onUndo: () async {
+          m.hideCurrentSnackBar();
+          await UndoService.instance.undoLatest();
+          onUndone?.call();
+        },
+      ),
+    ),
+  );
+}
+
+/// 撤销 SnackBar 内容：文本 + 撤销按钮 + 底部剩余时间细条。
+class _UndoSnackContent extends StatefulWidget {
+  final String label;
+  final VoidCallback onExpired;
+  final VoidCallback onUndo;
+
+  const _UndoSnackContent({
+    required this.label,
+    required this.onExpired,
+    required this.onUndo,
+  });
+
+  @override
+  State<_UndoSnackContent> createState() => _UndoSnackContentState();
+}
+
+class _UndoSnackContentState extends State<_UndoSnackContent>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 4),
+    )
+      ..addStatusListener((s) {
+        if (s == AnimationStatus.completed && mounted) widget.onExpired();
+      })
+      ..forward();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  /// 按住/悬停：暂停并回满（进度回 0 = 剩余时间重置）。
+  void _hold() {
+    _ctrl.stop();
+    _ctrl.animateTo(0, duration: const Duration(milliseconds: 200));
+  }
+
+  /// 松开/移出：从满格重新倒计时。
+  void _release() {
+    _ctrl.forward(from: 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _hold(),
+      onTapUp: (_) => _release(),
+      onTapCancel: _release,
+      child: MouseRegion(
+        onEnter: (_) => _hold(),
+        onExit: (_) => _release(),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(widget.label)),
+                TextButton(
+                  onPressed: widget.onUndo,
+                  child: const Text('撤销'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            AnimatedBuilder(
+              animation: _ctrl,
+              builder: (context, _) => LinearProgressIndicator(
+                value: 1 - _ctrl.value,
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                color: cs.inversePrimary,
+              ),
+            ),
+          ],
         ),
       ),
     );
+  }
 }
 
 /// 左滑露出的块状菜单按钮定义。

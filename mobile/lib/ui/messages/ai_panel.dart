@@ -143,22 +143,9 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
   }
 
   void _showUndoSnack(String label) {
-    _messengerKey.currentState
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(label),
-          duration: const Duration(seconds: 4),
-          action: SnackBarAction(
-            label: '撤销',
-            onPressed: () async {
-              _messengerKey.currentState?.hideCurrentSnackBar();
-              await UndoService.instance.undoLatest();
-              widget.onChanged?.call();
-            },
-          ),
-        ),
-      );
+    showUndoSnackBar(context, label,
+        messenger: _messengerKey.currentState,
+        onUndone: () => widget.onChanged?.call());
   }
 
   /// 确认 = 写回 priority + status(processed)；有任务草稿则建任务并互链。
