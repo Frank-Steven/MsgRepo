@@ -509,14 +509,14 @@ class AppDatabase {
   }
 
   /// 与半开区间 [startMs, endMs) 有交集的任务（start_at 非空）。
-  /// 年度任务（is_annual=1）一律包含，调用方自行按年平移。
+  /// （v2.4：is_annual 逐年平移下线，一律按普通区间判断。）
   Future<List<Task>> getTasksOverlapping(int startMs, int endMs,
       {String status = 'active'}) async {
     final db = await database;
     final rows = await db.query(
       'tasks',
-      where: 'status = ? AND (is_annual = 1 OR (start_at IS NOT NULL AND '
-          'start_at < ? AND ((end_at IS NULL AND start_at >= ?) OR end_at > ?)))',
+      where: 'status = ? AND start_at IS NOT NULL AND '
+          'start_at < ? AND ((end_at IS NULL AND start_at >= ?) OR end_at > ?)',
       whereArgs: [status, endMs, startMs, startMs],
       orderBy: 'start_at ASC',
     );
@@ -532,13 +532,6 @@ class AppDatabase {
       orderBy: "CASE priority WHEN 'important' THEN 0 WHEN 'normal' THEN 1 "
           'ELSE 2 END, created_at ASC',
     );
-    return rows.map(Task.fromRow).toList();
-  }
-
-  Future<List<Task>> getAnnualTasks() async {
-    final db = await database;
-    final rows = await db.query('tasks',
-        where: 'is_annual = 1', orderBy: 'start_at ASC');
     return rows.map(Task.fromRow).toList();
   }
 

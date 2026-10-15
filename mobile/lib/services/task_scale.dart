@@ -78,7 +78,7 @@ int timeScaleRank(String scale) => switch (scale) {
 
 /// 各日程视图放行的尺度集合（设计 §2 尺度过滤表）。
 ///
-/// - 'yearly'（年度视图）：yearly 节点/线段 + is_annual 逐年节点；
+/// - 'yearly'（年度视图）：yearly 节点/线段；
 /// - 'year'（年视图）：quarterly / monthly / weekly；
 /// - 'month'（月视图）：weekly / daily；
 /// - 'day'（日视图）：timed。

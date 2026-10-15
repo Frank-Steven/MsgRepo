@@ -13,15 +13,15 @@ enum _DragMode { move, resizeStart, resizeEnd }
 /// 年度视图（设计 §2.1，v2.3 修订）：横向年份轴**双向无限滚动**
 /// （坐标 = 2000 年起算的绝对年小数，初始居中当前年），捏合缩放
 /// （焦点锚定），刻度档 1/5/10 年，年份标注 -45° 斜向上。
-/// 尺度为 yearly 的任务：单年内 = 节点、跨年 = 带端点线段；is_annual 任务
-/// 在每年画一个小节点；当前年高亮竖带。
+/// 尺度为 yearly 的任务：单年内 = 节点、跨年 = 带端点线段；当前年高亮竖带。
+/// （v2.4：is_annual 逐年节点下线，老 is_annual 任务按普通任务画。）
 ///
 /// 选中-调整（v2.3 §13-6）：点按任务出现描边选中态，仅选中任务可拖拽
 /// （移动 = 整数年平移保留月日；起止端点吸附年界；无跨度上限）；
 /// 有选中时点空白 = 取消选中，无选中时点空白 = 下钻该年的年视图。
 /// 名称层（v2.3 §13-7）：贪心放置，纯碰撞决定可见性。
 class YearlyView extends StatefulWidget {
-  /// 已按年度视图尺度过滤的任务（yearly + is_annual，覆盖可视窗口）。
+  /// 已按年度视图尺度过滤的任务（yearly，覆盖可视窗口）。
   final List<Task> tasks;
   final String? selectedTaskId;
   final ValueChanged<Task?> onTaskSelected;
@@ -207,7 +207,7 @@ class YearlyViewState extends State<YearlyView>
     if (_dragOriginal == null || _deltaYears == 0) return widget.tasks;
     final list = <Task>[];
     for (final t in widget.tasks) {
-      if (t.id == _dragOriginal!.id && !t.isAnnual) {
+      if (t.id == _dragOriginal!.id) {
         // 与 _onScaleEnd 同一套计算：移动 = 整体平移整数年；
         // 起止端点 = 吸附年界
         int? newStart = t.startAt;
@@ -242,10 +242,8 @@ class YearlyViewState extends State<YearlyView>
     _startFocalX = d.localFocalPoint.dx;
     _startPpy = layout.ppy;
     _startScrollYf = _scrollYf;
-    // 仅选中任务可拖拽（v2.3 选中-调整）；is_annual 节点不可拖拽
-    if (hit != null &&
-        hit.taskId == widget.selectedTaskId &&
-        !layout.annualIds.contains(hit.taskId)) {
+    // 仅选中任务可拖拽（v2.3 选中-调整）
+    if (hit != null && hit.taskId == widget.selectedTaskId) {
       final original = layout.originals[hit.taskId];
       final span = layout.spans[hit.taskId];
       if (original != null && span != null) {
@@ -440,20 +438,6 @@ class _YearlyItem {
   });
 }
 
-class _AnnualNode {
-  final Task task;
-  final double x;
-  final double y;
-  final Color color;
-
-  const _AnnualNode({
-    required this.task,
-    required this.x,
-    required this.y,
-    required this.color,
-  });
-}
-
 class _YearlyLayout {
   static const headerH = 44.0;
   static const nameLayerH = 100.0;
@@ -470,8 +454,6 @@ class _YearlyLayout {
   final int? minorTickYears;
   final int labelStride;
   final List<_YearlyItem> items;
-  final List<_AnnualNode> annualNodes;
-  final Set<String> annualIds;
   final Map<String, DayNameSlot> nameSlots;
   final List<_HitRegion> hitRegions;
   final Map<String, Task> originals;
@@ -493,8 +475,6 @@ class _YearlyLayout {
     required this.minorTickYears,
     required this.labelStride,
     required this.items,
-    required this.annualNodes,
-    required this.annualIds,
     required this.nameSlots,
     required this.hitRegions,
     required this.originals,
@@ -543,7 +523,7 @@ class _YearlyLayout {
 
     // 名称贪心放置（v2.3）：轴 = 绝对年小数，锚点按月步进
     final nameSlotsList = assignAngledNames(
-      tasks.where((t) => !t.isAnnual && t.startAt != null).toList(),
+      tasks.where((t) => t.startAt != null).toList(),
       axisOf: (t) {
         final f1 = _yearFraction(t.startAt!, epochYear);
         final f2 =
@@ -558,13 +538,11 @@ class _YearlyLayout {
     final nameSlots = {for (final s in nameSlotsList) s.taskId: s};
     final namesH = nameSlotsList.any((e) => e.visible) ? nameLayerH : 0.0;
 
-    // 非 is_annual 任务：按优先级分泳道，泳道内按年小数区间贪心分槽；
+    // 按优先级分泳道，泳道内按年小数区间贪心分槽；
     // 子任务（parent_id 非空）父在可见任务中则与父同泳道同槽（设计 §3）。
     final laneSlots = List.generate(3, (_) => <List<(double, double)>>[]);
     final slotOf = <String, (int, int)>{}; // taskId -> (lane, slot)
-    final regular = tasks
-        .where((t) => !t.isAnnual && t.startAt != null)
-        .toList()
+    final regular = tasks.where((t) => t.startAt != null).toList()
       ..sort((a, b) {
         final c = a.startAt!.compareTo(b.startAt!);
         return c != 0 ? c : a.id.compareTo(b.id);
@@ -632,29 +610,6 @@ class _YearlyLayout {
       ));
     }
 
-    // is_annual：按 startAt 的月日映射到可视范围每年一个小节点（设计 §2.1）
-    final annualNodes = <_AnnualNode>[];
-    final annualIds = <String>{};
-    final firstVisYear = epochYear + scrollYf.floor();
-    final lastVisYear = epochYear + (scrollYf + viewW / ppy).ceil();
-    for (final t in tasks) {
-      if (!t.isAnnual || t.startAt == null) continue;
-      annualIds.add(t.id);
-      final origin = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
-      final lane = laneIndexOf(t);
-      final y = itemY(lane, 0);
-      for (var year = firstVisYear - 1; year <= lastVisYear + 1; year++) {
-        final occ = DateTime(year, origin.month, origin.day, origin.hour,
-            origin.minute, origin.second);
-        annualNodes.add(_AnnualNode(
-          task: t,
-          x: xOf(_yearFraction(occ.millisecondsSinceEpoch, epochYear)),
-          y: y,
-          color: priorityColor(scheme, t.priority),
-        ));
-      }
-    }
-
     // 命中区域：子任务在前（优先命中），端点优先于中段
     final hitRegions = <_HitRegion>[];
     final ordered = [
@@ -682,12 +637,6 @@ class _YearlyLayout {
             _DragMode.move));
       }
     }
-    for (final n in annualNodes) {
-      hitRegions.add(_HitRegion(
-          Rect.fromCircle(center: Offset(n.x, n.y), radius: 14),
-          n.task.id,
-          _DragMode.move));
-    }
     // 名称命中区域：点按名称 = 选中（设计 §13-6）
     if (namesH > 0) {
       for (final it in items) {
@@ -714,8 +663,6 @@ class _YearlyLayout {
       minorTickYears: minorTickYears,
       labelStride: labelStride,
       items: items,
-      annualNodes: annualNodes,
-      annualIds: annualIds,
       nameSlots: nameSlots,
       hitRegions: hitRegions,
       originals: originals,
@@ -785,28 +732,6 @@ class _YearlyPainter extends CustomPainter {
       }
       if (it.task.id == layout.selectedTaskId) {
         _drawSelection(canvas, it, scheme);
-      }
-    }
-
-    // is_annual 每年一个小节点
-    for (final n in layout.annualNodes) {
-      if (n.x < -20 || n.x > size.width + 20) continue;
-      final done = n.task.status == TaskStatus.done;
-      canvas.drawCircle(
-        Offset(n.x, n.y),
-        3.5,
-        Paint()
-          ..color = n.color.withValues(alpha: done ? doneTaskOpacity : 1.0),
-      );
-      if (n.task.id == layout.selectedTaskId) {
-        canvas.drawCircle(
-          Offset(n.x, n.y),
-          7,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.5
-            ..color = scheme.primary,
-        );
       }
     }
 

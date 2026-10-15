@@ -11,5 +11,5 @@ int displayWidth(String s) {
   return width;
 }
 
-/// 名称是否在宽度上限内（默认 36）。
-bool withinWidthLimit(String s, [int max = 36]) => displayWidth(s) <= max;
+/// 名称是否在宽度上限内（默认 20）。
+bool withinWidthLimit(String s, [int max = 20]) => displayWidth(s) <= max;

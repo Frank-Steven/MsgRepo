@@ -23,7 +23,6 @@ class TodosPage extends StatefulWidget {
 
 class TodosPageState extends State<TodosPage> {
   static const _recentWindow = Duration(hours: 24);
-  static const _annualYearCount = 5;
 
   /// 页签顺序（设计 §3）：年度/季度/月度/整周/整日/定时/不定时/已完成/已归档。
   static const _scaleTabs = [
@@ -38,10 +37,9 @@ class TodosPageState extends State<TodosPage> {
 
   int _tab = 6; // 默认「不定时」（原"我的待办"）
 
-  /// 六个时间尺度各自的 active 任务（不含 is_annual，按开始时间升序）。
+  /// 六个时间尺度各自的 active 任务（按开始时间升序）。
   final Map<String, List<Task>> _byScale = {for (final s in _scaleTabs) s: []};
   List<Task> _untimed = [];
-  List<Task> _annual = [];
   List<Task> _done = [];
   List<Task> _archived = [];
 
@@ -77,26 +75,20 @@ class TodosPageState extends State<TodosPage> {
     final results = await Future.wait([
       db.getTasks(status: TaskStatus.active),
       db.getUntimedTasks(),
-      db.getAnnualTasks(),
       db.getTasks(status: TaskStatus.done),
       db.getTasks(status: TaskStatus.archived),
       db.getSubtaskProgress(),
     ]);
     final active = results[0] as List<Task>;
     final untimed = results[1] as List<Task>;
-    // 年度任务（is_annual）与派生尺度正交：只在「年度」页签逐年展示
-    final annual = (results[2] as List<Task>)
-        .where((t) => t.status == TaskStatus.active)
-        .toList();
-    final done = (results[3] as List<Task>)
+    final done = (results[2] as List<Task>)
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    final archived = (results[4] as List<Task>)
+    final archived = (results[3] as List<Task>)
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    final progress = results[5] as Map<String, (int, int)>;
+    final progress = results[4] as Map<String, (int, int)>;
     final byScale = {for (final s in _scaleTabs) s: <Task>[]};
     for (final t in active) {
-      final s = t.startAt;
-      if (s == null || t.isAnnual) continue;
+      if (t.startAt == null) continue;
       byScale[deriveTaskScale(t.startAt, t.endAt)]?.add(t);
     }
     // getTasks 已按 start_at 升序，分组内天然有序
@@ -106,7 +98,6 @@ class TodosPageState extends State<TodosPage> {
         ..clear()
         ..addAll(byScale);
       _untimed = untimed;
-      _annual = annual;
       _done = done;
       _archived = archived;
       _progress = progress;
@@ -114,10 +105,9 @@ class TodosPageState extends State<TodosPage> {
     });
   }
 
-  /// 各页签计数徽标（设计 §3，v2.3）：年度 = 派生年度 + is_annual 任务数。
+  /// 各页签计数徽标（设计 §3，v2.3）。
   List<int> get _tabBadges => [
-        _byScale['yearly']!.length + _annual.length,
-        for (final s in _scaleTabs.skip(1)) _byScale[s]!.length,
+        for (final s in _scaleTabs) _byScale[s]!.length,
         _untimed.length,
         _done.length,
         _archived.length,
@@ -227,7 +217,6 @@ class TodosPageState extends State<TodosPage> {
   int _tabForTask(Task t) {
     if (t.status == TaskStatus.done) return 7;
     if (t.status == TaskStatus.archived) return 8;
-    if (t.isAnnual) return 0;
     if (t.startAt == null) return 6;
     final idx = _scaleTabs.indexOf(deriveTaskScale(t.startAt, t.endAt));
     return idx >= 0 ? idx : 6;
@@ -271,22 +260,6 @@ class TodosPageState extends State<TodosPage> {
         ],
       ),
     );
-  }
-
-  List<Task> _annualSorted() {
-    final list = [..._annual];
-    list.sort((a, b) {
-      final am = a.startAt;
-      final bm = b.startAt;
-      if (am == null && bm == null) return 0;
-      if (am == null) return -1;
-      if (bm == null) return 1;
-      final da = DateTime.fromMillisecondsSinceEpoch(am);
-      final dbb = DateTime.fromMillisecondsSinceEpoch(bm);
-      final c = da.month.compareTo(dbb.month);
-      return c != 0 ? c : da.day.compareTo(dbb.day);
-    });
-    return list;
   }
 
   bool _isRecent(Task task) {
@@ -362,8 +335,6 @@ class TodosPageState extends State<TodosPage> {
         return _taskListView(_archived, archived: true);
       case 6:
         return _taskListView(_untimed);
-      case 0:
-        return _yearlyTabBody();
       default:
         return _taskListView(_byScale[_scaleTabs[tab]] ?? const []);
     }
@@ -448,56 +419,6 @@ class TodosPageState extends State<TodosPage> {
         return _tileFor(task, byParent,
             archived: archived, recent: done && _isRecent(task));
       },
-    );
-  }
-
-  /// 「年度」页签（设计 §3）：先列派生尺度=年度的任务，
-  /// 再接 is_annual 逐年分节（今年起 5 年，无任务的年份也显示年份标题）。
-  Widget _yearlyTabBody() {
-    final currentYear = DateTime.now().year;
-    final derived = _byScale['yearly']!;
-    final derivedByParent = _childrenMap(derived);
-    final derivedRows = _visibleRows(derived, derivedByParent);
-    final sorted = _annualSorted();
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: [
-        if (derived.isNotEmpty) ...[
-          _sectionHeader(context, '年度尺度', derived.length),
-          for (final task in derivedRows) _tileFor(task, derivedByParent),
-        ],
-        _sectionHeader(context, '年度任务', _annual.length),
-        for (var i = 0; i < _annualYearCount; i++) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(32, 8, 12, 2),
-            child: Text('${currentYear + i}年',
-                style: Theme.of(context).textTheme.labelLarge),
-          ),
-          // 年度任务按 startAt 的月日在每年重复展示（同一任务出现多次，
-          // 只在第一年分节挂 GlobalKey，避免重复 key 冲突）
-          for (final task in sorted)
-            _tileFor(task, const {}, keyed: i == 0),
-        ],
-        const SizedBox(height: 32),
-      ],
-    );
-  }
-
-  Widget _sectionHeader(BuildContext context, String title, int count) {
-    final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-      child: Row(
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(width: 8),
-          Text('$count',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodySmall
-                  ?.copyWith(color: scheme.onSurfaceVariant)),
-        ],
-      ),
     );
   }
 }

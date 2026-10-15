@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 /// - [equalWidth] = true 时固定总宽均分；false 时每段固定 [itemWidth]、
 ///   横向可滚动，选中段自动滚动到可见（与 PageView 联动用）；
 /// - [dots] 可选优先级色点（编辑器优先级）；[badges] 可选计数徽标
-///   （圆点+数字，0 不显示，待办页签用）。
+///   （仅数字，0 不显示，待办页签用）。
 class SegmentedSelector<T> extends StatelessWidget {
   final List<T> values;
   final List<String> labels;
@@ -139,18 +139,7 @@ class SegmentedSelector<T> extends StatelessWidget {
               ),
             ),
             if (badge > 0) ...[
-              const SizedBox(width: 4),
-              Container(
-                width: 5,
-                height: 5,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isSelected
-                      ? scheme.onSecondaryContainer
-                      : scheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(width: 2),
+              const SizedBox(width: 3),
               Text(
                 '$badge',
                 style: TextStyle(

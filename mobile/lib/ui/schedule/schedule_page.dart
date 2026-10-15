@@ -257,14 +257,12 @@ class SchedulePageState extends State<SchedulePage> {
   void _jumpToTask(Task t) {
     final s = t.startAt;
     if (s == null) return; // 不定时任务在日程无视图可跳
-    final g = t.isAnnual
-        ? 0
-        : switch (deriveTaskScale(t.startAt, t.endAt)) {
-            'yearly' => 0,
-            'quarterly' || 'monthly' => 1,
-            'weekly' || 'daily' => 2,
-            _ => 3,
-          };
+    final g = switch (deriveTaskScale(t.startAt, t.endAt)) {
+      'yearly' => 0,
+      'quarterly' || 'monthly' => 1,
+      'weekly' || 'daily' => 2,
+      _ => 3,
+    };
     setState(() {
       _granularity = g;
       _selectedTask = t;

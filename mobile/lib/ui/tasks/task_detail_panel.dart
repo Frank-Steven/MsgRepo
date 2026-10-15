@@ -198,12 +198,6 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
           Row(
             children: [
               _scaleChip(context),
-              if (t.isAnnual) ...[
-                const SizedBox(width: 6),
-                Text('年度任务',
-                    style: TextStyle(
-                        fontSize: 11, color: scheme.onSurfaceVariant)),
-              ],
               const SizedBox(width: 10),
               Flexible(
                 child: Text(

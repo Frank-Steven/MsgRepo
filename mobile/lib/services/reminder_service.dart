@@ -6,8 +6,7 @@ import '../models/task.dart';
 import 'database.dart';
 
 /// 本地提醒调度（设计 §0，v2）：有 start_at 的 active 任务在 start_at 时刻
-/// 发一条本地通知（标题 = 任务名）。无时间任务不排；年度任务（is_annual）
-/// 的逐年重复提醒暂不支持，跳过。
+/// 发一条本地通知（标题 = 任务名）。无时间任务不排。
 ///
 /// 任务增删改/完成/归档由 database.dart 的 tasks 写方法触发 [rescheduleAll]
 /// 全量重排；应用启动时也重排一次（main.dart）。
@@ -64,11 +63,11 @@ class ReminderService {
 
   int _notificationId(String taskId) => taskId.hashCode & 0x7fffffff;
 
-  /// 为单个任务排提醒：仅 active + startAt 在未来 + 非年度任务。
+  /// 为单个任务排提醒：仅 active + startAt 在未来。
   Future<void> scheduleForTask(Task task) async {
     if (!_initialized) return;
     await _plugin.cancel(_notificationId(task.id));
-    if (task.status != TaskStatus.active || task.isAnnual) return;
+    if (task.status != TaskStatus.active) return;
     final startAt = task.startAt;
     if (startAt == null) return;
     if (startAt <= DateTime.now().millisecondsSinceEpoch) return;

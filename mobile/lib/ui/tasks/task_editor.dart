@@ -83,7 +83,7 @@ class _TaskEditorSheet extends StatefulWidget {
 }
 
 class _TaskEditorSheetState extends State<_TaskEditorSheet> {
-  static const _maxTitleWidth = 36;
+  static const _maxTitleWidth = 20;
 
   late final TextEditingController _titleCtrl;
   late final TextEditingController _descCtrl;
@@ -178,10 +178,6 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
         _endAt = _startAt!.add(const Duration(hours: 1));
       }
     });
-  }
-
-  void _toggleAnnual(bool value) {
-    setState(() => _isAnnual = value);
   }
 
   Future<void> _pickDate(bool isStart) async {
@@ -565,13 +561,6 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
                 const SizedBox(width: 12),
                 Expanded(child: _parentDropdown()),
               ],
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('年度任务'),
-              subtitle: const Text('每年同一时间重复展示'),
-              value: _isAnnual,
-              onChanged: _toggleAnnual,
             ),
             if (_sourceMessageId != null)
               Card(
