@@ -336,8 +336,9 @@ process(messages):
 }
 ```
 
-- 筛选重要 vs 垃圾是 AI 的**第一职责**（垃圾：营销、推广、无用系统提示等）；任务草稿是第二职责（仅当消息包含明确可执行事项）。
+- 筛选重要 vs 垃圾是 AI 的**第一职责**（垃圾：营销、推广、无用系统提示等）；任务草稿是第二职责。
 - 提示词仍由注册表/分类描述生成（沿用 v1 资产），但输出 schema 换成上面的精简结构；时间解析沿用"日期对照表 + 已过去顺延 + 本地时间字符串"策略。
+- **v2.4 提示词规则**（两端逐条一致：mobile `services/ai_client.dart` `_buildSystemPrompt`，desktop `src/ai/evaluate.ts` `buildEvalSystemPrompt`）：结合来源应用/会话语境判断重要与垃圾；无明确时间的可执行事项省略 startAt/endAt（不定时任务）；值得留存备查的笔记类内容也给 taskDraft（priority=minor）；title ≤20 字符（中文按 2 计），细节进 description；多步骤事项只给主事项草稿，子步骤以换行列表写进 description。schema 无新增字段，startAt/endAt 可省略，两端解析均容忍缺失。
 
 ### 8.3 流式展示（v1）
 
@@ -450,7 +451,7 @@ process(messages):
 15. **AI 过程可视化重做**（§8）：流式输出区域改为每条消息一个卡片——状态图标（等待/处理中/完成/失败）、标题、流式文本等宽字体，完成后折叠为结果摘要。
 16. **AI 结果复选确认**（§8）：每条结果左侧 checkbox（默认勾选，可取消）；顶部「全部确认」改为「确认选中（n）」，只落库勾选项。
 17. **任务名称限长 36→20**（§7、§10）：沿用 displayWidth 全角算 2 规则，编辑器计数器同步 x/20。
-18. **AI 提示词优化**（§8）：充分利用不定时任务（无明确时间的诉求也生成 taskDraft、不带时间）、父子任务（提示词附现有任务摘要含 id/尺度，允许把新任务挂到已有任务下）、支持生成笔记草稿写入笔记模块、区分定时/不定时；输入带消息会话标题/发送者/应用名作语境；提示词在 mobile 侧组装（services/ai_client.dart），categories.dart 内置分类沿用。
+18. **AI 提示词优化**（§8）：不定时任务（无明确时间省略 startAt/endAt）、笔记类内容也生成 taskDraft（priority=minor）、多步骤事项只给主事项草稿+子步骤写进 description、title ≤20 字符（中文按 2 计）、结合来源应用/会话标题/发送者语境判断；提示词 mobile/desktop 两端逐条一致（mobile `services/ai_client.dart`，desktop `src/ai/evaluate.ts`），categories.dart / 分类注册表内置分类沿用。注：原设想的完整版（提示词附现有任务摘要、parentId 挂载已有父任务、noteDraft 直写笔记模块）本版未实现，schema 未加新字段，留后续版本。
 19. **SnackBar 消失进度条**（§6、§10）：底部加细进度条随剩余时间减少；指针按住/hover 时进度回满并暂停计时，松开重新倒计时；进度耗尽自动消失。showUndoSnackBar 统一替换。
 20. **消息记录导入（预留方案，本版不实现）**（§5）：见下「消息导入方案」。
 

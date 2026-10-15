@@ -27,9 +27,17 @@ export function buildEvalSystemPrompt(
       `{"priority":"red|yellow|green|junk","reason":"一句话理由","taskDraft":null 或 ` +
       `{"title":"...","description":"...","kind":"point|range","startAt":"YYYY-MM-DDTHH:mm","endAt":"YYYY-MM-DDTHH:mm","priority":"important|normal|minor"}}\n` +
       `priority 语义：red=重要、yellow=值得关注、green=一般、junk=垃圾（营销、推广、无用系统提示等）。` +
-      `判断重要与垃圾是首要职责。\n` +
-      `taskDraft 仅当消息包含明确可执行事项时给出，否则为 null。kind=point 时点任务只需 startAt；` +
-      `kind=range 时段任务需要 startAt 和 endAt。任务 priority：important=重要、normal=一般、minor=不重要。\n` +
+      `判断重要与垃圾是首要职责。结合来源应用与会话语境判断（如银行/支付类通知多重要、` +
+      `应用商店的推广多为垃圾）。\n` +
+      `taskDraft 规则：\n` +
+      `- 消息包含明确可执行事项时给出，否则为 null；值得留存备查但无需执行的内容` +
+      `（笔记类，如账号信息、地址、灵感）也给 taskDraft，priority=minor。\n` +
+      `- title 不超过 20 个字符（中文按 2 字符计），超长的细节放入 description。\n` +
+      `- kind=point 时点任务只需 startAt；kind=range 时段任务需要 startAt 和 endAt；` +
+      `没有明确时间的可执行事项省略 startAt/endAt（不定时任务）。\n` +
+      `- 消息包含一个主事项和多个子步骤时，只给主事项草稿，子步骤以换行列表写进 ` +
+      `description，不要拆成多个草稿。\n` +
+      `- 任务 priority：important=重要、normal=一般、minor=不重要。\n` +
       `时间用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），相对日期（如"本周五""下周一"）` +
       `查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间：若字面日期标注了"已过去"，顺延到下一个未来的同名日期。\n` +
       `分类参考（辅助判断重要性与垃圾）：\n${catList}\n` +
