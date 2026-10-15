@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
 import '../../models/task.dart';
 import 'layout.dart';
@@ -54,7 +55,8 @@ class DayView extends StatefulWidget {
   State<DayView> createState() => DayViewState();
 }
 
-class DayViewState extends State<DayView> {
+class DayViewState extends State<DayView>
+    with SingleTickerProviderStateMixin {
   /// 缩放范围：最小 = 24h 恰好铺满可视宽，最大 = 每 5 分钟 48dp。
   static const _maxPpm = 48.0 / 5;
 
@@ -86,6 +88,44 @@ class DayViewState extends State<DayView> {
   double? _pulseMin;
   Timer? _pulseTimer;
 
+  /// fling 惯性滚动（v2.4）：水平甩动后按摩擦衰减继续平移。
+  AnimationController? _flingCtrl;
+  double _flingStartMin = 0;
+
+  void _cancelFling() {
+    _flingCtrl?.stop();
+    _flingCtrl?.dispose();
+    _flingCtrl = null;
+  }
+
+  void _startFling(double vxPxPerSec) {
+    final ppm = _ppm;
+    if (ppm == null || vxPxPerSec.abs() < 120) return; // 低速不惯性
+    _cancelFling();
+    _flingStartMin = _scrollMin;
+    // 模拟值 = 像素位移（正 = 手指向右甩）；scrollMin 反向变化
+    final sim = FrictionSimulation(0.09, 0, vxPxPerSec);
+    final ctrl = AnimationController.unbounded(vsync: this);
+    ctrl.addListener(() {
+      final next = (_flingStartMin - ctrl.value / ppm);
+      if (next <= 0 || next >= _maxMin) {
+        _cancelFling(); // 撞边界即停
+        setState(() => _scrollMin = next.clamp(0.0, _maxMin));
+        _reportWindow();
+        return;
+      }
+      setState(() => _scrollMin = next);
+    });
+    ctrl.addStatusListener((s) {
+      if (s == AnimationStatus.completed) {
+        _cancelFling();
+        _reportWindow();
+      }
+    });
+    _flingCtrl = ctrl;
+    ctrl.animateWith(sim);
+  }
+
   double get _nowMin =>
       (DateTime.now().millisecondsSinceEpoch - _epochMs) / 60000.0;
 
@@ -99,6 +139,7 @@ class DayViewState extends State<DayView> {
   void dispose() {
     _nowTimer?.cancel();
     _pulseTimer?.cancel();
+    _cancelFling();
     super.dispose();
   }
 
@@ -151,10 +192,11 @@ class DayViewState extends State<DayView> {
 
   void _reportWindow() {
     if (_viewW <= 0 || _ppm == null) return;
-    const marginMin = 2 * 1440.0;
-    final startMs = ((_scrollMin - marginMin) * 60000 + _epochMs).round();
+    // 精确可视范围（v2.4：加载提前量由父级 _ensureRange 负责，
+    // 这里上报的范围同时用于底部面板与标题）
+    final startMs = (_scrollMin * 60000 + _epochMs).round();
     final endMs =
-        ((_scrollMin + _viewW / _ppm! + marginMin) * 60000 + _epochMs).round();
+        ((_scrollMin + _viewW / _ppm!) * 60000 + _epochMs).round();
     widget.onVisibleWindowChanged(startMs, endMs);
     final centerMs =
         ((_scrollMin + _viewW / (2 * _ppm!)) * 60000 + _epochMs).round();
@@ -182,6 +224,7 @@ class DayViewState extends State<DayView> {
   }
 
   void _onScaleStart(ScaleStartDetails d, _DayLayout layout) {
+    _cancelFling();
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
     _startPpm = layout.ppm;
@@ -244,12 +287,18 @@ class DayViewState extends State<DayView> {
           : oe + (mode == _DragMode.resizeStart ? 0 : deltaMs);
       widget.onTaskMoved(original, newStart, newEnd);
     }
-    if (_dragOriginal == null) _reportWindow();
+    final wasDragging = _dragOriginal != null;
     setState(() {
       _dragOriginal = null;
       _dragMode = null;
       _deltaMin = 0;
     });
+    if (wasDragging) {
+      _reportWindow();
+    } else {
+      // 平移手势结束：带惯性继续滚动（v2.4）
+      _startFling(d.velocity.pixelsPerSecond.dx);
+    }
   }
 
   void _onTapUp(TapUpDetails d, _DayLayout layout) {
@@ -493,20 +542,20 @@ class _DayLayout {
     ]) {
       if (it.isPoint) {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 12),
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
             it.task.id,
             _DragMode.move));
       } else {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x2, it.y), radius: 10),
+            Rect.fromCircle(center: Offset(it.x2, it.y), radius: 14),
             it.task.id,
             _DragMode.resizeEnd));
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 10),
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
             it.task.id,
             _DragMode.resizeStart));
         hitRegions.add(_HitRegion(
-            Rect.fromLTRB(it.x1, it.y - 8, it.x2, it.y + 8),
+            Rect.fromLTRB(it.x1, it.y - 10, it.x2, it.y + 10),
             it.task.id,
             _DragMode.move));
       }
@@ -738,21 +787,35 @@ class _DayPainter extends CustomPainter {
       }
     }
 
-    // 主刻度：竖格线 + 刻度短线 + 斜 45° 标注（过挤按 2 的幂隔档）
+    // 主刻度：竖格线 + 刻度短线 + 斜 45° 标注（过挤按 2 的幂隔档）；
+    // 当前时刻所在的主刻度用 primary 标注（v2.4）
     final firstMajor = (firstMin / major).floor();
     final lastMajor = (lastMin / major).ceil();
+    final nowSlot = (layout.nowMin / major).floor();
     for (var t = firstMajor; t <= lastMajor; t++) {
       final minute = t * major;
       final x = _xOf(minute.toDouble());
+      final isNow = t == nowSlot;
       canvas.drawLine(Offset(x, top), Offset(x, size.height), gridPaint);
       canvas.drawLine(
-          Offset(x, ganttTop - 6), Offset(x, ganttTop), tickPaint);
+          Offset(x, ganttTop - 6),
+          Offset(x, ganttTop),
+          isNow
+              ? (Paint()
+                ..color = scheme.primary
+                ..strokeWidth = 1.5)
+              : tickPaint);
       if (t % layout.labelStride != 0) continue;
       final d = DateTime.fromMillisecondsSinceEpoch(
           layout.epochMs + minute * 60000);
       final label = '${d.hour}:${_two(d.minute)}';
       final tp = TextPainter(
-        text: TextSpan(text: label, style: labelStyle),
+        text: TextSpan(
+            text: label,
+            style: isNow
+                ? labelStyle.copyWith(
+                    color: scheme.primary, fontWeight: FontWeight.w600)
+                : labelStyle),
         textDirection: TextDirection.ltr,
       )..layout();
       // 锚在刻度点，旋转 -45° 向右上延伸

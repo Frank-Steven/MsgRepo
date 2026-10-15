@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
 import '../../services/database.dart';
-import '../../services/date_ranges.dart';
 import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../messages/message_widgets.dart';
@@ -16,20 +15,25 @@ import 'schedule_shared.dart';
 import 'year_view.dart';
 import 'yearly_view.dart';
 
-/// 日程页（设计 §2，v2.3 修订）：年度/年/月/日四级视图均无限滚动。
+/// 日程页（设计 §2，v2.3/v2.4 修订）：年度/年/月/日四级视图均无限滚动。
 ///
 /// v2.3 变更：
 /// - 平移箭头移入标题栏（[←] 标题 [→]），控制条只留段选器（居中固定宽）
 ///   与「现在」按钮；
 /// - 任务加载改为按可视窗口增量缓存（[onVisibleWindowChanged] 驱动），
 ///   视图滚动即加载，不再按"当前期"整期重查；
-/// - 点选任务后底部板块切换为任务详情面板（[TaskDetailPanel]），
-///   无选中时保持原底部任务列表板块（年=yearly∩当年、月=monthly∩当月、
-///   日=daily∩当日，基于可视中心 [_anchor]）。
+/// - 点选任务后底部板块切换为任务详情面板（[TaskDetailPanel]）。
 ///
-/// 尺度过滤表（§2）：年度视图 = yearly + is_annual 逐年节点；
-/// 年视图 = quarterly/monthly/weekly；月视图 = weekly/daily；
-/// 日视图 = timed；不定时不进日程；is_annual 只进年度视图。
+/// v2.4 变更：
+/// - 各视图 onVisibleWindowChanged 上报**精确可视范围**（加载提前量在
+///   [_ensureRange] 内统一加），底部任务面板 = 可视范围 ∩ scalesForView
+///   放行集合的全部任务（不再限定单一尺度，年度视图也显示）；
+/// - 标题：年度 = 实际可视年份范围（随缩放），年 = 「2026」、
+///   月 = 「2026-10」、日 = 「2026-10-14 周三」。
+///
+/// 尺度过滤表（§2）：年度视图 = yearly；年视图 = quarterly/monthly/weekly；
+/// 月视图 = weekly/daily；日视图 = timed；不定时不进日程。
+/// （v2.4：is_annual UI 下线，不再逐年平移/特判。）
 ///
 /// 通过 GlobalKey<SchedulePageState> 暴露 [SchedulePageState.reload]，
 /// 供壳层切页时刷新（与其他页一致）。
@@ -48,6 +52,11 @@ class SchedulePageState extends State<SchedulePage> {
   DateTime _anchor = DateTime.now();
 
   Task? _selectedTask;
+
+  /// 当前视图的精确可视范围（各视图 onVisibleWindowChanged 上报，v2.4）——
+  /// 用于底部任务面板与年度标题。
+  int? _visStartMs;
+  int? _visEndMs;
 
   /// 增量任务缓存：覆盖 [_cacheStart, _cacheEnd] 区间（按 id 覆盖式合并）。
   final Map<String, Task> _cache = {};
@@ -115,14 +124,12 @@ class SchedulePageState extends State<SchedulePage> {
     });
   }
 
-  /// 甘特区任务：按当前粒度的尺度过滤表过滤（is_annual 只进年度视图）。
+  /// 甘特区任务：按当前粒度的尺度过滤表过滤（v2.4：不再对 is_annual
+  /// 特判——该概念 UI 下线，老数据按派生尺度进各视图）。
   List<Task> get _ganttTasks {
     switch (_granularity) {
       case 0:
-        return _cache.values
-            .where((t) =>
-                t.isAnnual || deriveTaskScale(t.startAt, t.endAt) == 'yearly')
-            .toList();
+        return _filterByScales('yearly');
       case 1:
         return _filterByScales('year');
       case 2:
@@ -135,45 +142,25 @@ class SchedulePageState extends State<SchedulePage> {
   List<Task> _filterByScales(String view) {
     final scales = scalesForView(view);
     return _cache.values
-        .where((t) =>
-            !t.isAnnual && scales.contains(deriveTaskScale(t.startAt, t.endAt)))
+        .where((t) => scales.contains(deriveTaskScale(t.startAt, t.endAt)))
         .toList();
   }
 
-  /// 底部任务列表板块（设计 §2）：年视图下 = yearly∩当年；
-  /// 月视图下 = monthly∩当月；日视图下 = daily∩当日；年度视图无底部板块。
+  /// 底部任务列表板块（v2.4 §13 修订）：当前**可视时间范围**内、且尺度在
+  /// 当前视图放行集合（scalesForView）内的全部任务，不再限定单一尺度；
+  /// 年度视图同样显示（放行集合 = yearly）。
   List<Task> get _bottomTasks {
-    final (int, int)? range = switch (_granularity) {
-      1 => (() {
-          final r = yearRange(_anchor.year);
-          return (r.startMs, r.endMs);
-        })(),
-      2 => (
-          DateTime(_anchor.year, _anchor.month).millisecondsSinceEpoch,
-          DateTime(_anchor.year, _anchor.month + 1).millisecondsSinceEpoch,
-        ),
-      3 => (
-          DateTime(_anchor.year, _anchor.month, _anchor.day)
-              .millisecondsSinceEpoch,
-          DateTime(_anchor.year, _anchor.month, _anchor.day + 1)
-              .millisecondsSinceEpoch,
-        ),
-      _ => null,
-    };
-    if (range == null) return const [];
-    final scale = switch (_granularity) {
-      1 => 'yearly',
-      2 => 'monthly',
-      _ => 'daily',
-    };
-    final (startMs, endMs) = range;
+    final viewName =
+        const ['yearly', 'year', 'month', 'day'][_granularity];
+    final scales = scalesForView(viewName);
+    final vs = _visStartMs, ve = _visEndMs;
+    if (vs == null || ve == null) return const [];
     return _cache.values
         .where((t) =>
             t.status == TaskStatus.active &&
-            !t.isAnnual &&
             t.startAt != null &&
-            deriveTaskScale(t.startAt, t.endAt) == scale &&
-            occurrenceOverlapping(t, startMs, endMs) != null)
+            scales.contains(deriveTaskScale(t.startAt, t.endAt)) &&
+            occurrenceOverlapping(t, vs, ve) != null)
         .toList()
       ..sort((a, b) => a.startAt!.compareTo(b.startAt!));
   }
@@ -308,6 +295,15 @@ class SchedulePageState extends State<SchedulePage> {
     setState(() => _selectedTask = t);
   }
 
+  /// 可视窗口变化：记录精确可视范围（底部面板/标题用）+ 增量加载。
+  void _onWindowChanged(int startMs, int endMs) {
+    setState(() {
+      _visStartMs = startMs;
+      _visEndMs = endMs;
+    });
+    _ensureRange(startMs, endMs);
+  }
+
   /// 标题栏箭头平移：年度 ±20 年、年 ±1 年、月 ±1 月、日 ±1 天。
   void _shiftPeriod(int delta) {
     final target = switch (_granularity) {
@@ -342,19 +338,29 @@ class SchedulePageState extends State<SchedulePage> {
     }
   }
 
-  /// AppBar 标题：年度粒度显示窗口覆盖区间，其余显示可视中心所在期。
+  /// AppBar 标题（v2.4）：年度 = 实际可视年份范围（随缩放变化）；
+  /// 年 = 「2026」；月 = 「2026-10」；日 = 「2026-10-14 周三」。
   String get _title {
     switch (_granularity) {
       case 0:
+        final vs = _visStartMs, ve = _visEndMs;
+        if (vs != null && ve != null) {
+          final first = DateTime.fromMillisecondsSinceEpoch(vs).year;
+          final last =
+              DateTime.fromMillisecondsSinceEpoch(ve - 1).year;
+          return '$first–$last';
+        }
         return '${_anchor.year - 10}–${_anchor.year + 9}';
       case 2:
-        return '${_anchor.year}年${_anchor.month}月';
+        final m = _anchor.month.toString().padLeft(2, '0');
+        return '${_anchor.year}-$m';
       case 3:
         const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-        return '${_anchor.year}年${_anchor.month}月${_anchor.day}日'
-            '（${weekdays[_anchor.weekday - 1]}）';
+        final mo = _anchor.month.toString().padLeft(2, '0');
+        final d = _anchor.day.toString().padLeft(2, '0');
+        return '${_anchor.year}-$mo-$d ${weekdays[_anchor.weekday - 1]}';
       default:
-        return '${_anchor.year}年';
+        return '${_anchor.year}';
     }
   }
 
@@ -369,7 +375,7 @@ class SchedulePageState extends State<SchedulePage> {
           onTaskSelected: _onTaskSelected,
           onTaskMoved: _moveTask,
           onYearTap: _drillToYear,
-          onVisibleWindowChanged: _ensureRange,
+          onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 2:
@@ -384,7 +390,7 @@ class SchedulePageState extends State<SchedulePage> {
             seedStartAt: ms + const Duration(hours: 9).inMilliseconds,
             seedKind: TaskKind.point,
           ),
-          onVisibleWindowChanged: _ensureRange,
+          onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 3:
@@ -398,7 +404,7 @@ class SchedulePageState extends State<SchedulePage> {
             seedStartAt: ms,
             seedKind: TaskKind.point,
           ),
-          onVisibleWindowChanged: _ensureRange,
+          onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       default:
@@ -417,7 +423,7 @@ class SchedulePageState extends State<SchedulePage> {
               seedKind: TaskKind.range,
             );
           },
-          onVisibleWindowChanged: _ensureRange,
+          onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
     }
@@ -607,8 +613,8 @@ class SchedulePageState extends State<SchedulePage> {
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else ...[
             Expanded(flex: 3, child: _ganttView()),
-            if (_granularity != 0 || _selectedTask != null)
-              _bottomSection(context),
+            // v2.4：底部面板所有粒度都显示（含年度）
+            _bottomSection(context),
           ],
         ],
       ),

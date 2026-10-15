@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
 import '../../models/task.dart';
 import 'layout.dart';
@@ -49,7 +50,8 @@ class YearlyView extends StatefulWidget {
   State<YearlyView> createState() => YearlyViewState();
 }
 
-class YearlyViewState extends State<YearlyView> {
+class YearlyViewState extends State<YearlyView>
+    with SingleTickerProviderStateMixin {
   /// 缩放范围：最小 = 20 年铺满可视宽，最大 = 每年 320dp。
   static const _maxPpy = 320.0;
 
@@ -78,9 +80,49 @@ class YearlyViewState extends State<YearlyView> {
   int? _pulseYear;
   Timer? _pulseTimer;
 
+  /// fling 惯性滚动（v2.4）：水平甩动后按摩擦衰减继续平移。
+  AnimationController? _flingCtrl;
+  double _flingStartYf = 0;
+
+  void _cancelFling() {
+    _flingCtrl?.stop();
+    _flingCtrl?.dispose();
+    _flingCtrl = null;
+  }
+
+  void _startFling(double vxPxPerSec) {
+    final ppy = _ppy;
+    if (ppy == null || vxPxPerSec.abs() < 120) return; // 低速不惯性
+    _cancelFling();
+    _flingStartYf = _scrollYf;
+    // 模拟值 = 像素位移（正 = 手指向右甩）；scrollYf 反向变化
+    final sim = FrictionSimulation(0.09, 0, vxPxPerSec);
+    final ctrl = AnimationController.unbounded(vsync: this);
+    ctrl.addListener(() {
+      final next = _flingStartYf - ctrl.value / ppy;
+      if (next <= _minScroll || next >= _maxScroll) {
+        _cancelFling(); // 撞边界即停
+        setState(
+            () => _scrollYf = next.clamp(_minScroll, _maxScroll));
+        _reportWindow();
+        return;
+      }
+      setState(() => _scrollYf = next);
+    });
+    ctrl.addStatusListener((s) {
+      if (s == AnimationStatus.completed) {
+        _cancelFling();
+        _reportWindow();
+      }
+    });
+    _flingCtrl = ctrl;
+    ctrl.animateWith(sim);
+  }
+
   @override
   void dispose() {
     _pulseTimer?.cancel();
+    _cancelFling();
     super.dispose();
   }
 
@@ -148,12 +190,13 @@ class YearlyViewState extends State<YearlyView> {
 
   void _reportWindow() {
     if (_viewW <= 0 || _ppy == null) return;
-    const marginYears = 5.0;
-    final startMs = DateTime(_epochYear + (_scrollYf - marginYears).floor())
+    // 精确可视范围（v2.4：加载提前量由父级 _ensureRange 负责，
+    // 这里上报的范围同时用于底部面板与随缩放变化的标题）
+    final startMs = DateTime(_epochYear + _scrollYf.floor())
         .millisecondsSinceEpoch;
-    final endMs = DateTime(
-            _epochYear + (_scrollYf + _viewW / _ppy! + marginYears).ceil())
-        .millisecondsSinceEpoch;
+    // 右缘年小数落在的年 = 最后可视年；区间右端 = 其次年 1 月 1 日
+    final lastVisYear = _epochYear + (_scrollYf + _viewW / _ppy!).floor();
+    final endMs = DateTime(lastVisYear + 1).millisecondsSinceEpoch;
     widget.onVisibleWindowChanged(startMs, endMs);
     final centerYf = _scrollYf + _viewW / (2 * _ppy!);
     widget.onCenterChanged(
@@ -194,6 +237,7 @@ class YearlyViewState extends State<YearlyView> {
   }
 
   void _onScaleStart(ScaleStartDetails d, _YearlyLayout layout) {
+    _cancelFling();
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
     _startPpy = layout.ppy;
@@ -277,12 +321,18 @@ class YearlyViewState extends State<YearlyView> {
       }
       widget.onTaskMoved(original, newStart, newEnd);
     }
-    if (_dragOriginal == null) _reportWindow();
+    final wasDragging = _dragOriginal != null;
     setState(() {
       _dragOriginal = null;
       _dragMode = null;
       _deltaYears = 0;
     });
+    if (wasDragging) {
+      _reportWindow();
+    } else {
+      // 平移手势结束：带惯性继续滚动（v2.4）
+      _startFling(d.velocity.pixelsPerSecond.dx);
+    }
   }
 
   void _onTapUp(TapUpDetails d, _YearlyLayout layout) {
@@ -614,27 +664,27 @@ class _YearlyLayout {
     for (final it in ordered) {
       if (it.isPoint) {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 12),
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
             it.task.id,
             _DragMode.move));
       } else {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x2, it.y), radius: 10),
+            Rect.fromCircle(center: Offset(it.x2, it.y), radius: 14),
             it.task.id,
             _DragMode.resizeEnd));
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 10),
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
             it.task.id,
             _DragMode.resizeStart));
         hitRegions.add(_HitRegion(
-            Rect.fromLTRB(it.x1, it.y - 8, it.x2, it.y + 8),
+            Rect.fromLTRB(it.x1, it.y - 10, it.x2, it.y + 10),
             it.task.id,
             _DragMode.move));
       }
     }
     for (final n in annualNodes) {
       hitRegions.add(_HitRegion(
-          Rect.fromCircle(center: Offset(n.x, n.y), radius: 10),
+          Rect.fromCircle(center: Offset(n.x, n.y), radius: 14),
           n.task.id,
           _DragMode.move));
     }
@@ -863,16 +913,29 @@ class _YearlyPainter extends CustomPainter {
       }
     }
 
+    // 主刻度：当前年（nowYear）的 tick 用 primary 标注（v2.4）
+    final nowYearTick = DateTime.now().year - layout.epochYear;
     var t = (firstTick / major).floor() * major;
     while (t <= lastTick) {
       final x = _xOf(t.toDouble());
+      final isNow = t <= nowYearTick && nowYearTick < t + major;
       canvas.drawLine(Offset(x, top), Offset(x, size.height), gridPaint);
       canvas.drawLine(
-          Offset(x, ganttTop - 6), Offset(x, ganttTop), tickPaint);
+          Offset(x, ganttTop - 6),
+          Offset(x, ganttTop),
+          isNow
+              ? (Paint()
+                ..color = scheme.primary
+                ..strokeWidth = 1.5)
+              : tickPaint);
       if ((t ~/ major) % layout.labelStride == 0) {
         final tp = TextPainter(
           text: TextSpan(
-              text: '${layout.epochYear + t}', style: labelStyle),
+              text: '${layout.epochYear + t}',
+              style: isNow
+                  ? labelStyle.copyWith(
+                      color: scheme.primary, fontWeight: FontWeight.w600)
+                  : labelStyle),
           textDirection: TextDirection.ltr,
         )..layout();
         canvas.save();

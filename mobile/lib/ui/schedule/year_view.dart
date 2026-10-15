@@ -93,11 +93,11 @@ class YearViewState extends State<YearView> {
 
   void _reportWindow() {
     if (!mounted || !_scroll.hasClients || _itemExtent <= 0) return;
-    final firstIdx = (_scroll.offset / _itemExtent).floor() - 1;
+    // 精确可视范围（v2.4：加载提前量由父级 _ensureRange 负责）
+    final firstIdx = (_scroll.offset / _itemExtent).floor();
     final lastIdx =
         ((_scroll.offset + _scroll.position.viewportDimension) / _itemExtent)
-                .ceil() +
-            1;
+            .floor();
     final firstYear = _baseYear + unitIndexForItem(firstIdx);
     final lastYear = _baseYear + unitIndexForItem(lastIdx);
     widget.onVisibleWindowChanged(
@@ -523,8 +523,9 @@ class _YearLayout {
       final items =
           layoutYearLane(tasks.where((t) => t.priority == p).toList(), year);
       laneItems[p] = items;
+      // 空泳道不占槽位（v2.4：无任务的优先级不再保留一条空泳道高度）
       laneSlotCounts[p] =
-          items.fold(0, (m, e) => e.slot + 1 > m ? e.slot + 1 : m).clamp(1, 99);
+          items.fold(0, (m, e) => e.slot + 1 > m ? e.slot + 1 : m);
     }
 
     // 槽位过高时整体压缩 slotH，保证 12 块在给定高度内绘完
@@ -536,10 +537,12 @@ class _YearLayout {
       return 4 * blockH + 3 * gap + 2 * pad;
     }
 
-    if (maxHeight.isFinite && totalH(slotH) > maxHeight) {
-      final lanesTotal = laneSlotCounts.values.fold(0, (a, b) => a + b);
+    final lanesTotalRaw = laneSlotCounts.values.fold(0, (a, b) => a + b);
+    if (maxHeight.isFinite &&
+        lanesTotalRaw > 0 &&
+        totalH(slotH) > maxHeight) {
       final blockH = (maxHeight - 3 * gap - 2 * pad) / 4;
-      slotH = ((blockH - labelH - 2 * blockVPad) / lanesTotal)
+      slotH = ((blockH - labelH - 2 * blockVPad) / lanesTotalRaw)
           .clamp(8.0, _naturalSlotH);
     }
     final height = maxHeight.isFinite ? maxHeight : totalH(slotH);
@@ -585,6 +588,9 @@ class _YearLayout {
         }
       }
       final color = priorityColor(scheme, p);
+      // 名称可用宽度的行右缘：名称不跨季度行（v2.4 标准样式）
+      double rowRight(int month) =>
+          blockLeft(((month - 1) ~/ 3) * 3 + 3) + blockW;
       for (final li in lane) {
         final task = byId[li.taskId];
         if (task == null) continue;
@@ -593,21 +599,30 @@ class _YearLayout {
         final x1 = li.extendsBefore
             ? blockLeft(li.startMonth)
             : blockLeft(li.startMonth) + blockW * _fracInMonth(startMs);
-        final x2 = li.startMonth == li.endMonth && endMs == null
-            ? x1
-            : li.extendsAfter
-                ? blockLeft(li.endMonth) + blockW
-                : blockLeft(li.endMonth) +
-                    blockW * _fracInMonth(endMs ?? startMs);
+        // 月内线段的右端点钳到当月内（结束时刻恰为次月 1 日零点时
+        // 不归到下月块左缘）；跨年延伸保持旧行为
+        double endX() {
+          if (li.extendsAfter) return blockLeft(li.endMonth) + blockW;
+          final ex = blockLeft(li.endMonth) +
+              blockW * _fracInMonth(endMs ?? startMs);
+          final maxX = blockLeft(li.endMonth) + blockW;
+          return ex > maxX ? maxX : ex;
+        }
+
+        final isNode =
+            li.startMonth == li.endMonth && !li.extendsBefore && !li.extendsAfter;
+        final x2 = isNode && endMs == null ? x1 : endX();
         final y = blockTop(li.startMonth) +
             laneTopInBlock[p]! +
             li.slot * slotH +
             slotH / 2;
-        final isNode = li.startMonth == li.endMonth &&
-            !li.extendsBefore &&
-            !li.extendsAfter;
         final nameX = (isNode ? x1 : x2) + 9;
-        final avail = (slotNextX[li.taskId] ?? (width - pad)) - nameX - 2;
+        // 名称可用宽度：同槽下一任务的 x 或本行右缘，取小（v2.4 修复：
+        // 旧逻辑在下一任务跨行回绕时 avail 变负导致名称消失）
+        final nextX = slotNextX[li.taskId];
+        final rightBound =
+            nextX != null && nextX > nameX ? nextX : rowRight(li.startMonth);
+        final avail = rightBound - nameX - 2;
         final done = task.status == TaskStatus.done;
         // 子任务（与父同槽叠加）不画名称
         final tp = li.isSubtask
@@ -643,18 +658,18 @@ class _YearLayout {
           it.lane.extendsAfter;
       if (isSegment) {
         hitRegions.add(
-            _HitRegion(Rect.fromCircle(center: Offset(it.x2, it.y), radius: 10),
+            _HitRegion(Rect.fromCircle(center: Offset(it.x2, it.y), radius: 14),
                 it.task.id, _DragMode.resizeEnd));
         hitRegions.add(
-            _HitRegion(Rect.fromCircle(center: Offset(it.x1, it.y), radius: 10),
+            _HitRegion(Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
                 it.task.id, _DragMode.resizeStart));
         hitRegions.add(_HitRegion(
-            Rect.fromLTRB(it.x1, it.y - 8, it.x2, it.y + 8),
+            Rect.fromLTRB(it.x1, it.y - 10, it.x2, it.y + 10),
             it.task.id,
             _DragMode.move));
       } else {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 12),
+            Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
             it.task.id,
             _DragMode.move));
       }

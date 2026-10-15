@@ -153,17 +153,45 @@ void main() {
       expect(slots[1].centerMinutes, 14 * 60);
     });
 
-    test('时间点任务锚点固定，与已放置文本碰撞则不显示名称', () {
+    test('时间点任务锚点可向后漂移（v2.4）：碰撞时推后找空位', () {
       final slots = assignDayNames(
         [
           _task('a', at(9, 0), title: '晨会'),
-          _task('b', at(9, 2), title: '讨论'), // 2 分钟后，斜文本带必然碰撞
+          _task('b', at(9, 2), title: '讨论'), // 2 分钟后，原位必然碰撞
         ],
         pxPerMinute: 2.8,
       );
       final byId = {for (final e in slots) e.taskId: e};
       expect(byId['a']!.visible, isTrue);
-      expect(byId['b']!.visible, isFalse);
+      expect(byId['a']!.centerMinutes, 9 * 60);
+      // b 不再直接隐藏，而是向后漂移（≥7.3 分钟才能脱离 a 的斜文本带）
+      expect(byId['b']!.visible, isTrue);
+      expect(byId['b']!.centerMinutes, greaterThan(9 * 60 + 5));
+    });
+
+    test('时间点任务漂移步数耗尽仍碰撞则隐藏', () {
+      final slots = assignDayNames(
+        [
+          _task('a', at(9, 0), title: '晨会'),
+          _task('b', at(9, 2), title: '讨论'),
+        ],
+        pxPerMinute: 2.8,
+        // 通过 assignAngledNames 直接控制漂移步数
+      );
+      final byId = {for (final e in slots) e.taskId: e};
+      expect(byId['b']!.visible, isTrue); // 默认 12 步内可找到空位
+      final noDrift = assignAngledNames(
+        [_task('a', at(9, 0), title: '晨会'), _task('b', at(9, 2), title: '讨论')],
+        axisOf: (t) {
+          final d = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
+          final m = d.hour * 60 + d.minute.toDouble();
+          return (m, m);
+        },
+        axisPerPx: 1 / 2.8,
+        anchorStep: 5,
+        pointDriftSteps: 0,
+      );
+      expect(noDrift[1].visible, isFalse);
     });
 
     test('时间段任务在范围内找靠前空位', () {
@@ -191,7 +219,7 @@ void main() {
   });
 
   group('assignAngledNames（年度视图轴=年小数）', () {
-    test('同年两个节点任务：先放下的可见，后到的碰撞隐藏', () {
+    test('同年两个节点任务：先放下的可见，后到的漂移找空位（v2.4）', () {
       final slots = assignAngledNames(
         [_task('a', _ms(2026, 3)), _task('b', _ms(2026, 4))],
         axisOf: (t) {
@@ -204,6 +232,23 @@ void main() {
         },
         axisPerPx: 1 / 100, // 每年 100px
         anchorStep: 1 / 12,
+      );
+      expect(slots[0].visible, isTrue);
+      // v2.4：时间点任务允许向后漂移找空位，b 可见且锚点被推后
+      expect(slots[1].visible, isTrue);
+      expect(slots[1].centerMinutes, greaterThan(slots[0].centerMinutes));
+    });
+
+    test('漂移步数耗尽仍碰撞则隐藏（pointDriftSteps=0 退化为固定锚点）', () {
+      final slots = assignAngledNames(
+        [_task('a', _ms(2026, 3)), _task('b', _ms(2026, 4))],
+        axisOf: (t) {
+          final d = DateTime.fromMillisecondsSinceEpoch(t.startAt!);
+          return (d.year + (d.month - 1) / 12, d.year + (d.month - 1) / 12);
+        },
+        axisPerPx: 1 / 100,
+        anchorStep: 1 / 12,
+        pointDriftSteps: 0,
       );
       expect(slots[0].visible, isTrue);
       expect(slots[1].visible, isFalse);

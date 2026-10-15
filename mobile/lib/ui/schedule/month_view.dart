@@ -8,9 +8,10 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
-/// 月视图（v2.3）：纵向无限滚动，按月分段；每月固定 6 行周网格
-///（星期日→星期六，前后月溢出日淡显），月与月按周衔接。
-/// 日格内沿用 v2.2 的节点/线段标记；选中-调整（仅已选中的任务可拖拽，
+/// 月视图（v2.3：纵向无限滚动，按月分段；v2.4：每月行数 = 当月实际所需
+/// 周数 4~6 行，不出现整行都是上/次月灰格的行——因此 item 高度可变，
+/// ListView 不再用固定 itemExtent，滚动定位按像素偏移经高度累加换算）。
+/// 日格内沿用节点/线段标记；选中-调整（仅已选中的任务可拖拽，
 /// 未选中时任务上的拖动手势落入列表滚动）；点空白格：有选中=取消，
 /// 无选中=下钻日视图。
 class MonthView extends StatefulWidget {
@@ -46,21 +47,74 @@ class MonthView extends StatefulWidget {
 }
 
 class MonthViewState extends State<MonthView> {
-  static const int _baseYear = 2000; // item 0 = 2000 年 1 月
+  static const int _baseYear = 2000; // unit 0 = 2000 年 1 月
   static const double _labelH = 24;
   static const double _cellH = 56;
-  static const int _rows = 6; // 固定 6 行保证 itemExtent 恒定
 
-  static double get _itemExtent =>
-      _labelH + _MonthLayout.headerH + _rows * _cellH;
-
-  // 初始偏移直接落在当前月（item index 空间 = unit + infiniteScrollOffset），
-  // 避免首帧渲染到 item 0（基准年之前的远古月份）再跳变的闪烁。
+  // 初始偏移直接落在当前月（像素空间，经高度累加换算），
+  // 避免首帧渲染到基准月再跳变的闪烁。
   late final ScrollController _ctrl = ScrollController(
-      initialScrollOffset:
-          itemIndexForUnit(_monthIndexOf(DateTime.now())) * _itemExtent);
+      initialScrollOffset: _offsetOfUnit(_monthIndexOf(DateTime.now())));
   Timer? _pulseTimer;
   DateTime? _pulseDay; // 「现在」脉冲：今天所在格
+  Timer? _reportTimer;
+
+  /// 当月所需周行数（周日开头的周网格，4~6 行）。
+  static int rowsOfMonth(int year, int month) {
+    final first = DateTime(year, month);
+    final startD = first.weekday % 7;
+    final days = DateUtils.getDaysInMonth(year, month);
+    return (startD + days + 6) ~/ 7;
+  }
+
+  static double _heightOfRows(int rows) =>
+      _labelH + _MonthLayout.headerH + rows * _cellH;
+
+  static double _heightOfUnit(int unit) {
+    final m = _monthOfIndexStatic(unit);
+    return _heightOfRows(rowsOfMonth(m.year, m.month));
+  }
+
+  static DateTime _monthOfIndexStatic(int i) =>
+      DateTime(_baseYear + i ~/ 12, i % 12 + 1);
+
+  /// 单位序号 → 像素偏移（unit 0 顶部为 0；负 unit 向负方向累计）。
+  static double _offsetOfUnit(int unit) {
+    var acc = 0.0;
+    if (unit >= 0) {
+      for (var u = 0; u < unit; u++) {
+        acc += _heightOfUnit(u);
+      }
+    } else {
+      for (var u = unit; u < 0; u++) {
+        acc -= _heightOfUnit(u);
+      }
+    }
+    return acc;
+  }
+
+  /// 像素偏移 → 所在单位序号（双向累加搜索；调用已节流，量级几百次
+  /// 纯算术，可接受）。
+  static int _unitAtOffset(double px) {
+    if (px >= 0) {
+      var u = 0;
+      var acc = 0.0;
+      while (true) {
+        final h = _heightOfUnit(u);
+        if (px < acc + h) return u;
+        acc += h;
+        u++;
+      }
+    } else {
+      var u = -1;
+      var acc = 0.0;
+      while (true) {
+        acc -= _heightOfUnit(u);
+        if (px >= acc) return u;
+        u--;
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -73,6 +127,7 @@ class MonthViewState extends State<MonthView> {
   @override
   void dispose() {
     _pulseTimer?.cancel();
+    _reportTimer?.cancel();
     _ctrl.dispose();
     super.dispose();
   }
@@ -82,20 +137,24 @@ class MonthViewState extends State<MonthView> {
 
   void _reportWindow() {
     if (!_ctrl.hasClients) return;
-    // _ctrl.offset 处于 item index 空间（含 infiniteScrollOffset 大偏移），
-    // 映射回月份单位序号必须经 unitIndexForItem。
-    final firstItem = (_ctrl.offset / _itemExtent).floor();
-    final count =
-        (_ctrl.position.viewportDimension / _itemExtent).ceil() + 1;
-    final a = _monthOfIndex(unitIndexForItem(firstItem));
-    final b = DateTime(a.year, a.month + count);
-    widget.onVisibleWindowChanged(
-        a.millisecondsSinceEpoch, b.millisecondsSinceEpoch);
-    final centerItem =
-        ((_ctrl.offset + _ctrl.position.viewportDimension / 2) / _itemExtent)
-            .floor();
-    final c = _monthOfIndex(unitIndexForItem(centerItem));
+    // 可变行高：offset 是像素空间，经累加反查月份单位
+    final firstUnit = _unitAtOffset(_ctrl.offset);
+    final lastUnit =
+        _unitAtOffset(_ctrl.offset + _ctrl.position.viewportDimension);
+    final a = _monthOfIndex(firstUnit);
+    final bm = _monthOfIndex(lastUnit + 1);
+    widget.onVisibleWindowChanged(a.millisecondsSinceEpoch,
+        bm.millisecondsSinceEpoch);
+    final centerUnit = _unitAtOffset(
+        _ctrl.offset + _ctrl.position.viewportDimension / 2);
+    final c = _monthOfIndex(centerUnit);
     widget.onCenterChanged(DateTime(c.year, c.month, 15));
+  }
+
+  /// 滚动中节流上报（150ms 防抖），避免每帧做高度累加反查。
+  void _reportDebounced() {
+    _reportTimer?.cancel();
+    _reportTimer = Timer(const Duration(milliseconds: 150), _reportWindow);
   }
 
   void scrollToNow() {
@@ -119,9 +178,8 @@ class MonthViewState extends State<MonthView> {
   void _jumpToMonth(int index) {
     if (!_ctrl.hasClients) return;
     final max = _ctrl.position.maxScrollExtent;
-    // 顶对齐目标月分段（标签行在顶部），不再留 -8 残影
-    _ctrl.jumpTo(
-        (itemIndexForUnit(index) * _itemExtent).clamp(0.0, max));
+    // 顶对齐目标月分段（标签行在顶部）
+    _ctrl.jumpTo(_offsetOfUnit(index).clamp(0.0, max));
     _reportWindow();
   }
 
@@ -130,14 +188,15 @@ class MonthViewState extends State<MonthView> {
     return LayoutBuilder(builder: (context, cons) {
       return NotificationListener<ScrollNotification>(
         onNotification: (n) {
-          if (n is ScrollUpdateNotification || n is ScrollEndNotification) {
+          if (n is ScrollEndNotification) {
             _reportWindow();
+          } else if (n is ScrollUpdateNotification) {
+            _reportDebounced();
           }
           return false;
         },
         child: ListView.builder(
           controller: _ctrl,
-          itemExtent: _itemExtent,
           itemBuilder: (context, i) {
             final m = _monthOfIndex(i - infiniteScrollOffset);
             return _MonthItem(
@@ -146,7 +205,7 @@ class MonthViewState extends State<MonthView> {
               month: m.month,
               width: cons.maxWidth,
               cellH: _cellH,
-              rows: _rows,
+              rows: rowsOfMonth(m.year, m.month),
               tasks: widget.tasks,
               selectedTaskId: widget.selectedTaskId,
               pulseDay: _pulseDay,
@@ -585,24 +644,24 @@ class _MonthLayout {
     ]) {
       if (m.isPoint) {
         hitRegions.add(_HitRegion(
-            Rect.fromCircle(center: Offset(m.x1, m.y), radius: 10),
+            Rect.fromCircle(center: Offset(m.x1, m.y), radius: 14),
             m.task.id,
             _DragMode.move));
       } else {
         if (m.isEndCell) {
           hitRegions.add(_HitRegion(
-              Rect.fromCircle(center: Offset(m.x2, m.y), radius: 9),
+              Rect.fromCircle(center: Offset(m.x2, m.y), radius: 14),
               m.task.id,
               _DragMode.resizeEnd));
         }
         if (m.isStartCell) {
           hitRegions.add(_HitRegion(
-              Rect.fromCircle(center: Offset(m.x1, m.y), radius: 9),
+              Rect.fromCircle(center: Offset(m.x1, m.y), radius: 14),
               m.task.id,
               _DragMode.resizeStart));
         }
         hitRegions.add(_HitRegion(
-            Rect.fromLTRB(m.x1, m.y - 6, m.x2, m.y + 6),
+            Rect.fromLTRB(m.x1, m.y - 10, m.x2, m.y + 10),
             m.task.id,
             _DragMode.move));
       }

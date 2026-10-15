@@ -219,8 +219,9 @@ class DayNameSlot {
 
 /// 45° 斜文本名称贪心放置（设计 §2.1/§2.3，v2.3）：取消固定比例尺阈值，
 /// 纯碰撞决定可见性——按开始时间升序依次为每个任务找不碰撞的锚点；
-/// 时间点任务锚点固定在自身位置，时间段任务在自身范围内按 [anchorStep]
-/// 步长（轴单位）从前往后找最靠前的空位；放不下（碰撞或超出名称层
+/// 时间段任务在自身范围内按 [anchorStep] 步长（轴单位）从前往后找最靠前
+/// 的空位；时间点任务（零长度区间）允许从节点位置起向后漂移最多
+/// [pointDriftSteps] 步找空位（虚线随之拉长），仍放不下（碰撞或超出名称层
 /// 高度）则不显示该名称。
 ///
 /// [axisOf] 给出任务在轴上的起止坐标（日视图=当天分钟数，
@@ -238,6 +239,7 @@ List<DayNameSlot> assignAngledNames(
   double anchorStep = 5,
   double fontPx = 12,
   double maxHeightPx = 96,
+  int pointDriftSteps = 12,
   double Function(String title)? measureText,
 }) {
   final measure = measureText ??
@@ -267,8 +269,13 @@ List<DayNameSlot> assignAngledNames(
     var anchor = startAxis;
     var visible = false;
     if (fitsHeight) {
-      // 候选锚点：时间点只有自身位置；时间段在范围内按步长前移
-      for (var a = startAxis; a <= endAxis + 0.0001; a += anchorStep) {
+      // 候选锚点：时间段在自身范围内按步长前移；时间点（零长度区间）
+      // 从节点位置起向后漂移最多 pointDriftSteps 步（v2.4：修复相邻
+      // 时间点任务名称被先放置者挤掉后完全不显示的问题）
+      final isPoint = endAxis - startAxis < 0.0001;
+      final limit =
+          isPoint ? startAxis + anchorStep * pointDriftSteps : endAxis;
+      for (var a = startAxis; a <= limit + 0.0001; a += anchorStep) {
         if (_fits(a, lengthAxis, thicknessAxis, placedU, placedV, placedW)) {
           anchor = a;
           visible = true;
@@ -296,6 +303,7 @@ List<DayNameSlot> assignDayNames(
   required double pxPerMinute,
   double fontPx = 12,
   double maxHeightPx = 96,
+  int pointDriftSteps = 12,
   double Function(String title)? measureText,
 }) {
   return assignAngledNames(
@@ -311,6 +319,7 @@ List<DayNameSlot> assignDayNames(
     anchorStep: 5,
     fontPx: fontPx,
     maxHeightPx: maxHeightPx,
+    pointDriftSteps: pointDriftSteps,
     measureText: measureText,
   );
 }
