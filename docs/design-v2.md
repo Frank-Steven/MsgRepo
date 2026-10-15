@@ -506,3 +506,16 @@ process(messages):
    - **编码限制**：仅支持 UTF-8；QQ 老版本 GBK 导出文件解码失败时明确提示转码（未内置 GBK 转码，避免新增依赖）。
    - **短信**：READ_SMS 运行时授权 + content://sms 读取（收件箱+已发、时间升序、上限 2 万条），按号码归会话（单条级 conversation 覆盖文件级）。
    - 导入消息默认不自动触发 AI 处理（与实时捕获一致）。
+
+### v2.6.1（2026-10-15）
+
+真机反馈打磨批：滚动定位/标题跟随、待办批量操作、AI 省 Token 策略。DB schema 不变。
+
+1. **fling 惯性中点「现在」先停动画再定位**（§2.1、§2.3）：根因——fling 动画仍在运行时发起「现在」/scrollToTask 定位，新旧两个 AnimationController 竞争同一 ScrollController，落点被 fling 覆盖漂移。修法：年度/日视图所有定位方法入口先 `_cancelFling()` 停掉进行中的 fling 再起定位动画。回归测试 `test/fling_scroll_test.dart`。
+2. **滚动时标题实时跟随可视中心**（§2.1、§2.3）：根因——`_reportWindow` 只在手势结束时上报一次，慢速拖动（<120px/s 不触发 fling）过程中完全不上报，标题停留不动。修法：新增 `_reportOnUnitChange()`——仅当首/末/中心可视单位变化时才上报（避免每帧 setState），挂到拖动 onUpdate、fling 每帧、手势结束低速兜底三条路径；标题取可视中心单位。
+3. **待办页批量操作**（§3）：已完成页签任务行尾加行内「归档」按钮；全部页签支持多选（与消息页同一范式：长按进选择模式 + SelectionActionBar）；操作条按选中任务的状态交集启用操作——全已归档→删除/取出；全未归档且全 active→归档/完成；全未归档且全 done→归档/取消完成；混合状态→仅归档。批量完成/取消完成联动来源消息状态（与单行勾选同语义）；批量删除仅限已归档，删父前子任务先升级为普通任务；所有批量操作经 UndoService 注册复合撤销。
+4. **AI 省 Token 策略**（§8，mobile/desktop 两端同步）：
+   - **批量合并请求**：每 ≤10 条消息合并为一次 chat/completions（系统提示词每批只传一次），schema 改为结果 JSON 数组、元素按 messageId 一一对应输入消息；流式原文归批首消息的卡片，完成后按 messageId 拆分结果；数组缺某条 id 报「模型未返回该条结果」，批级异常整批报错。mobile `AiClient.batchSize` = desktop `EVAL_BATCH_SIZE` = 10；AIProvider 新增可选 `evaluateBatchStreaming`，未实现的 provider（如 ollama）由管线回退逐条评估。批量系统提示词两端逐字一致（mobile `_buildBatchSystemPrompt` / desktop `buildEvalBatchSystemPrompt`）。
+   - **本地垃圾规则预过滤**：送模型前命中规则直接判 junk（reason 标「规则判定」），不消耗 Token。关键词：退订/回T退订/TD退订/限时秒杀/秒杀价/免费领取/点击领取/现金红包/刷单兼职/兼职日结/低价开发票/0元购；另 106 开头长服务号（`^106\d{5,}$`）+ 含退订字样直接判垃圾。宁漏勿错，只收命中率极高的 boilerplate。规则两端逐条一致（mobile `services/junk_rules.dart` / desktop `src/ai/junk-rules.ts`），改任何一端必须同步另一端。
+   - **上下文裁剪**：标题 100 字符、正文 500 字符截断（超出追加「…（已截断）」）；mobile 按 grapheme cluster（characters 包），desktop 按码点（Array.from），差异仅限 emoji 组合序列边界。
+   - **content_hash 去重跳过**（mobile 消息页 `_processWithAi`）：送 AI 前查 status='processed' 的 content_hash 集，pending 且同内容已有 processed 记录的消息跳过并 SnackBar 提示「跳过 n 条已处理过的重复消息」；已 processed 消息由用户显式「重新处理」时照常放行。
