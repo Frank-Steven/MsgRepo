@@ -48,6 +48,7 @@ class YearViewState extends State<YearView> {
 
   final ScrollController _scroll = ScrollController();
   double _itemExtent = 0; // 首帧由宽度计算
+  double _gridWidth = 0; // 首帧 LayoutBuilder 记录（月块定位用）
 
   /// 「现在」脉冲目标（年, 月），1.5 秒后恢复。
   (int, int)? _pulse;
@@ -107,17 +108,18 @@ class YearViewState extends State<YearView> {
     widget.onCenterChanged(DateTime(_centerYear, 7));
   }
 
-  /// 滚动到当前年并居中，脉冲高亮当月块（设计 §13-10）。
+  /// 滚动到当前年、把当月块在可视区垂直居中，脉冲高亮当月块（设计 §13-10，v2.6）。
   void scrollToNow() {
-    _jumpToYear(DateTime.now().year);
+    final now = DateTime.now();
+    _jumpToMonthBlock(now.year, now.month);
     setState(() {
-      _pulse = (DateTime.now().year, DateTime.now().month);
+      _pulse = (now.year, now.month);
     });
     _pulseTimer?.cancel();
     _pulseTimer = Timer(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _pulse = null);
     });
-    widget.onCenterChanged(DateTime.now());
+    widget.onCenterChanged(now);
   }
 
   /// 滚动到指定年并居中（期移箭头用）。
@@ -140,11 +142,27 @@ class YearViewState extends State<YearView> {
     _reportWindow();
   }
 
+  /// 滚动到指定年并把指定月块在可视区垂直居中（v2.6「现在」定位加深）。
+  void _jumpToMonthBlock(int year, int month) {
+    if (!_scroll.hasClients || _itemExtent <= 0 || _gridWidth <= 0) return;
+    final itemTop = itemIndexForUnit(year - _baseYear) * _itemExtent;
+    // 与网格布局同一套公式：3 列方块月块，行 = (month-1)~/3
+    final block = (_gridWidth - 2 * _YearLayout.pad - 2 * _YearLayout.gap) / 3;
+    final blockTop =
+        _YearLayout.pad + ((month - 1) ~/ 3) * (block + _YearLayout.gap);
+    final center = itemTop + _yearLabelH + blockTop + block / 2;
+    final dim = _scroll.position.viewportDimension;
+    _scroll.jumpTo(
+        (center - dim / 2).clamp(0.0, _scroll.position.maxScrollExtent));
+    _reportWindow();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(
       builder: (context, constraints) {
+        _gridWidth = constraints.maxWidth;
         // 年网格高度：约 4/3 宽度 + 年份标签；固定 itemExtent 保证 jumpTo 准确
         final gridH = (constraints.maxWidth - 2 * _YearLayout.pad - 2 * _YearLayout.gap) /
                 3 *

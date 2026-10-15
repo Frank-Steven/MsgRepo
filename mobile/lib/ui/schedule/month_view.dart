@@ -119,9 +119,11 @@ class MonthViewState extends State<MonthView> {
     _reportTimer = Timer(const Duration(milliseconds: 150), _reportWindow);
   }
 
+  /// 「现在」：滚动到当前月并把今天所在周行/日格在可视区垂直居中，
+  /// 脉冲高亮今天（v2.6 定位加深）。
   void scrollToNow() {
     final now = DateTime.now();
-    _jumpToMonth(_monthIndexOf(now));
+    _jumpToDay(now);
     _pulseTimer?.cancel();
     setState(() => _pulseDay = DateTime(now.year, now.month, now.day));
     _pulseTimer = Timer(const Duration(milliseconds: 1500), () {
@@ -142,6 +144,21 @@ class MonthViewState extends State<MonthView> {
     final max = _ctrl.position.maxScrollExtent;
     // 顶对齐目标月分段（标签行在顶部）
     _ctrl.jumpTo((itemIndexForUnit(index) * _itemExtent - 4).clamp(0.0, max));
+    _reportWindow();
+  }
+
+  /// 滚动到指定日所在月并把该日的周行在可视区垂直居中（v2.6）。
+  void _jumpToDay(DateTime d) {
+    if (!_ctrl.hasClients) return;
+    final itemTop = itemIndexForUnit(_monthIndexOf(d)) * _itemExtent;
+    // 与网格布局同一套公式：周网格行 = (首日偏移 + 日 - 1) ~/ 7
+    final startD = DateTime(d.year, d.month, 1).weekday % 7;
+    final row = (startD + d.day - 1) ~/ 7;
+    final cellCenter =
+        _labelH + _MonthLayout.headerH + row * _cellH + _cellH / 2;
+    final dim = _ctrl.position.viewportDimension;
+    final max = _ctrl.position.maxScrollExtent;
+    _ctrl.jumpTo((itemTop + cellCenter - dim / 2).clamp(0.0, max));
     _reportWindow();
   }
 

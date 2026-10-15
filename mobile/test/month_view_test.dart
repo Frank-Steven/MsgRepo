@@ -139,4 +139,31 @@ void main() {
     expect(find.text('2031 年 6 月'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('「现在」定位加深：今天所在周行在可视区垂直居中', (tester) async {
+    final key = GlobalKey<MonthViewState>();
+    await tester.pumpWidget(app(key));
+    await tester.pump();
+
+    key.currentState!.scrollToNow();
+    await tester.pump();
+
+    // 与 month_view 同一套公式复核偏移：item 索引空间 × itemExtent(380)
+    // + 标签 24 + 头部 20 + 行 × 56 + 半格，减去半个视口。
+    const itemExtent = 24.0 + 20.0 + 6 * 56.0;
+    const infiniteScrollOffset = 1 << 20;
+    final now = DateTime.now();
+    final monthIndex = (now.year - 2000) * 12 + now.month - 1;
+    final itemTop = (monthIndex + infiniteScrollOffset) * itemExtent;
+    final startD = DateTime(now.year, now.month, 1).weekday % 7;
+    final row = (startD + now.day - 1) ~/ 7;
+    final cellCenter = 24.0 + 20.0 + row * 56.0 + 28.0;
+    final dim = tester.getSize(find.byType(ListView)).height;
+    final expected = itemTop + cellCenter - dim / 2;
+
+    final controller = tester.widget<ListView>(find.byType(ListView)).controller!;
+    expect(controller.offset, moreOrLessEquals(expected, epsilon: 1.0),
+        reason: '今天所在周行应垂直居中');
+    expect(tester.takeException(), isNull);
+  });
 }
