@@ -4,6 +4,7 @@ import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/database.dart';
 import '../../services/task_scale.dart';
+import '../shared/priority_dot.dart';
 import 'task_tile.dart';
 
 /// 任务详情面板（设计 §3/§7，v2.3；v2.5 内嵌统一）：待办页与日程页底部

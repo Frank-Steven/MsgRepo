@@ -4,6 +4,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 import '../../models/message.dart';
 import '../../services/undo_service.dart';
 import '../shared/app_icon.dart';
+import '../shared/priority_dot.dart';
 
 /// 未处理分组键（设计 §5.1）。
 const String kGroupPending = 'pending';
@@ -11,40 +12,26 @@ const String kGroupPending = 'pending';
 /// 「已完成」筛选键（v2.4）：不占分组，选中时额外显示关联任务已完成的消息。
 const String kFilterDone = 'done';
 
-/// 分组展示顺序：未处理 → 红 → 黄 → 绿 → 垃圾。
+/// 分组展示顺序：未处理 → 垃圾（v2.6 去颜色化：红/黄/绿分组下线，
+/// AI 评估的 priority 仍落库，只是列表不再按它分组/染色）。
 const List<String> kGroupOrder = [
   kGroupPending,
-  MessagePriority.red,
-  MessagePriority.yellow,
-  MessagePriority.green,
   MessagePriority.junk,
 ];
 
-/// 分组键规则：垃圾/红/黄/绿按 priority，其余（含 processed 且 priority=none）归未处理。
-String messageGroupKey(Message m) {
-  switch (m.priority) {
-    case MessagePriority.junk:
-      return MessagePriority.junk;
-    case MessagePriority.red:
-    case MessagePriority.yellow:
-    case MessagePriority.green:
-      return m.priority;
-    default:
-      return kGroupPending;
-  }
-}
+/// 分组键规则：垃圾单独一组，其余全部归未处理（v2.6）。
+String messageGroupKey(Message m) =>
+    m.priority == MessagePriority.junk ? MessagePriority.junk : kGroupPending;
 
 String messageGroupLabel(String key) => switch (key) {
       kGroupPending => '未处理',
-      MessagePriority.red => '红',
-      MessagePriority.yellow => '黄',
-      MessagePriority.green => '绿',
       MessagePriority.junk => '垃圾',
       kFilterDone => '已完成',
       _ => key,
     };
 
-/// 已评估三色的圆点颜色；未处理/垃圾返回 null（用空心圆点）。
+/// AI 评估三色的圆点颜色（仅 AI 面板展示评估结果用；v2.6 起消息列表
+/// 不再按它染色）；未处理/垃圾返回 null（用空心圆点）。
 Color? messageGroupDotColor(String key) => switch (key) {
       MessagePriority.red => Colors.red,
       MessagePriority.yellow => Colors.amber,
@@ -304,9 +291,11 @@ class _SwipeActionRowState extends State<SwipeActionRow>
   }
 }
 
-/// 消息卡片（v2.4 卡片化）：左侧标记 + 标题/摘要/来源（含应用图标）+ 右侧时间。
-/// 点击卡片行内展开/收起全文（选择模式下点击 = 勾选）。
-/// 垃圾消息卡片降饱和灰底 + 标题划线；关联任务已完成的消息标题划线变淡。
+/// 消息卡片（v2.4 卡片化；v2.6 去颜色化）：左侧标记 + 标题/摘要/来源
+/// （含应用图标）+ 右侧时间。点击卡片行内展开/收起全文（选择模式下点击 = 勾选）。
+/// 标记规则（v2.6）：绑定任务的消息显示其任务优先级色点（+ 任务角标）；
+/// 未绑定 = 空心圆点；垃圾 = 灰色消息块 + 标题划线。不再按 AI 红/黄/绿染色。
+/// 关联任务已完成的消息标题划线变淡。
 class MessageTile extends StatefulWidget {
   final Message message;
   final bool selecting;
@@ -316,6 +305,9 @@ class MessageTile extends StatefulWidget {
 
   /// 关联任务已完成（v2.4「已完成」筛选）：标题划线降色。
   final bool linkedTaskDone;
+
+  /// 关联任务的优先级（v2.6：绑定任务的消息标记显示任务优先级色点）。
+  final String? linkedTaskPriority;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -327,6 +319,7 @@ class MessageTile extends StatefulWidget {
     this.swipeEnabled = true,
     this.actions = const [],
     this.linkedTaskDone = false,
+    this.linkedTaskPriority,
     this.onTap,
     this.onLongPress,
   });
@@ -348,8 +341,11 @@ class _MessageTileState extends State<MessageTile> {
 
   Widget _marker(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final dotColor = messageGroupDotColor(messageGroupKey(widget.message));
-    final Widget dot = dotColor == null
+    // v2.6：只有绑定任务的消息才显示颜色（其任务优先级色点）；其余空心圆点。
+    final taskPriority = widget.message.linkedTaskId == null
+        ? null
+        : widget.linkedTaskPriority;
+    final Widget dot = taskPriority == null
         ? Container(
             width: 14,
             height: 14,
@@ -361,7 +357,9 @@ class _MessageTileState extends State<MessageTile> {
         : Container(
             width: 14,
             height: 14,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+            decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: taskPriorityDotColor(taskPriority)),
           );
     if (widget.message.linkedTaskId == null) return dot;
     return SizedBox(
@@ -510,7 +508,8 @@ class MessageGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
     required this.onToggle,
   });
 
-  static const double kHeight = 36;
+  /// v2.6：36 → 44，触控友好（≥44dp 触控区）。
+  static const double kHeight = 44;
 
   @override
   double get minExtent => kHeight;

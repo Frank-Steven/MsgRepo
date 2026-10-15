@@ -28,8 +28,9 @@ class MessagesPageState extends State<MessagesPage> {
   List<Message> _messages = [];
   List<SourceApp> _sources = [];
 
-  /// 已完成任务的 id 集（v2.4「已完成」筛选 + 行划线样式）。
-  Set<String> _doneTaskIds = {};
+  /// 全部任务 id → Task（v2.6：绑定消息显示任务优先级色点；
+  /// 兼作 v2.4「已完成」筛选与行划线样式数据源）。
+  Map<String, Task> _tasksById = {};
   bool _loading = true;
 
   /// 状态分组多选筛选（默认全选）；另含特殊键 [kFilterDone]（已完成）。
@@ -59,9 +60,9 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
-  /// v2.5：消息与来源是关键路径；已完成任务 id 集（筛选/划线用）失败不阻塞
-  /// 列表展示——此前三者同处一个 Future.wait，任一路失败会让列表永远停在
-  /// 「加载中…」（表现为"消息抓取失效"）。
+  /// v2.5：消息与来源是关键路径；任务表（绑定色点/「已完成」筛选/划线用）
+  /// 失败不阻塞列表展示——此前三者同处一个 Future.wait，任一路失败会让列表
+  /// 永远停在「加载中…」（表现为"消息抓取失效"）。
   Future<void> reload() async {
     try {
       final results = await Future.wait([
@@ -86,11 +87,11 @@ class MessagesPageState extends State<MessagesPage> {
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
-    // 尽力加载：已完成任务 id 集（「已完成」筛选 + 行划线）
+    // 尽力加载：任务表（绑定消息的优先级色点 +「已完成」筛选/划线）
     try {
-      final doneTasks = await _db.getTasks(status: TaskStatus.done);
+      final tasks = await _db.getTasks();
       if (!mounted) return;
-      setState(() => _doneTaskIds = {for (final t in doneTasks) t.id});
+      setState(() => _tasksById = {for (final t in tasks) t.id: t});
     } catch (_) {}
     // 通知监听权限状态（v2.5：丢失时页面顶部给恢复引导）
     try {
@@ -100,7 +101,8 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   bool _isLinkedDone(Message m) =>
-      m.linkedTaskId != null && _doneTaskIds.contains(m.linkedTaskId);
+      m.linkedTaskId != null &&
+      _tasksById[m.linkedTaskId]?.status == TaskStatus.done;
 
   List<Message> get _visible => _messages.where((m) {
         if (_groupFilter.contains(messageGroupKey(m))) return true;
@@ -625,6 +627,7 @@ class MessagesPageState extends State<MessagesPage> {
                     selecting: _selecting,
                     selected: _selected.contains(m.id),
                     linkedTaskDone: _isLinkedDone(m),
+                    linkedTaskPriority: _tasksById[m.linkedTaskId]?.priority,
                     actions: _actionsFor(m),
                     onTap: () {
                       if (_selecting) _toggleSelect(m);

@@ -6,6 +6,7 @@ import '../../services/database.dart';
 import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../messages/message_widgets.dart';
+import '../shared/priority_dot.dart';
 
 /// 勾选完成/取消完成并注册撤销（设计 §3 行内勾选；待办页/日程页底部板块共用）。
 /// 有来源消息时联动归档/恢复。
@@ -40,12 +41,6 @@ Future<void> toggleTaskDoneWithUndo(
         onUndone: () async => onChanged());
   }
 }
-
-Color taskPriorityDotColor(String priority) => switch (priority) {
-      TaskPriority.important => Colors.red,
-      TaskPriority.minor => Colors.green,
-      _ => Colors.amber,
-    };
 
 String _two(int v) => v.toString().padLeft(2, '0');
 
