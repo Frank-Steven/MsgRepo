@@ -1,6 +1,6 @@
 {
   "name": "msgrepo-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "MsgRepo 电脑端：接收手机通知，用本地 AI 结构化为日程/待办/笔记",
   "type": "module",

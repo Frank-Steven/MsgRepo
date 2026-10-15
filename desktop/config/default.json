@@ -1,14 +1,14 @@
 {
   "host": "127.0.0.1",
   "port": 8765,
-  "provider": "mock",
+  "provider": "openai-compatible",
   "ollama": {
     "baseUrl": "http://127.0.0.1:11434",
     "model": "qwen2.5:7b"
   },
   "openai": {
-    "baseUrl": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini",
+    "baseUrl": "http://127.0.0.1:8080/v1",
+    "model": "gemma-4-26b-a4b-it",
     "apiKeyEnv": "OPENAI_API_KEY"
   }
 }
