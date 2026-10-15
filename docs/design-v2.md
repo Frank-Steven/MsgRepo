@@ -467,3 +467,23 @@ process(messages):
 - **UI 入口**：消息页右上角导入图标 → 二级页（选来源平台 → 选文件/授权 → 解析预览（条数/时间范围/错误行数）→ 确认导入）。
 - **进度与错误**：导入在 isolate 中分批（500 条/批）事务写库；进度条显示已解析/总数；解析失败行收集为报告（导入完成后可查看/导出）；重复消息（content_hash 命中）静默跳过并计入「跳过 n 条」。
 - **与 AI 管线关系**：导入消息默认不自动触发 AI 处理（与实时捕获一致，由用户手动发起）。
+
+### v2.5（2026-10-15）
+
+真机测试反馈批：5 个 bug 修复 + 任务详情交互统一。DB schema 不变。
+
+#### Bug 修复
+
+1. **fling 惯性滚动只第一次有效**（§2.1、§2.3）：根因——年度/日视图用 `SingleTickerProviderStateMixin` 却每次 fling 都新建 `AnimationController`，mixin 的 ticker 槽位创建后不复位，第二次 `createTicker` 在 debug 下抛断言，fling 静默失效。修法：两处视图改 `TickerProviderStateMixin`；撞边界时不再在动画值通知回调里 dispose 自身控制器（改为 stop + 帧末回收）。回归测试 `test/fling_scroll_test.dart`。
+2. **月视图负数年份（-85354）**（§2.2）：根因——v2.4 可变行高改造混用两套坐标系：`itemBuilder` 按索引空间映射，而 `initialScrollOffset`/`_jumpToMonth`/`_reportWindow` 用像素累计偏移换算，首屏即落在公元前 8 万年。修法：坐标系统一为索引空间——恢复恒定 `_itemExtent`（= 标签高 + 头部高 + 6 行格子高），定位换算复用与年视图同一套 `itemIndexForUnit`/`unitIndexForItem`；每月网格行数仍按当月实际（4~6 行，无整行灰格），行数不足的月份 item 内下方留白。删除像素累加高度表。边界测试 `test/month_view_test.dart`（2000–2030 行数全覆盖、首屏当前月、快速连滑、scrollTo 基准月/远端月、scrollToTask）。
+3. **年视图跨出年界的任务不再画箭头端点**（§2）：`extendsBefore/After` 的任务线段直接截断在网格边界，不画任何端点标记；startMonth/endMonth 本就由 layoutYearLane 钳在年内。
+4. **年度/日视图线段端点方块→圆点**（§2.1、§2.3）：与时间点任务节点同半径（3.5/5.0），全视图端点样式统一为圆点。
+5. **消息抓取失效防御**（§4、§5）：v2.4 把 `getTasks(done)` 并入消息页 reload 的 `Future.wait` 关键路径，任一失败列表永停「加载中」——拆为关键路径（messages+sources）与独立 try/catch 的尽力路径（doneTaskIds、listenerEnabled）。另：消息页顶部新增「监听权限丢失」横幅（含去授权入口）；Kotlin 侧 getInstalledApps/getAppIcon 后台线程包 try/catch 保证 result 必回调；`AppFilterConfig.allows` 镜像 Kotlin 三态语义（whitelist/blacklist/默认全放行）并配单测。
+
+#### 任务详情交互统一
+
+目标模型：任务详情不再是底部弹出抽屉，日程页与待办页共用同一内嵌 `TaskDetailPanel`（新增可选 `onClose` 返回按钮），选中态唯一（图表选中描边 = 列表行高亮）。
+
+- **日程页底部面板双模式**（§2）：列表模式（默认）= 可视范围 ∩ 尺度集合的任务列表；详情模式 = TaskDetailPanel。图表点击任务 → 只选中：图表描边 + 底部列表滚动到该行高亮（`Scrollable.ensureVisible`），不再直接开详情；选中任务不在列表时给 2 秒提示。列表行点击 → 进详情模式。详情返回按钮/取消选中（点空白）/切换粒度/下钻 → 回列表模式；编辑删除任务 → 清选中并退出详情。拖拽逻辑不变。
+- **待办页内嵌详情**（§3）：取消 `showModalBottomSheet` 详情；点击任务行进入详情模式（页面下部内嵌同一 TaskDetailPanel 替换 PageView），返回按钮/切换或滑动页签回列表模式；reload 后从全部列表刷新详情中的任务，任务消失（删除/归档流转）自动退出详情；详情中点父/子任务 → 退出详情、切页签并高亮目标行（复用 v2.3 跳转定位）。
+- **消息页不动**：消息条目交互不涉任务详情面板。
