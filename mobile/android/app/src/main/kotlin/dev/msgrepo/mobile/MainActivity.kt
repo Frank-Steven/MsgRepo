@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -90,6 +91,57 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // ---- 保活（v2.6）：电池优化白名单 + 国产 ROM 设置入口 ----
+
+                    "isIgnoringBatteryOptimizations" ->
+                        result.success(isIgnoringBatteryOptimizations())
+
+                    // 直接弹出"加入电池优化白名单"系统对话框；厂商阉割该弹窗时
+                    // 回退到电池优化列表页。返回是否成功打开了任一界面。
+                    "requestIgnoreBatteryOptimizations" -> {
+                        var opened = false
+                        if (!isIgnoringBatteryOptimizations()) {
+                            opened = try {
+                                val intent = Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$packageName"),
+                                )
+                                startActivity(intent)
+                                true
+                            } catch (t: Throwable) {
+                                false
+                            }
+                        }
+                        if (!opened) {
+                            opened = openBatteryOptimizationSettings()
+                        }
+                        result.success(opened)
+                    }
+
+                    "openBatteryOptimizationSettings" ->
+                        result.success(openBatteryOptimizationSettings())
+
+                    // 国产 ROM（vivo/小米/华为/OPPO/荣耀）自启动/后台运行设置页：
+                    // 无公开 API，逐个尝试已知组件，全部失败返回 false
+                    // （由 Dart 侧给图文引导）。
+                    "openAutoStartSettings" ->
+                        result.success(openAutoStartSettings())
+
+                    // 本应用的系统应用详情页（通用回退入口）
+                    "openAppDetailsSettings" -> {
+                        val opened = try {
+                            val intent = Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName"),
+                            )
+                            startActivity(intent)
+                            true
+                        } catch (t: Throwable) {
+                            false
+                        }
+                        result.success(opened)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -150,5 +202,72 @@ class MainActivity : FlutterActivity() {
             val cn = ComponentName.unflattenFromString(entry)
             cn != null && cn.packageName == packageName
         }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val pm = getSystemService(PowerManager::class.java) ?: return false
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun openBatteryOptimizationSettings(): Boolean {
+        return try {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            true
+        } catch (t: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 逐个尝试国产 ROM 已知的自启动/后台管理设置组件（无公开 API，靠厂商
+     * 约定组件名；覆盖 vivo(i管家)/小米/华为/OPPO/荣耀），任一可拉起即返回 true。
+     */
+    private fun openAutoStartSettings(): Boolean {
+        val candidates = listOf(
+            // vivo / iQOO（i管家 自启动管理）
+            ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            ),
+            ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+            ),
+            ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager",
+            ),
+            // 小米（安全中心 自启动管理）
+            ComponentName(
+                "com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            ),
+            // 华为（手机管家 启动管理）
+            ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            ),
+            // OPPO（手机管家 自启动管理）
+            ComponentName(
+                "com.coloros.phonemanager",
+                "com.coloros.phonemanager.startupapp.StartupAppListActivity",
+            ),
+            // 荣耀
+            ComponentName(
+                "com.hihonor.systemmanager",
+                "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            ),
+        )
+        for (cn in candidates) {
+            try {
+                val intent = Intent().setComponent(cn)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                return true
+            } catch (t: Throwable) {
+                // 该厂商组件不存在，尝试下一个
+            }
+        }
+        return false
     }
 }

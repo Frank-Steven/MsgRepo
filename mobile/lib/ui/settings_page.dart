@@ -34,6 +34,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final Set<String> _testing = {};
 
   bool _listenerEnabled = false;
+  bool _batteryOptimized = true; // true = 已加入白名单（不需要再优化）
   AppFilterConfig _filterConfig = const AppFilterConfig();
   Map<String, String?> _knownAppNames = {};
 
@@ -60,6 +61,8 @@ class _SettingsPageState extends State<SettingsPage> {
     final online = await ai.isDesktopOnline();
     final listenerEnabled =
         await NotificationBridge.instance.isListenerEnabled();
+    final batteryOptimized =
+        await NotificationBridge.instance.isIgnoringBatteryOptimizations();
     final filterConfig = await AppFilterService.instance.load();
     final seenApps = await AppFilterService.instance.getSeenApps();
     if (!mounted) return;
@@ -73,6 +76,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _desktopDeviceName = deviceName.isEmpty ? null : deviceName;
       _desktopOnline = online;
       _listenerEnabled = listenerEnabled;
+      _batteryOptimized = batteryOptimized;
       _filterConfig = filterConfig;
       _knownAppNames = {for (final a in seenApps) a.packageName: a.appName};
     });
@@ -316,6 +320,51 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     await _saveFilter(_filterConfig.copyWith(packages: packages.toList()));
     if (mounted) setState(() => _knownAppNames = names);
+  }
+
+  // ---- 后台保活（v2.6）----
+
+  Future<void> _requestBatteryWhitelist() async {
+    final opened =
+        await NotificationBridge.instance.requestIgnoreBatteryOptimizations();
+    if (!opened && mounted) _toast('无法打开电池优化设置');
+    // 系统设置返回后状态可能已变，延迟刷新
+    await Future.delayed(const Duration(seconds: 1));
+    _load();
+  }
+
+  Future<void> _openAutoStartSettings() async {
+    final opened = await NotificationBridge.instance.openAutoStartSettings();
+    if (opened || !mounted) return;
+    // 无已知厂商组件可跳：图文引导 + 应用详情页兜底入口
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('手动开启保活权限'),
+        content: const SingleChildScrollView(
+          child: Text('未能直接跳转自启动设置，请手动操作：\n\n'
+              'vivo / iQOO：\n'
+              'i 管家 → 应用管理 → 权限管理 → 自启动 → 允许 MsgRepo；\n'
+              '设置 → 电池 → 后台耗电管理 → MsgRepo → 允许后台高耗电。\n\n'
+              '其他机型：\n'
+              '系统设置 → 应用管理 → MsgRepo → 允许自启动 / 后台运行 / '
+              '电池不优化（名称因厂商而异）。'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              NotificationBridge.instance.openAppDetailsSettings();
+            },
+            child: const Text('打开应用详情'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---- UI ----
@@ -626,6 +675,51 @@ class _SettingsPageState extends State<SettingsPage> {
                 child: Text('收集所有应用的通知（手动添加的消息不受此设置影响）',
                     style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
               ),
+          ]),
+          const Divider(height: 32),
+          _section('后台保活', [
+            Row(
+              children: [
+                Icon(
+                  _batteryOptimized
+                      ? Icons.battery_saver_outlined
+                      : Icons.battery_alert_outlined,
+                  color: _batteryOptimized ? cs.primary : cs.error,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(_batteryOptimized
+                      ? '已加入电池优化白名单'
+                      : '未加入电池优化白名单，系统可能随时停止消息监听'),
+                ),
+                if (!_batteryOptimized)
+                  TextButton(
+                    onPressed: _requestBatteryWhitelist,
+                    child: const Text('去设置'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.rocket_launch_outlined, color: cs.onSurfaceVariant),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('自启动 / 后台运行（国产 ROM 必开）')),
+                TextButton(
+                  onPressed: _openAutoStartSettings,
+                  child: const Text('去设置'),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '消息监听经常停止时：把本应用加入电池优化白名单，并在系统设置中'
+                '允许自启动与后台运行（vivo：i 管家 → 自启动；电池 → 后台耗电'
+                '管理 → 允许后台高耗电）。',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
           ]),
         ],
       ),

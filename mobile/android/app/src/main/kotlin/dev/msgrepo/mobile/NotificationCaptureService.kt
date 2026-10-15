@@ -1,6 +1,7 @@
 package dev.msgrepo.mobile
 
 import android.app.Notification
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -199,5 +200,22 @@ class NotificationCaptureService : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         // 不需要处理移除事件
+    }
+
+    /**
+     * 系统解绑（常见于被省电策略杀进程/权限被回收前）：主动请求系统重新绑定，
+     * 提升监听存活率（v2.6）。requestRebind 仅在已授权且进程存活时有效；
+     * 真正的保活靠电池优化白名单 + ROM 自启动引导（设置页入口）。
+     */
+    override fun onListenerDisconnected() {
+        try {
+            requestRebind(ComponentName(this, NotificationCaptureService::class.java))
+        } catch (t: Throwable) {
+            // 请求失败说明系统暂不允许重绑，等待系统下次自动绑定
+        }
+    }
+
+    override fun onListenerConnected() {
+        // 绑定成功：无需额外动作（队列为文件，Dart 侧轮询自取）
     }
 }

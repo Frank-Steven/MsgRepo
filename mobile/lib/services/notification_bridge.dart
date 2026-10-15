@@ -45,6 +45,49 @@ class NotificationBridge {
     await _channel.invokeMethod<void>('openNotificationListenerSettings');
   }
 
+  /// 本应用是否已加入电池优化白名单（v2.6 保活）。
+  Future<bool> isIgnoringBatteryOptimizations() async {
+    try {
+      return await _channel
+              .invokeMethod<bool>('isIgnoringBatteryOptimizations') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 弹「加入电池优化白名单」系统对话框（厂商阉割时回退到电池优化列表页）。
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      return await _channel
+              .invokeMethod<bool>('requestIgnoreBatteryOptimizations') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 尝试跳转国产 ROM（vivo/小米/华为/OPPO/荣耀）自启动/后台管理页；
+  /// 无已知组件可跳时返回 false（调用方给图文引导）。
+  Future<bool> openAutoStartSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openAutoStartSettings') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 本应用的系统应用详情页（通用回退入口）。
+  Future<bool> openAppDetailsSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openAppDetailsSettings') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// 打开附件访问方式（http 链接 / content:// / 应用 deeplink）。
   Future<bool> openDeeplink(String url) async {
     try {
