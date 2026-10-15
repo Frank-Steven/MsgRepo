@@ -10,10 +10,11 @@ import '../tasks/task_detail_panel.dart';
 import '../tasks/task_editor.dart';
 import '../tasks/task_tile.dart';
 
-/// 待办页（设计 §3，v2.3）：顶部尺度页签（含计数徽标）+ PageView 滑动翻页。
-/// 点击任务行弹出任务详情面板（与日程视图共用 TaskDetailPanel），
-/// 仅面板右上角编辑图标进编辑器；有子任务的行尾显示「已完成数/总数」；
-/// 面板中点击父/子任务跳转到对应尺度页签并高亮定位。
+/// 待办页（设计 §3，v2.3；v2.5 内嵌详情）：顶部尺度页签（含计数徽标）+ PageView 滑动翻页。
+/// 点击任务行进入详情模式：页面下部内嵌 TaskDetailPanel（与日程页共用），
+/// 返回按钮/切换页签回列表模式；仅面板右上角编辑图标进编辑器；
+/// 有子任务的行尾显示「已完成数/总数」；面板中点击父/子任务跳转到对应
+/// 尺度页签并高亮定位。
 class TodosPage extends StatefulWidget {
   const TodosPage({super.key});
 
@@ -53,6 +54,9 @@ class TodosPageState extends State<TodosPage> {
   /// 高亮定位的任务（v2.3：详情面板跳转选中态）。
   String? _selectedTaskId;
   final Map<String, GlobalKey> _rowKeys = {};
+
+  /// 详情模式下展示的任务（v2.5：内嵌 TaskDetailPanel，非空时替换 PageView）。
+  Task? _detailTask;
 
   final PageController _pageController = PageController(initialPage: 6);
   final ScrollController _tabScrollController = ScrollController();
@@ -102,6 +106,26 @@ class TodosPageState extends State<TodosPage> {
       _archived = archived;
       _progress = progress;
       _loading = false;
+      // 刷新详情模式中的任务（编辑/状态变化后同步；任务消失则退出详情模式）。
+      final detail = _detailTask;
+      if (detail != null) {
+        Task? fresh;
+        for (final list in [
+          ...byScale.values,
+          untimed,
+          done,
+          archived,
+        ]) {
+          for (final t in list) {
+            if (t.id == detail.id) {
+              fresh = t;
+              break;
+            }
+          }
+          if (fresh != null) break;
+        }
+        _detailTask = fresh;
+      }
     });
   }
 
@@ -194,23 +218,13 @@ class TodosPageState extends State<TodosPage> {
     }
   }
 
-  /// 点击任务行：下方弹出任务详情面板（设计 §3，v2.3；不再直接进编辑器）。
+  /// 点击任务行：进入详情模式（页面下部内嵌 TaskDetailPanel，v2.5；
+  /// 不再弹底部抽屉，也不直接进编辑器）。
   void _showDetail(Task task) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => TaskDetailPanel(
-        task: task,
-        onEdit: () {
-          Navigator.of(ctx).pop();
-          _editTask(task);
-        },
-        onOpenTask: (t) {
-          Navigator.of(ctx).pop();
-          _jumpToTask(t);
-        },
-      ),
-    );
+    setState(() {
+      _selectedTaskId = task.id;
+      _detailTask = task;
+    });
   }
 
   /// 任务所在页签（v2.3 跳转定位用）。
@@ -223,11 +237,13 @@ class TodosPageState extends State<TodosPage> {
   }
 
   /// 跳转到任务对应尺度页签并高亮定位（滚动到可见 + 选中态）（设计 §3，v2.3）。
+  /// v2.5：详情面板中点击父/子任务时调用——退出详情模式，回列表高亮目标行。
   void _jumpToTask(Task t) {
     final tab = _tabForTask(t);
     setState(() {
       _tab = tab;
       _selectedTaskId = t.id;
+      _detailTask = null;
       if (t.parentId != null) _collapsedParents.remove(t.parentId);
     });
     _pageController.jumpToPage(tab);
@@ -293,7 +309,10 @@ class TodosPageState extends State<TodosPage> {
               itemWidth: 64,
               scrollController: _tabScrollController,
               onChanged: (i) {
-                setState(() => _tab = i);
+                setState(() {
+                  _tab = i;
+                  _detailTask = null; // 切换页签自动回列表模式
+                });
                 _pageController.animateToPage(i,
                     duration: const Duration(milliseconds: 250),
                     curve: Curves.easeOut);
@@ -312,14 +331,19 @@ class TodosPageState extends State<TodosPage> {
                         Center(child: CircularProgressIndicator()),
                       ],
                     )
-                  : PageView(
-                      controller: _pageController,
-                      onPageChanged: (i) => setState(() => _tab = i),
-                      children: [
-                        for (var i = 0; i < _tabLabels.length; i++)
-                          _buildTabBody(i),
-                      ],
-                    ),
+                  : _detailTask != null
+                      ? _buildDetailMode(_detailTask!)
+                      : PageView(
+                          controller: _pageController,
+                          onPageChanged: (i) => setState(() {
+                            _tab = i;
+                            _detailTask = null; // 滑动翻页自动回列表模式
+                          }),
+                          children: [
+                            for (var i = 0; i < _tabLabels.length; i++)
+                              _buildTabBody(i),
+                          ],
+                        ),
             ),
           ),
         ],
@@ -338,6 +362,20 @@ class TodosPageState extends State<TodosPage> {
       default:
         return _taskListView(_byScale[_scaleTabs[tab]] ?? const []);
     }
+  }
+
+  /// 详情模式（v2.5）：页面下部内嵌 TaskDetailPanel，返回按钮回列表模式。
+  Widget _buildDetailMode(Task task) {
+    return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      child: TaskDetailPanel(
+        key: ValueKey(task.id),
+        task: task,
+        onClose: () => setState(() => _detailTask = null),
+        onEdit: () => _editTask(task),
+        onOpenTask: _jumpToTask,
+      ),
+    );
   }
 
   /// 子任务分组（设计 §3）：父任务在同列表时子任务附在父行下缩进，

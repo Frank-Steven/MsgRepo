@@ -6,11 +6,12 @@ import '../../services/database.dart';
 import '../../services/task_scale.dart';
 import 'task_tile.dart';
 
-/// 任务详情面板（设计 §3/§7，v2.3）：待办页（下方弹出）与日程视图
-/// （选中任务时底部板块替换）共用同一组件。
+/// 任务详情面板（设计 §3/§7，v2.3；v2.5 内嵌统一）：待办页与日程页底部
+/// 面板共用同一组件（列表模式/详情模式互斥切换，不再是底部弹出抽屉）。
 ///
 /// 内容：名称、尺度徽标、优先级色点、时间、描述；父任务条目、来源消息
 /// （可点查看原文）、子任务列表（含完成进度）；右上角编辑图标进编辑器。
+/// [onClose] 非空时左上角显示返回按钮（关闭详情回列表模式）。
 /// 父/子任务条目点击经 [onOpenTask] 回调，由宿主决定跳转逻辑
 /// （待办页 = 切页签并高亮；日程页 = 跳到所在尺度视图并选中）。
 class TaskDetailPanel extends StatefulWidget {
@@ -22,11 +23,15 @@ class TaskDetailPanel extends StatefulWidget {
   /// 点击父任务/子任务条目。
   final ValueChanged<Task>? onOpenTask;
 
+  /// 左上角关闭（返回列表模式）；null 不显示。
+  final VoidCallback? onClose;
+
   const TaskDetailPanel({
     super.key,
     required this.task,
     required this.onEdit,
     this.onOpenTask,
+    this.onClose,
   });
 
   @override
@@ -166,6 +171,13 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
         children: [
           Row(
             children: [
+              if (widget.onClose != null)
+                IconButton(
+                  tooltip: '返回列表',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: widget.onClose,
+                  icon: const Icon(Icons.arrow_back, size: 20),
+                ),
               Container(
                 width: 10,
                 height: 10,

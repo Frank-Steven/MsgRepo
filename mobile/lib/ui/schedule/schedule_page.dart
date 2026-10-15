@@ -53,6 +53,13 @@ class SchedulePageState extends State<SchedulePage> {
 
   Task? _selectedTask;
 
+  /// 底部面板模式（v2.5）：false=任务列表（默认），true=任务详情。
+  /// 图表点选只选中（列表高亮定位），不直接进详情；列表行点击才进详情。
+  bool _detailMode = false;
+
+  /// 底部列表行 key（选中任务滚动定位用）。
+  final Map<String, GlobalKey> _bottomRowKeys = {};
+
   /// 当前视图的精确可视范围（各视图 onVisibleWindowChanged 上报，v2.4）——
   /// 用于底部任务面板与年度标题。
   int? _visStartMs;
@@ -191,6 +198,7 @@ class SchedulePageState extends State<SchedulePage> {
         },
       );
       setState(() => _selectedTask = null);
+      _detailMode = false;
       await reload();
       if (mounted) _showUndoSnack('已删除');
     } else if (result.task != null) {
@@ -253,7 +261,8 @@ class SchedulePageState extends State<SchedulePage> {
   Future<void> _toggleDone(Task task) =>
       toggleTaskDoneWithUndo(context, task, onChanged: reload);
 
-  /// 详情面板中点父/子任务：按目标任务的尺度切换到能展示它的粒度并定位。
+  /// 详情面板中点父/子任务：按目标任务的尺度切换到能展示它的粒度并定位，
+  /// 选中并展示其详情。
   void _jumpToTask(Task t) {
     final s = t.startAt;
     if (s == null) return; // 不定时任务在日程无视图可跳
@@ -266,6 +275,7 @@ class SchedulePageState extends State<SchedulePage> {
     setState(() {
       _granularity = g;
       _selectedTask = t;
+      _detailMode = true;
       _anchor = DateTime.fromMillisecondsSinceEpoch(s);
     });
     _afterTwoFrames(() {
@@ -289,8 +299,37 @@ class SchedulePageState extends State<SchedulePage> {
     });
   }
 
+  /// 图表点选（v2.5）：只选中——图表描边 + 底部列表滚动高亮定位，
+  /// 不直接打开详情；空白取消选中时详情模式一并退出。
   void _onTaskSelected(Task? t) {
-    setState(() => _selectedTask = t);
+    setState(() {
+      _selectedTask = t;
+      if (t == null) {
+        _detailMode = false;
+      }
+    });
+    if (t == null) return;
+    // 选中的任务应当就在底部列表（同一可视范围 ∩ 尺度集合）；
+    // 边界情况（拖拽出可视范围等）给短暂提示
+    if (!_bottomTasks.any((e) => e.id == t.id)) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('该任务不在当前可视范围的任务列表中'),
+            duration: Duration(seconds: 2)));
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _bottomRowKeys[t.id]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+          alignment: 0.5,
+        );
+      }
+    });
   }
 
   /// 可视窗口变化：记录精确可视范围（底部面板/标题用）+ 增量加载。
@@ -432,6 +471,7 @@ class SchedulePageState extends State<SchedulePage> {
     setState(() {
       _granularity = 1;
       _selectedTask = null;
+      _detailMode = false;
       _anchor = target;
     });
     _afterTwoFrames(() => _yearKey.currentState?.scrollTo(target));
@@ -443,6 +483,7 @@ class SchedulePageState extends State<SchedulePage> {
     setState(() {
       _granularity = 2;
       _selectedTask = null;
+      _detailMode = false;
       _anchor = target;
     });
     _afterTwoFrames(() => _monthKey.currentState?.scrollTo(target));
@@ -454,15 +495,17 @@ class SchedulePageState extends State<SchedulePage> {
     setState(() {
       _granularity = 3;
       _selectedTask = null;
+      _detailMode = false;
       _anchor = target;
     });
     _afterTwoFrames(() => _dayKey.currentState?.scrollTo(target));
   }
 
-  /// 底部板块：有选中 = 任务详情面板；无选中 = 原任务列表（设计 §2）。
+  /// 底部板块（v2.5 双模式）：详情模式 = TaskDetailPanel（带返回按钮）；
+  /// 列表模式 = 可视范围任务列表（选中行高亮，点击行进详情）。
   Widget _bottomSection(BuildContext context) {
     final selected = _selectedTask;
-    if (selected != null) {
+    if (_detailMode && selected != null) {
       return Expanded(
         flex: 2,
         child: Column(children: [
@@ -472,6 +515,7 @@ class SchedulePageState extends State<SchedulePage> {
               child: TaskDetailPanel(
                 key: ValueKey(selected.id),
                 task: selected,
+                onClose: () => setState(() => _detailMode = false),
                 onEdit: () => _editTask(selected),
                 onOpenTask: _jumpToTask,
               ),
@@ -513,8 +557,14 @@ class SchedulePageState extends State<SchedulePage> {
                     itemBuilder: (context, i) {
                       final task = tasks[i];
                       return TaskTile(
+                        key: _bottomRowKeys.putIfAbsent(
+                            task.id, () => GlobalKey()),
                         task: task,
-                        onTap: () => _editTask(task),
+                        selected: task.id == _selectedTask?.id,
+                        onTap: () => setState(() {
+                          _selectedTask = task;
+                          _detailMode = true;
+                        }),
                         onToggleDone: () => _toggleDone(task),
                         onShowSource: task.sourceMessageId == null
                             ? null
@@ -586,6 +636,7 @@ class SchedulePageState extends State<SchedulePage> {
                         setState(() {
                           _granularity = i;
                           _selectedTask = null;
+                          _detailMode = false;
                         });
                         _afterTwoFrames(() {
                           switch (i) {
