@@ -487,3 +487,22 @@ process(messages):
 - **日程页底部面板双模式**（§2）：列表模式（默认）= 可视范围 ∩ 尺度集合的任务列表；详情模式 = TaskDetailPanel。图表点击任务 → 只选中：图表描边 + 底部列表滚动到该行高亮（`Scrollable.ensureVisible`），不再直接开详情；选中任务不在列表时给 2 秒提示。列表行点击 → 进详情模式。详情返回按钮/取消选中（点空白）/切换粒度/下钻 → 回列表模式；编辑删除任务 → 清选中并退出详情。拖拽逻辑不变。
 - **待办页内嵌详情**（§3）：取消 `showModalBottomSheet` 详情；点击任务行进入详情模式（页面下部内嵌同一 TaskDetailPanel 替换 PageView），返回按钮/切换或滑动页签回列表模式；reload 后从全部列表刷新详情中的任务，任务消失（删除/归档流转）自动退出详情；详情中点父/子任务 → 退出详情、切页签并高亮目标行（复用 v2.3 跳转定位）。
 - **消息页不动**：消息条目交互不涉任务详情面板。
+
+### v2.6（2026-10-15）
+
+真机打磨批：定位加深、深色 Toast、消息去颜色化、触控区、监听保活、聊天记录导入落地。DB schema 不变（复用 v2.4 预留的 import_source 字段）。
+
+1. **「现在」按钮定位加深**（§2）：年视图点「现在」滚动到当前**月块**并在可视区垂直居中（原为年顶对齐）；月视图点「现在」滚动到**今天所在周行/日格**并垂直居中（原为月顶对齐）；脉冲高亮保留。年度视图（当前年居中）/日视图（当前时刻居中）本已居中，未动。居中偏移与网格布局共用同一套公式（回归测试按公式复核偏移）。
+2. **Toast 深色模式**（§6）：M3 默认 SnackBar 用 inverseSurface（深色模式下是浅底），改为主题感知封装 `snackBarThemeFor`——深色主题用深色 surfaceContainerHigh + onSurface 文字 + primary 动作色，浅色主题保持反色底；挂全局 ThemeData，所有 SnackBar 统一生效；撤销进度条/撤销按钮颜色联动 actionTextColor。
+3. **消息去颜色化**（§5）：消息列表不再按 AI 红/黄/绿分组染色——分组收敛为 未处理/垃圾 两组，筛选 chips 去掉红/黄/绿（已完成/垃圾/未处理/全部保留）。**只有绑定任务的消息显示颜色**：标记 = 其任务优先级色点 + 任务角标；未绑定 = 空心圆点；垃圾 = 灰色消息块（不变）。messages.priority 字段保留（DB 不动，AI 仍评估落库，AI 面板评估结果仍显示三色点）。
+4. **消息分组标题加高**（§5）：36 → 44dp（触控友好），箭头/计数排版不变。
+5. **通知监听稳定性**（§4、§9）：
+   - 设置页新增「后台保活」区：电池优化白名单状态检查（未加入时警示 + 去设置，ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 系统弹窗，厂商阉割回退电池优化列表页）；
+   - NotificationCaptureService 加 onListenerDisconnected → requestRebind 重绑尝试（onListenerConnected 空实现）；
+   - 国产 ROM 保活引导：openAutoStartSettings 逐个尝试 vivo(i管家)/iQOO/小米/华为/OPPO/荣耀已知自启动组件，跳不了给图文引导（vivo：i 管家→自启动、电池→后台高耗电）+ 应用详情页兜底入口；
+   - AndroidManifest 审查：服务声明 exported + BIND_NOTIFICATION_LISTENER_SERVICE 权限 + label 均规范未动；新增 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 与 READ_SMS 权限。
+6. **聊天记录导入落地**（§5，v2.4-20 预留方案实现）：消息页导入弹层 → ImportPage 二级页（选来源已前置到弹层）→ 选文件（file_picker）/读短信 → 解析预览（条数/时间范围/错误行前 3 条）→ 确认导入（分批进度条）→ 结果报告（新导入/重复跳过/解析失败行数 + 前 10 条）。入库 capture_type='import' + import_source(qq/wechat/sms)，packageName 用虚拟包名 import.qq/import.wechat/import.sms（来源筛选可见），content_hash 一次性查重 + 500 条/批事务。
+   - **格式更正（相对预留方案）**：QQ 按 PC 端「消息管理器 → 导出聊天记录」文本格式（`====` 分隔 + `消息对象:昵称(QQ号)` + `yyyy-MM-dd HH:mm:ss 昵称(QQ号)` 头行 + 多行内容）；微信无官方导出，按主流第三方工具的两段式文本（`yyyy-MM-dd HH:mm(:ss) 发送者` 头行 + 内容行，空行分隔）；方案 B（root 读微信数据库）未做。
+   - **编码限制**：仅支持 UTF-8；QQ 老版本 GBK 导出文件解码失败时明确提示转码（未内置 GBK 转码，避免新增依赖）。
+   - **短信**：READ_SMS 运行时授权 + content://sms 读取（收件箱+已发、时间升序、上限 2 万条），按号码归会话（单条级 conversation 覆盖文件级）。
+   - 导入消息默认不自动触发 AI 处理（与实时捕获一致）。
