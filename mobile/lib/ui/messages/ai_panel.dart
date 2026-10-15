@@ -32,6 +32,9 @@ class _Outcome {
   String? error;
   bool confirmed = false;
 
+  /// 汇总页勾选状态（v2.4：checkbox + 「确认选中」）；默认勾选。
+  bool checked = true;
+
   _Outcome(this.message);
 }
 
@@ -48,7 +51,9 @@ class AiProcessPanel extends StatefulWidget {
 class _AiProcessPanelState extends State<AiProcessPanel> {
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _scroll = ScrollController();
-  final _raw = StringBuffer();
+
+  /// 每条消息的流式原始输出（v2.4 卡片化：各自独立成卡）。
+  final Map<String, StringBuffer> _rawById = {};
   late final List<_Outcome> _outcomes;
 
   StreamSubscription<AiEvent>? _sub;
@@ -67,6 +72,11 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
   int get _failCount => _outcomes.where((o) => o.error != null).length;
   int get _unconfirmedCount =>
       _outcomes.where((o) => o.result != null && !o.confirmed).length;
+
+  /// 勾选且待确认的条数（v2.4「确认选中」）。
+  int get _checkedCount => _outcomes
+      .where((o) => o.result != null && !o.confirmed && o.checked)
+      .length;
 
   @override
   void initState() {
@@ -98,7 +108,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
       switch (ev) {
         case AiTokenDelta(:final messageId, :final delta):
           _currentId = messageId;
-          _raw.write(delta);
+          _rawById.putIfAbsent(messageId, StringBuffer.new).write(delta);
           _scrollToEnd();
         case AiMessageResult(:final result):
           _outcomeOf(result.messageId)?.result = result;
@@ -115,13 +125,6 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
       if (o.message.id == messageId) return o;
     }
     return null;
-  }
-
-  String get _currentTitle {
-    final o = _outcomeOf(_currentId ?? '');
-    if (o == null) return '';
-    final m = o.message;
-    return m.title.isEmpty ? '(无标题)' : m.title;
   }
 
   void _scrollToEnd() {
@@ -271,38 +274,118 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
             TextButton(onPressed: _cancel, child: const Text('取消')),
           ],
         ),
-        if (_currentTitle.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          Text(
-            '正在处理：$_currentTitle',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-          ),
-        ],
         const SizedBox(height: 8),
+        // 每条消息一张状态卡片（v2.4）：等待/处理中/完成/失败图标 + 标题；
+        // 处理中卡片内滚动显示该条的流式输出（等宽字体），完成后折叠为摘要。
         Expanded(
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: SingleChildScrollView(
-              controller: _scroll,
-              child: Text(
-                _raw.toString(),
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  color: cs.onSurfaceVariant,
-                ),
-              ),
-            ),
+          child: ListView(
+            controller: _scroll,
+            children: [for (final o in _outcomes) _buildProcessingCard(o)],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildProcessingCard(_Outcome o) {
+    final cs = Theme.of(context).colorScheme;
+    final m = o.message;
+    final title = m.title.isEmpty ? '(无标题)' : m.title;
+    final isCurrent = o.message.id == _currentId &&
+        o.result == null &&
+        o.error == null &&
+        _running;
+
+    final Widget statusIcon;
+    if (o.error != null) {
+      statusIcon = Icon(Icons.error_outline, size: 20, color: cs.error);
+    } else if (o.result != null) {
+      statusIcon =
+          Icon(Icons.check_circle, size: 20, color: Colors.green.shade600);
+    } else if (isCurrent) {
+      statusIcon = const SizedBox(
+          width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2));
+    } else {
+      statusIcon = Icon(Icons.schedule, size: 20, color: cs.outline);
+    }
+
+    final raw = _rawById[o.message.id]?.toString() ?? '';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      elevation: 0,
+      color: cs.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                statusIcon,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(title,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                ),
+                if (o.result != null) ...[
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _priorityColor(cs, o.result!.priority),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+              ],
+            ),
+            if (isCurrent && raw.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 160),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                // reverse 让内容贴底，新 token 自动可见，无需手动滚到底
+                child: SingleChildScrollView(
+                  reverse: true,
+                  child: Text(
+                    raw,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            ] else if (o.result != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                [
+                  if (o.result!.reason.isNotEmpty) o.result!.reason,
+                  if (o.result!.taskDraft != null)
+                    '任务草稿：${_draftSummary(o.result!.taskDraft!)}',
+                ].join('；'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ] else if (o.error != null) ...[
+              const SizedBox(height: 2),
+              Text(o.error!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: cs.error)),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -341,6 +424,24 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // v2.4：checkbox 勾选决定「确认选中」的批量范围；已确认显示对勾
+            if (o.confirmed)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Icon(Icons.check_circle, color: cs.primary, size: 20),
+              )
+            else
+              SizedBox(
+                width: 32,
+                height: 32,
+                child: Checkbox(
+                  value: o.checked,
+                  visualDensity: VisualDensity.compact,
+                  onChanged: (v) =>
+                      setState(() => o.checked = v ?? false),
+                ),
+              ),
+            const SizedBox(width: 6),
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Container(
@@ -371,13 +472,6 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            o.confirmed
-                ? Icon(Icons.check_circle, color: cs.primary, size: 20)
-                : TextButton(
-                    onPressed: () => _confirm([o]),
-                    child: const Text('确认'),
-                  ),
           ],
         ),
         const SizedBox(height: 8),
@@ -402,16 +496,34 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text('处理结果',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
+            if (_unconfirmedCount > 0)
+              TextButton(
+                onPressed: () {
+                  // 全选 / 全不选切换（只作用于未确认且有结果的条目）
+                  final anyUnchecked = _outcomes.any(
+                      (o) => o.result != null && !o.confirmed && !o.checked);
+                  setState(() {
+                    for (final o in _outcomes) {
+                      if (o.result != null && !o.confirmed) {
+                        o.checked = anyUnchecked;
+                      }
+                    }
+                  });
+                },
+                child: Text(_checkedCount < _unconfirmedCount
+                    ? '全选'
+                    : '全不选'),
+              ),
             FilledButton(
-              onPressed: _unconfirmedCount == 0
+              onPressed: _checkedCount == 0
                   ? null
                   : () => _confirm([
                         for (final o in _outcomes)
-                          if (o.result != null && !o.confirmed) o,
+                          if (o.result != null && !o.confirmed && o.checked) o,
                       ]),
-              child: Text(_unconfirmedCount == 0
-                  ? '全部确认'
-                  : '全部确认（$_unconfirmedCount）'),
+              child: Text(_checkedCount == 0
+                  ? '确认选中'
+                  : '确认选中（$_checkedCount）'),
             ),
             const SizedBox(width: 8),
             TextButton(
