@@ -528,3 +528,11 @@ process(messages):
 2. **消息「正在处理」状态**（§5、§8.3）：状态来源 = AiProcessingService 的内存 processingIds 集（会话 running 时尚未出结果的消息 id），不落库、页面间天然一致。消息列表行标题行显示旋转标记 + 「处理中」小字，期间该行左滑整体禁用。消息页监听服务 revision（粗粒度版本号：开始/逐条结果/完成/确认/清空才 +1，token 高频事件不触发整页重建）。
 3. **不重复处理消息**（§8.3）：选择集构建处统一过滤（`filterProcessable` 纯函数，不依赖面板拦截）——正在处理中的跳过；已 processed 的跳过，只有单条左滑「重新处理」（reprocess=true，判定由分组键改为 status==pending）才放行；pending 且同 content_hash 已有 processed 记录的重复消息跳过（沿用 v2.6.1）。跳过按原因分别计数合并提示（「跳过 n 条已处理、n 条正在处理、n 条重复内容」）。
 4. **导入图标语义修正**（§5）：`Icons.file_upload_outlined`（箭头向上出托盘，像导出/分享）→ `Icons.move_to_inbox_outlined`（箭头向下入托盘）——消息页 AppBar 导入入口与二级导入页「导入 N 条」确认按钮两处统一；设置页无同类导入/导出图标。
+
+### v2.6.3（2026-10-16）
+
+真机反馈小修：消息页补「已处理」筛选维度。DB schema 不变。
+
+- **筛选维度最终集合**（§5）：互斥分组三维 = 未处理（status=pending 且非垃圾）→ 已处理（status=processed 且非垃圾，v2.6.3 新增）→ 垃圾（priority=junk，优先于已处理——已确认的垃圾仍在垃圾组）；叠加筛选键 = 已完成（关联任务 status=done，不占分组，选中时额外放行，语义不变）；另有来源应用筛选（全部/各应用，不变）。「全部」语义 = 分组 chips 默认全选即全部可见，不设独立「全部」chip。分组列表 section 计数与 chip 一一对应自动同步。
+- 实现：`messageGroupKey` 由「垃圾/其余」两分改为三分（junk > processed > pending），`kGroupOrder` 增 `kGroupProcessed`，chips 与分组头由同一 kGroupOrder 驱动无需另改；分组回归测试 `test/message_group_test.dart` 重写（processed 归已处理、processed 垃圾仍归垃圾、顺序与文案）。
+- **左滑菜单核对**（§5.1）：已处理消息走非垃圾路径——「重新处理」（v2.6.2 起按 status==pending 判定，不会出现「自动处理」）/ 创建任务或取消任务（按 linkedTaskId）/ 标记垃圾 / 归档；已处理的垃圾消息走垃圾路径（移出垃圾/归档/删除）。现有规则已合理，未改动。
