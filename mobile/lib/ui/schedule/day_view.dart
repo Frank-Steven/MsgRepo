@@ -124,6 +124,7 @@ class DayViewState extends State<DayView>
         return;
       }
       setState(() => _scrollMin = next);
+      _reportOnUnitChange(); // v2.6.1：惯性中标题实时跟随（单位变化才上报）
     });
     ctrl.addStatusListener((s) {
       if (s == AnimationStatus.completed) {
@@ -159,7 +160,9 @@ class DayViewState extends State<DayView>
   // ---- 供父级调用的定位方法 ----
 
   /// 滚动到当前时刻并居中，短暂脉冲高亮（设计 §13-10）。
+  /// v2.6.1：先停掉进行中的 fling 动画，否则动画下一帧会覆盖定位。
   void scrollToNow() {
+    _cancelFling();
     final ppm = _ppm ?? (_viewW > 0 ? _viewW / 1440 : 1.0);
     setState(() {
       _scrollMin = (_nowMin - _viewW / (2 * ppm)).clamp(0.0, _maxMin);
@@ -176,6 +179,7 @@ class DayViewState extends State<DayView>
 
   /// 滚动到指定时间点并居中（期移箭头用）。
   void scrollTo(DateTime anchor) {
+    _cancelFling();
     final ppm = _ppm ?? 1.0;
     final min = (anchor.millisecondsSinceEpoch - _epochMs) / 60000.0;
     setState(() {
@@ -187,6 +191,7 @@ class DayViewState extends State<DayView>
 
   /// 滚动到任务并使其居中（详情面板跳转用）。
   void scrollToTask(Task t) {
+    _cancelFling();
     final s = t.startAt;
     if (s == null) return;
     final ppm = _ppm ?? 1.0;
@@ -199,6 +204,21 @@ class DayViewState extends State<DayView>
     _reportWindow();
   }
 
+  /// 上次上报的（首可视日, 末可视日, 中心日）——滚动/缩放中只在单位
+  /// 变化时上报（v2.6.1：标题跟随可视中心日期，又不每帧 setState）。
+  (int, int, int)? _lastReportKey;
+
+  void _reportOnUnitChange() {
+    if (_viewW <= 0 || _ppm == null) return;
+    final ppm = _ppm!;
+    final key = (
+      (_scrollMin / 1440).floor(),
+      ((_scrollMin + _viewW / ppm) / 1440).floor(),
+      ((_scrollMin + _viewW / (2 * ppm)) / 1440).floor(),
+    );
+    if (key != _lastReportKey) _reportWindow();
+  }
+
   void _reportWindow() {
     if (_viewW <= 0 || _ppm == null) return;
     // 精确可视范围（v2.4：加载提前量由父级 _ensureRange 负责，
@@ -206,9 +226,14 @@ class DayViewState extends State<DayView>
     final startMs = (_scrollMin * 60000 + _epochMs).round();
     final endMs =
         ((_scrollMin + _viewW / _ppm!) * 60000 + _epochMs).round();
-    widget.onVisibleWindowChanged(startMs, endMs);
     final centerMs =
         ((_scrollMin + _viewW / (2 * _ppm!)) * 60000 + _epochMs).round();
+    _lastReportKey = (
+      (_scrollMin / 1440).floor(),
+      ((_scrollMin + _viewW / _ppm!) / 1440).floor(),
+      (centerMs / 86400000).floor(),
+    );
+    widget.onVisibleWindowChanged(startMs, endMs);
     widget.onCenterChanged(DateTime.fromMillisecondsSinceEpoch(centerMs));
   }
 
@@ -281,6 +306,7 @@ class DayViewState extends State<DayView>
       _scrollMin =
           (focalMin - d.localFocalPoint.dx / newPpm).clamp(0.0, _maxMin);
     });
+    _reportOnUnitChange(); // v2.6.1：拖动/缩放中标题实时跟随
   }
 
   void _onScaleEnd(ScaleEndDetails d) {
@@ -307,6 +333,9 @@ class DayViewState extends State<DayView>
     } else {
       // 平移手势结束：带惯性继续滚动（v2.4）
       _startFling(d.velocity.pixelsPerSecond.dx);
+      // 低速不触发惯性时 _startFling 直接返回——这里补一次上报，
+      // 否则慢拖后标题/底部面板停在旧值（v2.6.1）
+      _reportOnUnitChange();
     }
   }
 

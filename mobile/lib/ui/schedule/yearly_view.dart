@@ -114,6 +114,7 @@ class YearlyViewState extends State<YearlyView>
         return;
       }
       setState(() => _scrollYf = next);
+      _reportOnUnitChange(); // v2.6.1：惯性中标题实时跟随（单位变化才上报）
     });
     ctrl.addStatusListener((s) {
       if (s == AnimationStatus.completed) {
@@ -152,7 +153,9 @@ class YearlyViewState extends State<YearlyView>
   // ---- 供父级调用的定位方法 ----
 
   /// 滚动到当前年并居中，短暂脉冲高亮（设计 §13-10）。
+  /// v2.6.1：先停掉进行中的 fling 动画，否则动画下一帧会覆盖定位。
   void scrollToNow() {
+    _cancelFling();
     final ppy = _ppy ?? (_viewW > 0 ? _viewW / 20 : 20.0);
     final nowYf = _yearFraction(DateTime.now().millisecondsSinceEpoch);
     setState(() {
@@ -170,6 +173,7 @@ class YearlyViewState extends State<YearlyView>
 
   /// 滚动到指定年并居中（期移箭头用）。
   void scrollTo(DateTime anchor) {
+    _cancelFling();
     final ppy = _ppy ?? 20.0;
     final yf = _yearFraction(anchor.millisecondsSinceEpoch);
     setState(() {
@@ -181,6 +185,7 @@ class YearlyViewState extends State<YearlyView>
 
   /// 滚动到任务并使其居中（详情面板跳转用）。
   void scrollToTask(Task t) {
+    _cancelFling();
     final s = t.startAt;
     if (s == null) return;
     final ppy = _ppy ?? 20.0;
@@ -194,6 +199,21 @@ class YearlyViewState extends State<YearlyView>
     _reportWindow();
   }
 
+  /// 上次上报的（首可视年, 末可视年, 中心年）——滚动/缩放中只在单位
+  /// 变化时上报（v2.6.1：标题实时跟随，又不每帧 setState）。
+  (int, int, int)? _lastReportKey;
+
+  void _reportOnUnitChange() {
+    if (_viewW <= 0 || _ppy == null) return;
+    final ppy = _ppy!;
+    final key = (
+      _scrollYf.floor(),
+      (_scrollYf + _viewW / ppy).floor(),
+      (_scrollYf + _viewW / (2 * ppy)).floor(),
+    );
+    if (key != _lastReportKey) _reportWindow();
+  }
+
   void _reportWindow() {
     if (_viewW <= 0 || _ppy == null) return;
     // 精确可视范围（v2.4：加载提前量由父级 _ensureRange 负责，
@@ -203,8 +223,13 @@ class YearlyViewState extends State<YearlyView>
     // 右缘年小数落在的年 = 最后可视年；区间右端 = 其次年 1 月 1 日
     final lastVisYear = _epochYear + (_scrollYf + _viewW / _ppy!).floor();
     final endMs = DateTime(lastVisYear + 1).millisecondsSinceEpoch;
-    widget.onVisibleWindowChanged(startMs, endMs);
     final centerYf = _scrollYf + _viewW / (2 * _ppy!);
+    _lastReportKey = (
+      _scrollYf.floor(),
+      (_scrollYf + _viewW / _ppy!).floor(),
+      centerYf.floor(),
+    );
+    widget.onVisibleWindowChanged(startMs, endMs);
     widget.onCenterChanged(
         DateTime(_epochYear + centerYf.floor(), 7));
   }
@@ -297,6 +322,7 @@ class YearlyViewState extends State<YearlyView>
       _scrollYf = (focalYf - d.localFocalPoint.dx / newPpy)
           .clamp(_minScroll, _maxScroll);
     });
+    _reportOnUnitChange(); // v2.6.1：拖动/缩放中标题实时跟随
   }
 
   void _onScaleEnd(ScaleEndDetails d) {
@@ -336,6 +362,9 @@ class YearlyViewState extends State<YearlyView>
     } else {
       // 平移手势结束：带惯性继续滚动（v2.4）
       _startFling(d.velocity.pixelsPerSecond.dx);
+      // 低速不触发惯性时 _startFling 直接返回——这里补一次上报，
+      // 否则慢拖后标题/底部面板停在旧值（v2.6.1）
+      _reportOnUnitChange();
     }
   }
 
