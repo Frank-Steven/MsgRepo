@@ -11,7 +11,7 @@ class YearLaneItem {
   final int startMonth;
   final int endMonth;
 
-  /// 任务实际起点/终点不在当前年（端点画延伸样式，不为跨年部分保留槽位）。
+  /// 任务实际起点/终点不在当前年（截断端不画端点，不为跨年部分保留槽位）。
   final bool extendsBefore;
   final bool extendsAfter;
 

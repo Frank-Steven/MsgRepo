@@ -26,6 +26,14 @@ class AppFilterConfig {
   bool get isAllowlist => mode == modeAllowlist;
   bool get isBlacklist => mode == modeBlacklist;
 
+  /// 采集放行判定（镜像 Kotlin NotificationCaptureService.isAllowed 的语义）：
+  /// allowlist 只放行名单内；blacklist 拦截名单内；其余（all/未知）全放行。
+  bool allows(String packageName) => switch (mode) {
+        modeAllowlist => packages.contains(packageName),
+        modeBlacklist => !packages.contains(packageName),
+        _ => true,
+      };
+
   factory AppFilterConfig.fromJson(Map<String, dynamic> json) =>
       AppFilterConfig(
         mode: json['mode'] as String? ?? modeAll,

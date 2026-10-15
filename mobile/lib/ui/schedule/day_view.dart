@@ -56,7 +56,7 @@ class DayView extends StatefulWidget {
 }
 
 class DayViewState extends State<DayView>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   /// 缩放范围：最小 = 24h 恰好铺满可视宽，最大 = 每 5 分钟 48dp。
   static const _maxPpm = 48.0 / 5;
 
@@ -109,7 +109,16 @@ class DayViewState extends State<DayView>
     ctrl.addListener(() {
       final next = (_flingStartMin - ctrl.value / ppm);
       if (next <= 0 || next >= _maxMin) {
-        _cancelFling(); // 撞边界即停
+        // 撞边界即停。注意：正处于 value 通知循环里，不能就地 dispose 自己，
+        // 先停 ticker，帧末再回收（v2.5 修复：原 _cancelFling() 在 listener 中
+        // dispose 自己，且旧实现反复新建 controller 会触发
+        // SingleTickerProviderStateMixin 的多 ticker 断言，导致第二次起 fling 失效）
+        final c = _flingCtrl;
+        if (c != null) {
+          _flingCtrl = null;
+          c.stop();
+          WidgetsBinding.instance.addPostFrameCallback((_) => c.dispose());
+        }
         setState(() => _scrollMin = next.clamp(0.0, _maxMin));
         _reportWindow();
         return;
@@ -622,7 +631,7 @@ class _DayPainter extends CustomPainter {
 
     _drawTicks(canvas, size, top, ganttTop);
 
-    // 任务：时间点=节点；时间段=带断点方块的线段；子任务画更小节点/更细线；
+    // 任务：时间点=节点；时间段=带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）
     for (final it in layout.items) {
       if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
@@ -640,9 +649,9 @@ class _DayPainter extends CustomPainter {
             ..strokeWidth = it.isSubtask ? 1.5 : 3
             ..strokeCap = StrokeCap.round,
         );
-        final breakSize = it.isSubtask ? 5.0 : 8.0;
-        _drawBreak(canvas, it.x1, it.y, color, breakSize);
-        _drawBreak(canvas, it.x2, it.y, color, breakSize);
+        final endR = it.isSubtask ? 3.5 : 5.0;
+        _drawBreak(canvas, it.x1, it.y, color, endR);
+        _drawBreak(canvas, it.x2, it.y, color, endR);
       }
       if (it.task.id == layout.selectedTaskId) {
         _drawSelection(canvas, it, scheme);
@@ -829,13 +838,10 @@ class _DayPainter extends CustomPainter {
 
   static String _two(int v) => v.toString().padLeft(2, '0');
 
-  /// 时间段端点的断点方块。
+  /// 时间段端点的圆点（v2.5：方块改圆点，与时间点节点同半径）。
   void _drawBreak(Canvas canvas, double x, double y, Color color,
-      [double size = 8]) {
-    canvas.drawRect(
-      Rect.fromCenter(center: Offset(x, y), width: size, height: size),
-      Paint()..color = color,
-    );
+      [double radius = 5]) {
+    canvas.drawCircle(Offset(x, y), radius, Paint()..color = color);
   }
 
   @override

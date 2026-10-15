@@ -51,7 +51,7 @@ class YearlyView extends StatefulWidget {
 }
 
 class YearlyViewState extends State<YearlyView>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   /// 缩放范围：最小 = 20 年铺满可视宽，最大 = 每年 320dp。
   static const _maxPpy = 320.0;
 
@@ -101,7 +101,13 @@ class YearlyViewState extends State<YearlyView>
     ctrl.addListener(() {
       final next = _flingStartYf - ctrl.value / ppy;
       if (next <= _minScroll || next >= _maxScroll) {
-        _cancelFling(); // 撞边界即停
+        // 撞边界即停；value 通知循环里不能就地 dispose 自己，帧末回收
+        final c = _flingCtrl;
+        if (c != null) {
+          _flingCtrl = null;
+          c.stop();
+          WidgetsBinding.instance.addPostFrameCallback((_) => c.dispose());
+        }
         setState(
             () => _scrollYf = next.clamp(_minScroll, _maxScroll));
         _reportWindow();
@@ -708,7 +714,7 @@ class _YearlyPainter extends CustomPainter {
 
     _drawTicks(canvas, size, top, ganttTop);
 
-    // 任务：节点 / 带端点方块的线段；子任务画更小节点/更细线；
+    // 任务：节点 / 带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）。无泳道底纹（v2.3 §13-8）。
     for (final it in layout.items) {
       if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
@@ -726,9 +732,9 @@ class _YearlyPainter extends CustomPainter {
             ..strokeWidth = it.isSubtask ? 1.5 : 3
             ..strokeCap = StrokeCap.round,
         );
-        final breakSize = it.isSubtask ? 5.0 : 8.0;
-        _drawBreak(canvas, it.x1, it.y, color, breakSize);
-        _drawBreak(canvas, it.x2, it.y, color, breakSize);
+        final endR = it.isSubtask ? 3.5 : 5.0;
+        _drawBreak(canvas, it.x1, it.y, color, endR);
+        _drawBreak(canvas, it.x2, it.y, color, endR);
       }
       if (it.task.id == layout.selectedTaskId) {
         _drawSelection(canvas, it, scheme);
@@ -873,12 +879,10 @@ class _YearlyPainter extends CustomPainter {
     }
   }
 
+  /// 时间段端点的圆点（v2.5：方块改圆点，与时间点节点同半径）。
   void _drawBreak(Canvas canvas, double x, double y, Color color,
-      [double size = 8]) {
-    canvas.drawRect(
-      Rect.fromCenter(center: Offset(x, y), width: size, height: size),
-      Paint()..color = color,
-    );
+      [double radius = 5]) {
+    canvas.drawCircle(Offset(x, y), radius, Paint()..color = color);
   }
 
   @override

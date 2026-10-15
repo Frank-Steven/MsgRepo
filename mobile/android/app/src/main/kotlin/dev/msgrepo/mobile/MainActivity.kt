@@ -49,7 +49,11 @@ class MainActivity : FlutterActivity() {
                     // PackageManager 查询较慢，放后台线程（Result 可跨线程回调）。
                     "getInstalledApps" -> {
                         Thread {
-                            result.success(installedAppsJson())
+                            try {
+                                result.success(installedAppsJson())
+                            } catch (t: Throwable) {
+                                result.success("[]")
+                            }
                         }.start()
                     }
 
@@ -60,7 +64,11 @@ class MainActivity : FlutterActivity() {
                             result.success(null)
                         } else {
                             Thread {
-                                result.success(appIconPng(pkg))
+                                try {
+                                    result.success(appIconPng(pkg))
+                                } catch (t: Throwable) {
+                                    result.success(null)
+                                }
                             }.start()
                         }
                     }

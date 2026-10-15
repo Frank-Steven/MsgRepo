@@ -40,6 +40,9 @@ class MessagesPageState extends State<MessagesPage> {
   final Set<String> _selected = {};
   final Set<String> _collapsed = {};
 
+  /// 通知监听权限（v2.5：null=未知；false 时顶部显示恢复引导横幅）。
+  bool? _listenerEnabled;
+
   StreamSubscription<int>? _sub;
 
   @override
@@ -56,31 +59,44 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
+  /// v2.5：消息与来源是关键路径；已完成任务 id 集（筛选/划线用）失败不阻塞
+  /// 列表展示——此前三者同处一个 Future.wait，任一路失败会让列表永远停在
+  /// 「加载中…」（表现为"消息抓取失效"）。
   Future<void> reload() async {
-    final results = await Future.wait([
-      _db.getMessages(packageName: _appFilter),
-      _db.getDistinctMessageSources(),
-      _db.getTasks(status: TaskStatus.done),
-    ]);
-    final messages = results[0] as List<Message>;
-    final sources = results[1] as List<SourceApp>;
-    final doneTasks = results[2] as List<Task>;
-    if (!mounted) return;
-    setState(() {
-      _messages = messages
-          .where((m) => m.status != MessageStatus.archived)
-          .toList();
-      _sources = sources;
-      _doneTaskIds = {for (final t in doneTasks) t.id};
-      _loading = false;
-      // 所选应用的消息可能已不存在，回退到全部
-      if (_appFilter != null &&
-          !_sources.any((s) => s.packageName == _appFilter)) {
-        _appFilter = null;
-      }
-      _selected.removeWhere((id) => !_messages.any((m) => m.id == id));
-      if (_selected.isEmpty) _selecting = false;
-    });
+    try {
+      final results = await Future.wait([
+        _db.getMessages(packageName: _appFilter),
+        _db.getDistinctMessageSources(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _messages = (results[0] as List<Message>)
+            .where((m) => m.status != MessageStatus.archived)
+            .toList();
+        _sources = results[1] as List<SourceApp>;
+        _loading = false;
+        // 所选应用的消息可能已不存在，回退到全部
+        if (_appFilter != null &&
+            !_sources.any((s) => s.packageName == _appFilter)) {
+          _appFilter = null;
+        }
+        _selected.removeWhere((id) => !_messages.any((m) => m.id == id));
+        if (_selected.isEmpty) _selecting = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+    // 尽力加载：已完成任务 id 集（「已完成」筛选 + 行划线）
+    try {
+      final doneTasks = await _db.getTasks(status: TaskStatus.done);
+      if (!mounted) return;
+      setState(() => _doneTaskIds = {for (final t in doneTasks) t.id});
+    } catch (_) {}
+    // 通知监听权限状态（v2.5：丢失时页面顶部给恢复引导）
+    try {
+      final enabled = await NotificationBridge.instance.isListenerEnabled();
+      if (mounted) setState(() => _listenerEnabled = enabled);
+    } catch (_) {}
   }
 
   bool _isLinkedDone(Message m) =>
@@ -539,6 +555,36 @@ class MessagesPageState extends State<MessagesPage> {
     );
   }
 
+  /// 通知监听权限丢失横幅（v2.5）：重装/系统回收权限后用户可自行恢复。
+  Widget _buildListenerBanner(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Row(
+          children: [
+            Icon(Icons.notifications_off_outlined,
+                size: 18, color: cs.onErrorContainer),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('通知监听未授权，无法自动采集消息',
+                  style: TextStyle(fontSize: 13, color: cs.onErrorContainer)),
+            ),
+            TextButton(
+              onPressed: () async {
+                await NotificationBridge.instance.openListenerSettings();
+                await Future.delayed(const Duration(seconds: 1));
+                reload();
+              },
+              child: const Text('去授权'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildList() {
     final grouped = _grouped;
     final empty = grouped.values.every((l) => l.isEmpty);
@@ -665,6 +711,7 @@ class MessagesPageState extends State<MessagesPage> {
       appBar: _buildAppBar(),
       body: Column(
         children: [
+          if (_listenerEnabled == false) _buildListenerBanner(context),
           _buildFilterRow(context),
           const Divider(height: 1),
           Expanded(

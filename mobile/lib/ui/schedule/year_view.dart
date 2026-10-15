@@ -794,9 +794,9 @@ class _YearPainter extends CustomPainter {
             ..strokeWidth = it.lane.isSubtask ? 1.5 : 2.5
             ..strokeCap = StrokeCap.round,
         );
-        _drawEnd(canvas, it.x1, it.y, color, it.lane.extendsBefore, true,
+        _drawEnd(canvas, it.x1, it.y, color, it.lane.extendsBefore,
             it.lane.isSubtask);
-        _drawEnd(canvas, it.x2, it.y, color, it.lane.extendsAfter, false,
+        _drawEnd(canvas, it.x2, it.y, color, it.lane.extendsAfter,
             it.lane.isSubtask);
       } else {
         canvas.drawCircle(Offset(it.x1, it.y),
@@ -833,22 +833,14 @@ class _YearPainter extends CustomPainter {
     }
   }
 
-  /// 端点：普通端点画圆点；延伸出年边界的端点画斜切箭头指出边界。
-  void _drawEnd(Canvas canvas, double x, double y, Color color,
-      bool extendsOut, bool isStart,
+  /// 端点：真实起终点画圆点；延伸出年边界的截断端不画任何端点
+  /// （v2.5：取消斜切箭头，线段直接截断在网格边界）。
+  void _drawEnd(
+      Canvas canvas, double x, double y, Color color, bool extendsOut,
       [bool isSubtask = false]) {
-    if (!extendsOut) {
-      canvas.drawCircle(Offset(x, y), isSubtask ? _nodeR - 1.5 : _nodeR,
-          Paint()..color = color);
-      return;
-    }
-    final dir = isStart ? -1.0 : 1.0;
-    final path = Path()
-      ..moveTo(x + dir * 7, y)
-      ..lineTo(x, y - 4.5)
-      ..lineTo(x, y + 4.5)
-      ..close();
-    canvas.drawPath(path, Paint()..color = color);
+    if (extendsOut) return;
+    canvas.drawCircle(Offset(x, y), isSubtask ? _nodeR - 1.5 : _nodeR,
+        Paint()..color = color);
   }
 
   @override

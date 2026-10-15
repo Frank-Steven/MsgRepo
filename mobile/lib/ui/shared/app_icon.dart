@@ -69,12 +69,10 @@ class _AppIconState extends State<AppIcon> {
       return SizedBox(width: size, height: size);
     }
     final cs = Theme.of(context).colorScheme;
-    final label = (widget.appName?.isNotEmpty == true
-            ? widget.appName!
-            : widget.packageName)
-        .characters
-        .first
-        .toUpperCase();
+    final name = (widget.appName?.isNotEmpty == true
+        ? widget.appName!
+        : widget.packageName);
+    final label = name.isEmpty ? '?' : name.characters.first.toUpperCase();
     return Container(
       width: size,
       height: size,
