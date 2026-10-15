@@ -36,6 +36,13 @@ export interface AIProvider {
     registry: CategoryRegistry,
     options: EvaluateOptions,
   ): Promise<EvalResult>;
+  /** v2.6.1 批量流式评估（可选实现，省 Token）：多条消息合并一次请求，
+   *  结果按 messageId 一一对应返回；未实现的 provider 由管线回退为逐条评估。 */
+  evaluateBatchStreaming?(
+    messages: ProcessInputMessage[],
+    registry: CategoryRegistry,
+    options: EvaluateOptions,
+  ): Promise<Map<string, EvalResult>>;
 }
 
 /** 把用户自定义提示词追加到系统提示词末尾。 */

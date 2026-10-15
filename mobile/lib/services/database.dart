@@ -385,6 +385,15 @@ class AppDatabase {
     return {for (final r in rows) r['content_hash'] as String};
   }
 
+  /// 已处理消息的 content_hash 集（v2.6.1 省 Token：同内容已评估过的
+  /// pending 重复消息跳过送模型）。
+  Future<Set<String>> getProcessedContentHashes() async {
+    final db = await database;
+    final rows = await db.query('messages',
+        columns: ['content_hash'], where: "status = 'processed'");
+    return {for (final r in rows) r['content_hash'] as String};
+  }
+
   /// 批量插入消息（单事务；调用方负责 content_hash 预去重，v2.6 导入用）。
   Future<void> insertMessagesBatch(List<Message> messages) async {
     final db = await database;

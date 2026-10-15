@@ -129,7 +129,26 @@ class MessagesPageState extends State<MessagesPage> {
     final order = {for (var i = 0; i < ids.length; i++) ids[i]: i};
     msgs.sort(
         (a, b) => (order[a.id] ?? ids.length).compareTo(order[b.id] ?? ids.length));
-    await showAiProcessPanel(context, msgs, onChanged: reload);
+    // v2.6.1 省 Token：pending 且同内容已有 processed 记录的消息跳过送模型；
+    // 已 processed 的消息是用户显式「重新处理」，照常放行
+    final processedHashes = await _db.getProcessedContentHashes();
+    if (!mounted) return;
+    final toProcess = <Message>[];
+    var skipped = 0;
+    for (final m in msgs) {
+      if (m.status == MessageStatus.pending &&
+          processedHashes.contains(m.contentHash)) {
+        skipped++;
+      } else {
+        toProcess.add(m);
+      }
+    }
+    if (skipped > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('跳过 $skipped 条已处理过的重复消息')));
+    }
+    if (toProcess.isEmpty) return;
+    await showAiProcessPanel(context, toProcess, onChanged: reload);
     await reload();
   }
 

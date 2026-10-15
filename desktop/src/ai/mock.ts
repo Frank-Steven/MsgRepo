@@ -33,34 +33,7 @@ export class MockProvider implements AIProvider {
     _registry: CategoryRegistry,
     options: EvaluateOptions,
   ): Promise<EvalResult> {
-    const text = `${message.title}\n${message.body}`;
-    const category = classify(text);
-    const timeMs = extractTimeMs(text, message.postedAt);
-
-    const priority: EvalPriority =
-      category === "coupon"
-        ? "junk"
-        : category === "verification"
-          ? "red"
-          : category === "generic"
-            ? "green"
-            : "yellow";
-    let taskDraft: TaskDraft | null = null;
-    if ((category === "schedule" || category === "todo") && timeMs) {
-      const d = new Date(timeMs);
-      const two = (n: number) => String(n).padStart(2, "0");
-      taskDraft = {
-        title: message.title || message.body.slice(0, 20),
-        kind: "point",
-        startAt: `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}`,
-        priority: category === "schedule" ? "important" : "normal",
-      };
-    }
-    const result: EvalResult = {
-      priority,
-      reason: `规则引擎命中分类 ${category}`,
-      taskDraft,
-    };
+    const result = evaluateOne(message);
     // 模拟流式：把结果 JSON 分段回调，便于无模型时验证 token 透传链路
     const raw = JSON.stringify(result);
     for (let i = 0; i < raw.length; i += 16) {
@@ -68,6 +41,26 @@ export class MockProvider implements AIProvider {
       await new Promise((r) => setImmediate(r));
     }
     return result;
+  }
+
+  /** v2.6.1 批量流式评估的规则版：逐条套规则后合并成结果数组模拟输出。 */
+  async evaluateBatchStreaming(
+    messages: ProcessInputMessage[],
+    _registry: CategoryRegistry,
+    options: EvaluateOptions,
+  ): Promise<Map<string, EvalResult>> {
+    const results = new Map<string, EvalResult>();
+    const arr = messages.map((m) => {
+      const r = evaluateOne(m);
+      results.set(m.id, r);
+      return { messageId: m.id, ...r };
+    });
+    const raw = JSON.stringify(arr);
+    for (let i = 0; i < raw.length; i += 16) {
+      options.onToken?.(raw.slice(i, i + 16));
+      await new Promise((r) => setImmediate(r));
+    }
+    return results;
   }
 
   private buildItem(msg: RawMessage, registry: CategoryRegistry): StructuredItem {
@@ -159,6 +152,39 @@ export class MockProvider implements AIProvider {
       processedBy: { provider: this.name, pipelineVersion: PIPELINE_VERSION },
     };
   }
+}
+
+// ---- 单条评估规则（evaluateStreaming / evaluateBatchStreaming 共用） ----
+
+function evaluateOne(message: ProcessInputMessage): EvalResult {
+  const text = `${message.title}\n${message.body}`;
+  const category = classify(text);
+  const timeMs = extractTimeMs(text, message.postedAt);
+
+  const priority: EvalPriority =
+    category === "coupon"
+      ? "junk"
+      : category === "verification"
+        ? "red"
+        : category === "generic"
+          ? "green"
+          : "yellow";
+  let taskDraft: TaskDraft | null = null;
+  if ((category === "schedule" || category === "todo") && timeMs) {
+    const d = new Date(timeMs);
+    const two = (n: number) => String(n).padStart(2, "0");
+    taskDraft = {
+      title: message.title || message.body.slice(0, 20),
+      kind: "point",
+      startAt: `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}`,
+      priority: category === "schedule" ? "important" : "normal",
+    };
+  }
+  return {
+    priority,
+    reason: `规则引擎命中分类 ${category}`,
+    taskDraft,
+  };
 }
 
 // ---- 分类规则（顺序即优先级） ----

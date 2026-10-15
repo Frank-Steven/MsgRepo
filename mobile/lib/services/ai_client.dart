@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:characters/characters.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/message.dart';
 import 'categories.dart';
+import 'junk_rules.dart';
 
 /// AI 接口配置（设计 §8.1/§9）。电脑端条目自动生成（isDesktop=true），不持久化、不可删；
 /// 远程接口以 JSON 列表存 shared_preferences。
@@ -361,11 +363,35 @@ class AiClient {
 
   // ---- 处理 ----
 
+  /// 单次批量的消息数上限（v2.6.1 省 Token：批量合并请求，分批发送）。
+  static const batchSize = 10;
+
   /// 路由（设计 §8.1）：电脑端在线走 /v1/process，否则走默认远程接口。
+  /// v2.6.1 省 Token 策略：送模型前先跑本地垃圾规则预过滤（命中直接判
+  /// junk、reason 标「规则判定」，不消耗 Token）；其余按 [batchSize] 分批，
+  /// 每批合并为一次请求（系统提示词只传一次）。
   Stream<AiEvent> process(List<Message> msgs) async* {
     _cancelled = false;
     if (msgs.isEmpty) {
       yield const AiAllDone(0, 0);
+      return;
+    }
+    // 本地规则预过滤（两端同一套规则，desktop/src/ai/junk-rules.ts）
+    final toEval = <Message>[];
+    for (final m in msgs) {
+      final hit = junkRuleHit(m);
+      if (hit != null) {
+        yield AiMessageResult(AiProcessResult(
+          messageId: m.id,
+          priority: MessagePriority.junk,
+          reason: hit,
+        ));
+      } else {
+        toEval.add(m);
+      }
+    }
+    if (toEval.isEmpty) {
+      yield AiAllDone(msgs.length, 0);
       return;
     }
     final prefs = await SharedPreferences.getInstance();
@@ -374,7 +400,7 @@ class AiClient {
     if (await isDesktopOnline()) {
       final settled = <String>{};
       try {
-        await for (final ev in _processViaDesktop(msgs, customPrompt)) {
+        await for (final ev in _processViaDesktop(toEval, customPrompt)) {
           if (ev is AiMessageResult) settled.add(ev.result.messageId);
           if (ev is AiMessageError) settled.add(ev.messageId);
           yield ev;
@@ -383,37 +409,43 @@ class AiClient {
       } on AiException catch (e) {
         // 通道层失败（连不上/配对失败/断流）：只标记尚无结果的消息
         var failed = 0;
-        for (final m in msgs) {
+        for (final m in toEval) {
           if (settled.contains(m.id)) continue;
           failed++;
           yield AiMessageError(m.id, e.message);
         }
-        yield AiAllDone(msgs.length, failed);
+        yield AiAllDone(toEval.length, failed);
         return;
       }
     }
 
     final endpoint = await defaultRemoteEndpoint();
     if (endpoint == null) {
-      for (final m in msgs) {
+      for (final m in toEval) {
         yield AiMessageError(m.id, '电脑端不在线且未配置远程 AI 接口（设置 → AI 接口）');
       }
-      yield AiAllDone(msgs.length, msgs.length);
+      yield AiAllDone(toEval.length, toEval.length);
       return;
     }
     var failed = 0;
-    for (final m in msgs) {
+    // 批量合并请求：每批一次调用，流式原文归到批首消息的卡片，
+    // 完成后按 messageId 拆分结果（v2.6.1）
+    for (var i = 0; i < toEval.length; i += batchSize) {
       if (_cancelled) break;
+      final batch = toEval.sublist(
+          i, i + batchSize > toEval.length ? toEval.length : i + batchSize);
       try {
-        await for (final ev in _processOneViaRemote(m, endpoint, customPrompt)) {
+        await for (final ev in _processBatchViaRemote(batch, endpoint, customPrompt)) {
           yield ev;
         }
       } on AiException catch (e) {
-        failed++;
-        yield AiMessageError(m.id, e.message);
+        failed += batch.length;
+        for (final m in batch) {
+          yield AiMessageError(m.id, e.message);
+        }
       }
     }
-    yield AiAllDone(msgs.length, failed);
+    yield AiAllDone(toEval.length, failed);
   }
 
   // ---- 电脑端通道：POST /v1/process，NDJSON 事件流 ----
@@ -520,9 +552,12 @@ class AiClient {
 
   // ---- 远程接口：OpenAI 兼容 /chat/completions，SSE 自行解析 ----
 
-  Stream<AiEvent> _processOneViaRemote(
-      Message msg, AiEndpoint endpoint, String customPrompt) async* {
+  /// 批量评估（v2.6.1）：多条消息合并一次请求，schema 返回结果数组按
+  /// messageId 一一对应；流式原始输出归到批首消息的卡片，完成后按消息拆分。
+  Stream<AiEvent> _processBatchViaRemote(
+      List<Message> batch, AiEndpoint endpoint, String customPrompt) async* {
     final now = DateTime.now();
+    final streamId = batch.first.id; // 流式原文归属的卡片（批首消息）
 
     final req = http.Request(
         'POST', Uri.parse('${endpoint.baseUrl}/chat/completions'));
@@ -535,8 +570,8 @@ class AiClient {
       'temperature': 0,
       'stream': true,
       'messages': [
-        {'role': 'system', 'content': _buildSystemPrompt(customPrompt)},
-        {'role': 'user', 'content': _buildUserContent(msg, now)},
+        {'role': 'system', 'content': _buildBatchSystemPrompt(customPrompt)},
+        {'role': 'user', 'content': _buildBatchUserContent(batch, now)},
       ],
     });
 
@@ -567,10 +602,18 @@ class AiClient {
         final content = (delta is Map) ? delta['content'] : null;
         if (content is String && content.isNotEmpty) {
           full.write(content);
-          yield AiTokenDelta(msg.id, content);
+          yield AiTokenDelta(streamId, content);
         }
       }
-      yield AiMessageResult(_parseEvalOutput(msg.id, full.toString()));
+      final results = parseBatchEvalOutput(batch, full.toString());
+      for (final m in batch) {
+        final r = results[m.id];
+        if (r != null) {
+          yield AiMessageResult(r);
+        } else {
+          yield AiMessageError(m.id, '模型未返回该条结果');
+        }
+      }
     } on AiException {
       rethrow;
     } catch (e) {
@@ -582,18 +625,20 @@ class AiClient {
     }
   }
 
-  /// 与 desktop 端 buildEvalSystemPrompt 同结构的提示词（精简 schema，设计 §8.2）。
-  /// 分类参考用内置的 kPromptCategories。
-  String _buildSystemPrompt(String customPrompt) {
+  /// 批量评估系统提示词（与 desktop buildEvalBatchSystemPrompt 逐条一致，
+  /// 设计 §8.2）：schema 为结果数组，元素按 messageId 对应输入消息。
+  String _buildBatchSystemPrompt(String customPrompt) {
     final catList = kPromptCategories
         .map((c) =>
             '- ${c.key}（${c.displayName}）: ${c.description}'
             '${c.priorityHints != null ? ' 优先级提示：${c.priorityHints}' : ''}')
         .join('\n');
-    var prompt = '你是消息评估助手。为消息输出一个 JSON 对象：\n'
-        '{"priority":"red|yellow|green|junk","reason":"一句话理由","taskDraft":null 或 '
+    var prompt = '你是消息评估助手。用户消息里有「消息列表」，为其中每条消息输出一个评估对象，'
+        '整体组成一个 JSON 数组（顺序与输入一致）：\n'
+        '[{"messageId":"输入消息的 messageId","priority":"red|yellow|green|junk",'
+        '"reason":"一句话理由","taskDraft":null 或 '
         '{"title":"...","description":"...","kind":"point|range","startAt":"YYYY-MM-DDTHH:mm",'
-        '"endAt":"YYYY-MM-DDTHH:mm","priority":"important|normal|minor"}}\n'
+        '"endAt":"YYYY-MM-DDTHH:mm","priority":"important|normal|minor"}}]\n'
         'priority 语义：red=重要、yellow=值得关注、green=一般、junk=垃圾（营销、推广、无用系统提示等）。'
         '判断重要与垃圾是首要职责。结合来源应用与会话语境判断（如银行/支付类通知多重要、'
         '应用商店的推广多为垃圾）。\n'
@@ -609,7 +654,7 @@ class AiClient {
         '时间用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），相对日期（如"本周五""下周一"）'
         '查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间：若字面日期标注了"已过去"，顺延到下一个未来的同名日期。\n'
         '分类参考（辅助判断重要性与垃圾）：\n$catList\n'
-        '只输出 JSON。';
+        '只输出 JSON 数组。';
     if (customPrompt.isNotEmpty) {
       prompt +=
           '\n用户附加要求（优先级高于默认规则，但不违反输出 JSON 格式）：\n$customPrompt';
@@ -617,19 +662,35 @@ class AiClient {
     return prompt;
   }
 
-  String _buildUserContent(Message msg, DateTime now) {
+  /// 上下文裁剪（v2.6.1 省 Token）：标题 100 字符、正文 500 字符截断。
+  static const titleMaxChars = 100;
+  static const bodyMaxChars = 500;
+
+  static String _truncate(String text, int max) {
+    final chars = text.characters;
+    if (chars.length <= max) return text;
+    return '${chars.take(max)}…（已截断）';
+  }
+
+  String _buildBatchUserContent(List<Message> batch, DateTime now) {
     String fmt(DateTime d) =>
         '${d.year}年${d.month}月${d.day}日（周${'日一二三四五六'[d.weekday % 7]}）'
         ' ${d.hour}:${d.minute.toString().padLeft(2, '0')}';
     return jsonEncode({
       '基准时间': fmt(now),
       '日期对照表': _buildDateHints(now),
-      '消息时间': fmt(DateTime.fromMillisecondsSinceEpoch(msg.postedAt)),
-      '来源应用': msg.appName,
-      '会话': msg.conversationTitle,
-      '发送者': msg.sender,
-      '标题': msg.title,
-      '正文': msg.body,
+      '消息列表': [
+        for (final m in batch)
+          {
+            'messageId': m.id,
+            '消息时间': fmt(DateTime.fromMillisecondsSinceEpoch(m.postedAt)),
+            '来源应用': m.appName,
+            '会话': m.conversationTitle,
+            '发送者': m.sender,
+            '标题': _truncate(m.title, titleMaxChars),
+            '正文': _truncate(m.body, bodyMaxChars),
+          },
+      ],
     });
   }
 
@@ -653,33 +714,46 @@ class AiClient {
     return lines.join('\n');
   }
 
-  String _normalizePriority(dynamic v) {
+  static String _normalizePriority(dynamic v) {
     const valid = ['red', 'yellow', 'green', 'junk'];
     return valid.contains(v) ? v as String : 'green';
   }
 
-  /// 解析模型累积全文为评估结果：容忍 markdown 围栏/前后缀文字。
-  AiProcessResult _parseEvalOutput(String messageId, String content) {
-    final start = content.indexOf('{');
-    final end = content.lastIndexOf('}');
+  /// 解析批量评估输出：取首个 [ 到末个 ] 的 JSON 数组，按 messageId 建 map。
+  /// 容忍 markdown 围栏/前后缀文字；数组中缺 messageId 或 id 不在批次内的
+  /// 元素忽略；完全没有合法数组时抛 AiException（整批报错）。
+  static Map<String, AiProcessResult> parseBatchEvalOutput(
+      List<Message> batch, String content) {
+    final start = content.indexOf('[');
+    final end = content.lastIndexOf(']');
     if (start == -1 || end <= start) {
-      throw AiException('模型未返回 JSON：${content.substring(0, content.length > 200 ? 200 : content.length)}');
+      throw AiException(
+          '模型未返回 JSON 数组：${content.substring(0, content.length > 200 ? 200 : content.length)}');
     }
-    Map<String, dynamic> out;
+    List<dynamic> arr;
     try {
-      out = (jsonDecode(content.substring(start, end + 1)) as Map)
-          .cast<String, dynamic>();
+      arr = jsonDecode(content.substring(start, end + 1)) as List<dynamic>;
     } catch (e) {
       throw AiException('模型输出 JSON 解析失败：$e');
     }
-    final draft = out['taskDraft'];
-    return AiProcessResult(
-      messageId: messageId,
-      priority: _normalizePriority(out['priority']),
-      reason: out['reason'] as String? ?? '',
-      taskDraft:
-          draft is Map ? AiTaskDraft.fromJson(draft.cast<String, dynamic>()) : null,
-    );
+    final known = {for (final m in batch) m.id};
+    final results = <String, AiProcessResult>{};
+    for (final item in arr) {
+      if (item is! Map) continue;
+      final map = item.cast<String, dynamic>();
+      final id = map['messageId'] as String?;
+      if (id == null || !known.contains(id)) continue;
+      final draft = map['taskDraft'];
+      results[id] = AiProcessResult(
+        messageId: id,
+        priority: _normalizePriority(map['priority']),
+        reason: map['reason'] as String? ?? '',
+        taskDraft: draft is Map
+            ? AiTaskDraft.fromJson(draft.cast<String, dynamic>())
+            : null,
+      );
+    }
+    return results;
   }
 
   /// StreamedResponse 字节流 → utf8 分行（跨 chunk 的行缓存拼接）。

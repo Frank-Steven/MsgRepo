@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import type { AIProvider } from "./ai/provider.js";
+import { junkRuleHit } from "./ai/junk-rules.js";
 import type { Store } from "./store.js";
 import type {
   CategoryRegistry,
@@ -280,9 +281,15 @@ export interface ProcessStreamingOptions {
   onEvent?: (event: ProcessEvent) => void;
 }
 
+/** 单次批量的消息数上限（v2.6.1 省 Token：批量合并请求，分批发送；
+ *  与 mobile AiClient.batchSize 一致）。 */
+export const EVAL_BATCH_SIZE = 10;
+
 /**
- * 逐条流式评估：每条消息独立调 provider.evaluateStreaming，token 逐段透传、
- * 结果/失败逐条回调；单条失败不影响后续消息。不落盘（电脑端无业务数据，设计 §11）。
+ * v2.6.1：先跑本地垃圾规则预过滤（命中直接判 junk，不消耗 Token）；其余消息
+ * provider 支持批量时按 EVAL_BATCH_SIZE 分批合并请求（token 事件归批首消息，
+ * 结果按 messageId 拆分），不支持时回退逐条评估。单条/单批失败不影响后续。
+ * 不落盘（电脑端无业务数据，设计 §11）。
  */
 export async function processStreaming(
   messages: ProcessInputMessage[],
@@ -292,7 +299,50 @@ export async function processStreaming(
 ): Promise<{ total: number; failed: number }> {
   const emit = options.onEvent ?? (() => undefined);
   let failed = 0;
+
+  // 本地规则预过滤（两端同一套规则：mobile/lib/services/junk_rules.dart）
+  const toEval: ProcessInputMessage[] = [];
   for (const msg of messages) {
+    const hit = junkRuleHit(msg);
+    if (hit) {
+      emit({ type: "result", messageId: msg.id, priority: "junk", reason: hit, taskDraft: null });
+    } else {
+      toEval.push(msg);
+    }
+  }
+  if (toEval.length === 0) return { total: messages.length, failed };
+
+  if (typeof provider.evaluateBatchStreaming === "function") {
+    for (let i = 0; i < toEval.length; i += EVAL_BATCH_SIZE) {
+      const batch = toEval.slice(i, i + EVAL_BATCH_SIZE);
+      const streamId = batch[0].id; // 流式原文归批首消息的卡片
+      try {
+        const results = await provider.evaluateBatchStreaming(batch, registry, {
+          customPrompt: options.customPrompt,
+          now: options.now,
+          onToken: (delta) => emit({ type: "token", messageId: streamId, delta }),
+        });
+        for (const msg of batch) {
+          const result = results.get(msg.id);
+          if (result) {
+            emit({ type: "result", messageId: msg.id, ...result });
+          } else {
+            failed++;
+            emit({ type: "error", messageId: msg.id, error: "模型未返回该条结果" });
+          }
+        }
+      } catch (err) {
+        failed += batch.length;
+        for (const msg of batch) {
+          emit({ type: "error", messageId: msg.id, error: String(err) });
+        }
+      }
+    }
+    return { total: messages.length, failed };
+  }
+
+  // 回退：provider 不支持批量时逐条评估
+  for (const msg of toEval) {
     if (typeof provider.evaluateStreaming !== "function") {
       failed++;
       emit({
