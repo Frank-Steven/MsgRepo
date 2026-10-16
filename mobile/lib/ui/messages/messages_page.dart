@@ -139,6 +139,7 @@ class MessagesPageState extends State<MessagesPage> {
 
   /// 发起 AI 处理。[reprocess]=true 仅用于单条左滑「重新处理」——
   /// 已 processed 的消息只有这条路径允许再次发起（v2.6.2）。
+  /// v2.6.4 连续排队：随时可追加，挂到队列尾部按序处理，不等上一批跑完。
   Future<void> _processWithAi(List<String> ids, {bool reprocess = false}) async {
     final msgs = await _db.getMessagesByIds(ids);
     if (msgs.isEmpty || !mounted) return;
@@ -157,25 +158,19 @@ class MessagesPageState extends State<MessagesPage> {
       processingIds: svc.processingIds,
       processedHashes: processedHashes,
     );
+    // v2.6.4：追加进队列时再按会话内 id 去重（队列/处理中/待确认结果）
+    final (added, skippedInSession) = svc.enqueue(toProcess);
     final parts = <String>[
       if (skipped['processed'] case final n?) '$n 条已处理',
       if (skipped['processing'] case final n?) '$n 条正在处理',
       if (skipped['duplicate'] case final n?) '$n 条重复内容',
+      if (skippedInSession > 0) '$skippedInSession 条已在会话中',
     ];
     if (parts.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('跳过 ${parts.join('、')}')));
     }
-    if (toProcess.isEmpty) return;
-    // 会话交给服务层常驻（v2.6.2 后台处理）；上一批未收尾时拒绝发起
-    final error = svc.start(toProcess);
-    if (error != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error)));
-      }
-      return;
-    }
+    if (added == 0) return;
     await showAiProcessPanel(context, onChanged: reload);
     await reload();
   }
@@ -639,14 +634,26 @@ class MessagesPageState extends State<MessagesPage> {
     );
   }
 
-  /// AI 处理全局指示（v2.6.2）：处理中显示进度条，后台跑完显示「N 条待确认」；
+  /// AI 处理全局指示（v2.6.2；v2.6.4 排队模型聚合文案）：处理中显示
+  /// 「已处理 x/y · 待确认 n」，队列排空后显示待确认/失败入口；
   /// 点击回到面板继续确认流。会话状态变化经 _onAiProcessingChanged 触发重建。
   Widget _buildAiIndicator(BuildContext context) {
     final session = AiProcessingService.instance.session;
     if (session == null) return const SizedBox.shrink();
     final running = session.running;
     final pending = session.pendingConfirmCount;
-    if (!running && pending == 0) return const SizedBox.shrink();
+    final failed = session.failCount;
+    if (!running && pending == 0 && failed == 0) return const SizedBox.shrink();
+    final String text;
+    if (running) {
+      text = 'AI 处理中 ${session.settledCount}/${session.enqueuedCount}'
+          ' · 待确认 $pending，点击查看';
+    } else if (pending > 0) {
+      text = 'AI 处理完成：$pending 条结果待确认'
+          '${failed > 0 ? '，$failed 条失败' : ''}';
+    } else {
+      text = 'AI 处理完成：$failed 条失败，点击查看';
+    }
     final cs = Theme.of(context).colorScheme;
     return Material(
       color: cs.primaryContainer,
@@ -670,9 +677,7 @@ class MessagesPageState extends State<MessagesPage> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  running
-                      ? 'AI 处理中 ${session.doneCount}/${session.total}，点击查看'
-                      : 'AI 处理完成：$pending 条结果待确认',
+                  text,
                   style:
                       TextStyle(fontSize: 13, color: cs.onPrimaryContainer),
                 ),

@@ -100,9 +100,10 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     _showUndoSnack('已确认 $count 条 AI 结果');
   }
 
-  /// 关闭：还有待确认结果时会话保留（消息页入口可回来继续确认），否则收尾清空。
+  /// 关闭：交由服务层收尾（队列空且无待确认结果才清空会话；否则会话保留，
+  /// 消息页入口可回来继续确认/观看进度）。
   void _close() {
-    if (_svc.pendingConfirmCount == 0) _svc.clear();
+    _svc.closePanel();
     Navigator.of(context).pop();
   }
 
@@ -148,7 +149,9 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text('AI 处理中',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
-            Text('已完成 ${session.doneCount}/共 ${session.total} 条',
+            Text(
+                '已处理 ${session.settledCount}/${session.enqueuedCount}'
+                ' · 待确认 ${session.pendingConfirmCount}',
                 style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
             TextButton(onPressed: _cancel, child: const Text('取消')),
             TextButton(onPressed: _goBackground, child: const Text('后台')),
@@ -306,23 +309,18 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // v2.4：checkbox 勾选决定「确认选中」的批量范围；已确认显示对勾
-            if (o.confirmed)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Icon(Icons.check_circle, color: cs.primary, size: 20),
-              )
-            else
-              SizedBox(
-                width: 32,
-                height: 32,
-                child: Checkbox(
-                  value: o.checked,
-                  visualDensity: VisualDensity.compact,
-                  onChanged: (v) =>
-                      setState(() => o.checked = v ?? false),
-                ),
+            // v2.4：checkbox 勾选决定「确认选中」的批量范围；
+            // v2.6.4：确认过的条目已从列表移除，剩下的都待确认
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: Checkbox(
+                value: o.checked,
+                visualDensity: VisualDensity.compact,
+                onChanged: (v) =>
+                    setState(() => o.checked = v ?? false),
               ),
+            ),
             const SizedBox(width: 6),
             Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -370,11 +368,10 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         .length;
     final draftCount =
         outcomes.where((o) => o.result?.taskDraft != null).length;
-    final unconfirmedCount =
-        outcomes.where((o) => o.result != null && !o.confirmed).length;
-    final checkedCount = outcomes
-        .where((o) => o.result != null && !o.confirmed && o.checked)
-        .length;
+    // v2.6.4：确认过的条目已从列表移除，列表里有结果的条目都待确认
+    final pendingCount = session.pendingConfirmCount;
+    final checkedCount =
+        outcomes.where((o) => o.result != null && o.checked).length;
     final parts = <String>[
       '评估 $resultCount 条',
       '垃圾 $junkCount 条',
@@ -390,21 +387,21 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text('处理结果',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
-            if (unconfirmedCount > 0)
+            if (pendingCount > 0)
               TextButton(
                 onPressed: () {
-                  // 全选 / 全不选切换（只作用于未确认且有结果的条目）
-                  final anyUnchecked = outcomes.any(
-                      (o) => o.result != null && !o.confirmed && !o.checked);
+                  // 全选 / 全不选切换（只作用于有结果的待确认条目）
+                  final anyUnchecked = outcomes
+                      .any((o) => o.result != null && !o.checked);
                   setState(() {
                     for (final o in outcomes) {
-                      if (o.result != null && !o.confirmed) {
+                      if (o.result != null) {
                         o.checked = anyUnchecked;
                       }
                     }
                   });
                 },
-                child: Text(checkedCount < unconfirmedCount
+                child: Text(checkedCount < pendingCount
                     ? '全选'
                     : '全不选'),
               ),
@@ -413,7 +410,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                   ? null
                   : () => _confirm([
                         for (final o in outcomes)
-                          if (o.result != null && !o.confirmed && o.checked) o,
+                          if (o.result != null && o.checked) o,
                       ]),
               child: Text(checkedCount == 0
                   ? '确认选中'
@@ -423,19 +420,13 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
             TextButton(
               onPressed: _close,
               child: Text(
-                  unconfirmedCount > 0 ? '稍后确认' : '关闭'),
+                  pendingCount > 0 ? '稍后确认' : '关闭'),
             ),
           ],
         ),
         const SizedBox(height: 4),
         Text(parts.join(' / '),
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-        if (session.fatalError != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(session.fatalError!,
-                style: TextStyle(fontSize: 13, color: cs.error)),
-          ),
         const Divider(height: 16),
         Expanded(
           child: ListView(
