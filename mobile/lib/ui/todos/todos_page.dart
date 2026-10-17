@@ -54,6 +54,9 @@ class TodosPageState extends State<TodosPage> {
   Map<String, (int, int)> _progress = {};
   bool _loading = true;
 
+  /// 截断提示只提示一次/会话（P3-8）
+  bool _limitHintShown = false;
+
   /// 折叠的父任务 id（设计 §3：子任务在父行下缩进，默认展开）。
   final Set<String> _collapsedParents = {};
 
@@ -92,6 +95,7 @@ class TodosPageState extends State<TodosPage> {
       db.getTasks(status: TaskStatus.done),
       db.getTasks(status: TaskStatus.archived),
       db.getSubtaskProgress(),
+      db.countTasks(),
     ]);
     final active = results[0] as List<Task>;
     final untimed = results[1] as List<Task>;
@@ -107,6 +111,21 @@ class TodosPageState extends State<TodosPage> {
     }
     // getTasks 已按 start_at 升序，分组内天然有序
     if (!mounted) return;
+      // P3-8：超过默认上限时提示一次（三个状态合计与总数比较）
+      final totalTasks = results[5] as int;
+      final shownTasks =
+          active.length + untimed.length + done.length + archived.length;
+      if (shownTasks < totalTasks && !_limitHintShown) {
+        _limitHintShown = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                '任务较多：仅显示前 $shownTasks 条（共 $totalTasks 条），更早的未加载'),
+            duration: const Duration(seconds: 4),
+          ));
+        });
+      }
     setState(() {
       _byScale
         ..clear()
