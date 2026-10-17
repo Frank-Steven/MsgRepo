@@ -36,6 +36,9 @@ class MessagesPageState extends State<MessagesPage> {
   Map<String, Task> _tasksById = {};
   bool _loading = true;
 
+  /// 截断提示只提示一次/会话（P3-8）
+  bool _limitHintShown = false;
+
   /// 状态分组多选筛选（默认全选）；另含特殊键 [kFilterDone]（已完成）。
   final Set<String> _groupFilter = Set.of(kGroupOrder);
   String? _appFilter; // null = 全部应用
@@ -85,8 +88,22 @@ class MessagesPageState extends State<MessagesPage> {
       final results = await Future.wait([
         _db.getMessages(packageName: _appFilter),
         _db.getDistinctMessageSources(),
+        _db.countMessages(packageName: _appFilter),
       ]);
       if (!mounted) return;
+      // P3-8：超过默认上限时提示一次，不再静默截断
+      final total = results[2] as int;
+      final fetched = (results[0] as List<Message>).length;
+      if (fetched < total && !_limitHintShown) {
+        _limitHintShown = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('消息较多：仅显示最近 $fetched 条（共 $total 条），更早的未加载'),
+            duration: const Duration(seconds: 4),
+          ));
+        });
+      }
       setState(() {
         _messages = (results[0] as List<Message>)
             .where((m) => m.status != MessageStatus.archived)

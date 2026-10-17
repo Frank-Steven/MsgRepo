@@ -30,6 +30,10 @@ int? _intOrNull(dynamic v) => v == null ? null : (v as num).toInt();
 class AppDatabase {
   AppDatabase._();
 
+  /// 列表默认上限（P3-8）：超出时调用方应提示「仅显示前 N 条」而不是静默截断。
+  static const defaultMessageLimit = 500;
+  static const defaultTaskLimit = 1000;
+
   static final AppDatabase instance = AppDatabase._();
 
   Database? _db;
@@ -410,7 +414,8 @@ class AppDatabase {
       {String? status,
       String? packageName,
       List<String>? priorities,
-      int limit = 500}) async {
+      int limit = defaultMessageLimit,
+      int offset = 0}) async {
     final db = await database;
     final wheres = <String>[];
     final args = <Object?>[];
@@ -433,6 +438,7 @@ class AppDatabase {
       whereArgs: args.isEmpty ? null : args,
       orderBy: 'posted_at DESC',
       limit: limit,
+      offset: offset,
     );
     return rows.map(Message.fromRow).toList();
   }
@@ -536,7 +542,10 @@ class AppDatabase {
     return rows.isEmpty ? null : Task.fromRow(rows.first);
   }
 
-  Future<List<Task>> getTasks({String? status, int limit = 1000}) async {
+  Future<List<Task>> getTasks(
+      {String? status,
+      int limit = defaultTaskLimit,
+      int offset = 0}) async {
     final db = await database;
     final rows = await db.query(
       'tasks',
@@ -544,8 +553,46 @@ class AppDatabase {
       whereArgs: status != null ? [status] : null,
       orderBy: 'start_at IS NULL, start_at ASC',
       limit: limit,
+      offset: offset,
     );
     return rows.map(Task.fromRow).toList();
+  }
+
+  /// 与 [getMessages] 同条件的总条数（用于提示「仅显示前 N 条」）。
+  Future<int> countMessages(
+      {String? status, String? packageName, List<String>? priorities}) async {
+    final db = await database;
+    final wheres = <String>[];
+    final args = <Object?>[];
+    if (status != null) {
+      wheres.add('status = ?');
+      args.add(status);
+    }
+    if (packageName != null) {
+      wheres.add('package_name = ?');
+      args.add(packageName);
+    }
+    if (priorities != null && priorities.isNotEmpty) {
+      wheres.add(
+          'priority IN (${List.filled(priorities.length, '?').join(',')})');
+      args.addAll(priorities);
+    }
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS n FROM messages'
+      '${wheres.isEmpty ? '' : ' WHERE ${wheres.join(' AND ')}'}',
+      args.isEmpty ? null : args,
+    );
+    return (rows.first['n'] as num?)?.toInt() ?? 0;
+  }
+
+  /// 与 [getTasks] 同条件的总条数。
+  Future<int> countTasks({String? status}) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS n FROM tasks${status != null ? ' WHERE status = ?' : ''}',
+      status != null ? [status] : null,
+    );
+    return (rows.first['n'] as num?)?.toInt() ?? 0;
   }
 
   /// 与半开区间 [startMs, endMs) 有交集的任务（start_at 非空）。
