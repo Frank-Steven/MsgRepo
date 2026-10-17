@@ -80,112 +80,6 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(JSON.stringify(body));
 }
 
-const DASHBOARD_HTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MsgRepo 仪表盘</title>
-<style>
-  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; background: #f5f6f8; color: #222; }
-  header { background: #1f2937; color: #fff; padding: 12px 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-  header h1 { font-size: 16px; margin: 0; }
-  header input, header select { padding: 4px 8px; border-radius: 4px; border: 1px solid #ccc; }
-  header button { padding: 4px 12px; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; }
-  main { padding: 16px 20px; }
-  .card { background: #fff; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  .meta { font-size: 12px; color: #666; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #e5e7eb; }
-  .P0 { background: #fecaca; } .P1 { background: #fed7aa; } .P2 { background: #dbeafe; } .P3 { background: #e5e7eb; }
-  pre { background: #f3f4f6; padding: 8px; border-radius: 4px; font-size: 12px; overflow: auto; }
-  #status { font-size: 13px; color: #666; }
-</style>
-</head>
-<body>
-<header>
-  <h1>MsgRepo 仪表盘</h1>
-  <input id="token" placeholder="配对 token" size="28">
-  <select id="category"><option value="">全部分类</option></select>
-  <select id="priority">
-    <option value="">全部优先级</option>
-    <option>P0</option><option>P1</option><option>P2</option><option>P3</option>
-  </select>
-  <button id="reload">刷新</button>
-  <span id="status"></span>
-</header>
-<main id="list"></main>
-<script>
-const tokenInput = document.getElementById("token");
-tokenInput.value = localStorage.getItem("msgrepo_token") || "";
-tokenInput.addEventListener("change", () => localStorage.setItem("msgrepo_token", tokenInput.value));
-
-function fmtTime(t) {
-  if (!t || t.kind === "none") return "无时间";
-  const f = (ms) => new Date(ms).toLocaleString("zh-CN", { hour12: false });
-  const parts = [t.kind];
-  if (t.startAt) parts.push("开始 " + f(t.startAt));
-  if (t.endAt) parts.push("结束 " + f(t.endAt));
-  if (t.deadline) parts.push("截止 " + f(t.deadline));
-  return parts.join(" · ");
-}
-
-async function load() {
-  const status = document.getElementById("status");
-  const list = document.getElementById("list");
-  const params = new URLSearchParams();
-  const cat = document.getElementById("category").value;
-  const pri = document.getElementById("priority").value;
-  if (cat) params.set("category", cat);
-  if (pri) params.set("priority", pri);
-  try {
-    const res = await fetch("/api/items?" + params, {
-      headers: { Authorization: "Bearer " + tokenInput.value },
-    });
-    if (res.status === 401) { status.textContent = "token 无效，请填入配对 token"; list.innerHTML = ""; return; }
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    status.textContent = "共 " + data.total + " 条";
-    const catSel = document.getElementById("category");
-    const known = new Set([...catSel.options].map((o) => o.value));
-    list.innerHTML = "";
-    for (const item of data.items.slice().reverse()) {
-      if (!known.has(item.category)) {
-        const opt = document.createElement("option");
-        opt.value = item.category; opt.textContent = item.category;
-        catSel.appendChild(opt); known.add(item.category);
-      }
-      const div = document.createElement("div");
-      div.className = "card";
-      const h = document.createElement("div");
-      const title = document.createElement("strong"); title.textContent = item.title;
-      h.appendChild(title);
-      const meta = document.createElement("div");
-      meta.className = "meta";
-      const badges = [[item.priority, "badge " + item.priority], [item.category, "badge"],
-        ["置信度 " + item.confidence, "badge"], [fmtTime(item.time), "badge"],
-        ["by " + item.processedBy.provider, "badge"]];
-      for (const [text, cls] of badges) {
-        const s = document.createElement("span"); s.className = cls; s.textContent = text; meta.appendChild(s);
-      }
-      const summary = document.createElement("div");
-      summary.className = "meta"; summary.textContent = item.summary;
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(item.payload, null, 2);
-      div.append(h, meta, summary, pre);
-      list.appendChild(div);
-    }
-  } catch (e) {
-    status.textContent = "加载失败: " + e;
-  }
-}
-document.getElementById("reload").addEventListener("click", load);
-document.getElementById("category").addEventListener("change", load);
-document.getElementById("priority").addEventListener("change", load);
-load();
-</script>
-</body>
-</html>
-`;
 
 /** 需要串行化的推理端点（都直接调用本地/远程模型）。 */
 const GATED_PATHS = new Set(["/v1/process", "/v1/sync"]);
@@ -249,21 +143,7 @@ export function createServer(opts: ServerOptions): http.Server {
           deviceName: os.hostname(),
         });
       }
-      if (req.method === "GET" && (pathname === "/dashboard" || pathname === "/")) {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        return res.end(DASHBOARD_HTML);
-      }
 
-      // 以下端点需要配对 token
-      if (req.method === "GET" && pathname === "/api/items") {
-        if (!isAuthorized(req, opts.pairing.token))
-          return sendJson(res, 401, { error: "unauthorized" });
-        const items = opts.store.listItems({
-          category: url.searchParams.get("category") ?? undefined,
-          priority: url.searchParams.get("priority") ?? undefined,
-        });
-        return sendJson(res, 200, { total: items.length, items });
-      }
 
       // v2 流式评估（设计 §8/§12）：NDJSON，每行一个 token/result/error 事件，done 收尾
       if (req.method === "POST" && pathname === "/v1/process") {
