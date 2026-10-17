@@ -33,6 +33,17 @@ class NotificationCaptureService : NotificationListenerService() {
     // 本应用进程，Listener 重启后窗口清空，最终去重由 Dart 端 contentHash 保证
     private val recentKeys = LinkedHashSet<String>()
 
+    companion object {
+        /** 折叠正文前缀：[5条] */
+        private val FOLD_PREFIX = Regex("^\\[\\d+条\\]\\s*")
+
+        /** 折叠标题后缀：(5条新消息) */
+        private val FOLD_SUFFIX = Regex("\\(\\d+条新消息\\)$")
+
+        /** 折叠正文里的「发送者: 内容」前缀 */
+        private val SENDER_PREFIX = Regex("^([^:：\\n]{1,30})[:：]\\s*")
+    }
+
     private val seenAppsLock = Any()
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -49,9 +60,33 @@ class NotificationCaptureService : NotificationListenerService() {
         if (packageName == this.packageName) return
 
         val extras = notification.extras
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val rawTitle =
+            extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val rawText =
+            extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+
+        // 系统折叠通知会带「(5条新消息)」「[5条]」标记，入库前清洗（P3-13）：
+        // 否则群名会被写成「XX群(5条新消息)」，按会话聚合/AI 语境判断都会偏移。
+        val folded = FOLD_PREFIX.containsMatchIn(rawText) ||
+            FOLD_SUFFIX.containsMatchIn(rawTitle)
+        val title = FOLD_SUFFIX.replace(rawTitle, "").trim()
+        var text = FOLD_PREFIX.replace(rawText, "").trim()
         if (title.isBlank() && text.isBlank()) return
+
+        // 折叠正文常以「发送者: 内容」开头；只在确实是折叠通知且 sender 未知时拆分，
+        // 规则与 Dart 侧 database.dart::_splitFoldedMessages 保持一致。
+        var foldedSender: String? = null
+        if (folded) {
+            val m = SENDER_PREFIX.find(text)
+            if (m != null) {
+                val name = m.groupValues[1].trim()
+                val rest = text.substring(m.range.last + 1).trim()
+                if (name.isNotEmpty() && rest.isNotEmpty()) {
+                    foldedSender = name
+                    text = rest
+                }
+            }
+        }
 
         val postedAt =
             if (sbn.postTime > 0) sbn.postTime else System.currentTimeMillis()
@@ -79,7 +114,9 @@ class NotificationCaptureService : NotificationListenerService() {
         if (bundled != null && bundled.isNotEmpty()) {
             for (m in bundled) {
                 if (m !is android.os.Bundle) continue
-                val sender = m.getCharSequence("sender")?.toString().orEmpty()
+                val bundledSender =
+                    m.getCharSequence("sender")?.toString().orEmpty()
+                val sender = bundledSender.ifBlank { foldedSender ?: "" }
                 val mText = m.getCharSequence("text")?.toString().orEmpty()
                 if (mText.isBlank()) continue
                 val mTime = m.getLong("time").let { if (it > 0) it else postedAt }
@@ -92,7 +129,7 @@ class NotificationCaptureService : NotificationListenerService() {
         }
         emit(
             packageName, appName, notification.channelId, conversationTitle,
-            title, text, postedAt, null
+            title, text, postedAt, foldedSender
         )
     }
 
