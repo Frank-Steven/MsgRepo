@@ -439,9 +439,30 @@ class AiClient {
           yield ev;
         }
       } on AiException catch (e) {
-        failed += batch.length;
+        // P1-2：整批失败时降级为逐条重试。模型偶尔返回单对象/被截断，
+        // 让整批 10 条一起报废代价太大（还得多烧一次 token）。
+        if (batch.length == 1) {
+          failed++;
+          yield AiMessageError(batch.first.id, e.message);
+          continue;
+        }
         for (final m in batch) {
-          yield AiMessageError(m.id, e.message);
+          if (_cancelled) break;
+          var gotResult = false;
+          try {
+            await for (final ev
+                in _processBatchViaRemote([m], endpoint, customPrompt)) {
+              if (ev is AiMessageResult) gotResult = true;
+              yield ev;
+            }
+          } on AiException catch (e2) {
+            if (!gotResult) {
+              failed++;
+              yield AiMessageError(m.id, e2.message);
+            }
+            continue;
+          }
+          if (!gotResult) failed++;
         }
       }
     }
