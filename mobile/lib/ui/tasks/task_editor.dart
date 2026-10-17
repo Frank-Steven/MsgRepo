@@ -272,7 +272,8 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
         deriveTimeScale(_startAt, _kind == TaskKind.range ? _endAt : null));
     final eligible = _parentCandidates
         .where((t) =>
-            timeScaleRank(deriveTaskScale(t.startAt, t.endAt)) >= childRank)
+            timeScaleRank(deriveTaskScale(t.startAt, t.endAt, kind: t.kind)) >=
+                  childRank)
         .toList();
     final value =
         eligible.any((t) => t.id == _parentId) ? _parentId : null;
@@ -286,7 +287,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
           DropdownMenuItem(
             value: t.id,
             child: Text(
-              '${t.title}（${timeScaleLabel(deriveTaskScale(t.startAt, t.endAt))}）',
+              '${t.title}（${timeScaleLabel(deriveTaskScale(t.startAt, t.endAt, kind: t.kind))}）',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -354,7 +355,8 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       } else {
         final parent = candidates.first;
         final parentRank =
-            timeScaleRank(deriveTaskScale(parent.startAt, parent.endAt));
+            timeScaleRank(
+                  deriveTaskScale(parent.startAt, parent.endAt, kind: parent.kind));
         final childRank = timeScaleRank(
             deriveTimeScale(start, kind == TaskKind.range ? end : null));
         if (childRank > parentRank) {

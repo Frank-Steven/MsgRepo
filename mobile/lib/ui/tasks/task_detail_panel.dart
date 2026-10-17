@@ -105,7 +105,8 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
       ),
       child: Text(
         timeScaleLabel(deriveTaskScale(
-            widget.task.startAt, widget.task.endAt)),
+            widget.task.startAt, widget.task.endAt,
+            kind: widget.task.kind)),
         style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant),
       ),
     );

@@ -149,7 +149,8 @@ class SchedulePageState extends State<SchedulePage> {
   List<Task> _filterByScales(String view) {
     final scales = scalesForView(view);
     return _cache.values
-        .where((t) => scales.contains(deriveTaskScale(t.startAt, t.endAt)))
+        .where((t) =>
+              scales.contains(deriveTaskScale(t.startAt, t.endAt, kind: t.kind)))
         .toList();
   }
 
@@ -166,7 +167,7 @@ class SchedulePageState extends State<SchedulePage> {
         .where((t) =>
             t.status == TaskStatus.active &&
             t.startAt != null &&
-            scales.contains(deriveTaskScale(t.startAt, t.endAt)) &&
+            scales.contains(deriveTaskScale(t.startAt, t.endAt, kind: t.kind)) &&
             occurrenceOverlapping(t, vs, ve) != null)
         .toList()
       ..sort((a, b) => a.startAt!.compareTo(b.startAt!));
@@ -266,7 +267,7 @@ class SchedulePageState extends State<SchedulePage> {
   void _jumpToTask(Task t) {
     final s = t.startAt;
     if (s == null) return; // 不定时任务在日程无视图可跳
-    final g = switch (deriveTaskScale(t.startAt, t.endAt)) {
+    final g = switch (deriveTaskScale(t.startAt, t.endAt, kind: t.kind)) {
       'yearly' => 0,
       'quarterly' || 'monthly' => 1,
       'weekly' || 'daily' => 2,
