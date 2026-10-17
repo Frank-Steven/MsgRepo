@@ -332,6 +332,24 @@ export async function processStreaming(
           }
         }
       } catch (err) {
+        // P1-2：整批失败时降级为逐条重试（模型偶尔返回非数组/被截断，
+        // 整批报废的代价太大）。单条仍失败才计入 failed。
+        if (batch.length > 1 && typeof provider.evaluateStreaming === "function") {
+          for (const msg of batch) {
+            try {
+              const single = await provider.evaluateStreaming(msg, registry, {
+                customPrompt: options.customPrompt,
+                now: options.now,
+                onToken: (delta) => emit({ type: "token", messageId: msg.id, delta }),
+              });
+              emit({ type: "result", messageId: msg.id, ...single });
+            } catch (err2) {
+              failed++;
+              emit({ type: "error", messageId: msg.id, error: String(err2) });
+            }
+          }
+          continue;
+        }
         failed += batch.length;
         for (const msg of batch) {
           emit({ type: "error", messageId: msg.id, error: String(err) });
