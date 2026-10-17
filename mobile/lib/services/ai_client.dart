@@ -85,16 +85,21 @@ class AiTaskDraft {
     return dt;
   }
 
-  factory AiTaskDraft.fromJson(Map<String, dynamic> json) => AiTaskDraft(
-        title: (json['title'] as String? ?? '').trim(),
-        description: (json['description'] as String?)?.trim(),
-        kind: json['kind'] == 'range' ? 'range' : 'point',
-        startAt: _parseLocal(json['startAt']),
-        endAt: _parseLocal(json['endAt']),
-        priority: const ['important', 'normal', 'minor'].contains(json['priority'])
-            ? json['priority'] as String
-            : 'normal',
-      );
+  factory AiTaskDraft.fromJson(Map<String, dynamic> json) {
+    final kind = json['kind'] == 'range' ? 'range' : 'point';
+    return AiTaskDraft(
+      title: (json['title'] as String? ?? '').trim(),
+      description: (json['description'] as String?)?.trim(),
+      kind: kind,
+      startAt: _parseLocal(json['startAt']),
+      // point 任务只保留单个时刻：模型偶尔会多写 endAt，这里直接丢弃（P1-1）
+      endAt: kind == 'range' ? _parseLocal(json['endAt']) : null,
+      priority:
+          const ['important', 'normal', 'minor'].contains(json['priority'])
+              ? json['priority'] as String
+              : 'normal',
+    );
+  }
 }
 
 /// 单条消息的 AI 评估结果。

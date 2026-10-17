@@ -121,7 +121,7 @@ class TaskTile extends StatelessWidget {
   /// 行内尺度徽标（设计 §3）：派生尺度小字 chip。
   Widget _scaleChip(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final scale = deriveTaskScale(task.startAt, task.endAt);
+    final scale = deriveTaskScale(task.startAt, task.endAt, kind: task.kind);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
       decoration: BoxDecoration(

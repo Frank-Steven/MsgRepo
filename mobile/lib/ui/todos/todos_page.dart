@@ -103,7 +103,7 @@ class TodosPageState extends State<TodosPage> {
     final byScale = {for (final s in _scaleTabs) s: <Task>[]};
     for (final t in active) {
       if (t.startAt == null) continue;
-      byScale[deriveTaskScale(t.startAt, t.endAt)]?.add(t);
+      byScale[deriveTaskScale(t.startAt, t.endAt, kind: t.kind)]?.add(t);
     }
     // getTasks 已按 start_at 升序，分组内天然有序
     if (!mounted) return;
@@ -387,7 +387,8 @@ class TodosPageState extends State<TodosPage> {
     if (t.status == TaskStatus.done) return 7;
     if (t.status == TaskStatus.archived) return 8;
     if (t.startAt == null) return 6;
-    final idx = _scaleTabs.indexOf(deriveTaskScale(t.startAt, t.endAt));
+    final idx =
+          _scaleTabs.indexOf(deriveTaskScale(t.startAt, t.endAt, kind: t.kind));
     return idx >= 0 ? idx : 6;
   }
 

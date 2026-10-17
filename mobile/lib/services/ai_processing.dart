@@ -362,7 +362,10 @@ class AiProcessingService extends ChangeNotifier {
           description: draft.description,
           kind: draft.kind,
           startAt: draft.startAt?.millisecondsSinceEpoch,
-          endAt: draft.endAt?.millisecondsSinceEpoch,
+          // 兜底：point 任务不落 end_at，保持与派生尺度一致（P1-1）
+          endAt: draft.kind == TaskKind.range
+              ? draft.endAt?.millisecondsSinceEpoch
+              : null,
           priority: draft.priority,
           sourceMessageId: m.id,
           status: TaskStatus.active,
