@@ -25,7 +25,7 @@ List<String> _stringList(dynamic v) =>
 
 int? _intOrNull(dynamic v) => v == null ? null : (v as num).toInt();
 
-/// 本地 SQLite 存储（设计 §1，DB v4）：messages / tasks / 笔记三级为主表；
+/// 本地 SQLite 存储（设计 §1，DB v5）：messages / tasks / 笔记三级为主表；
 /// v1 的 raw_messages / structured_items 旧表保留不删（只删了读写代码）。
 class AppDatabase {
   AppDatabase._();
