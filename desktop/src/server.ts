@@ -2,6 +2,7 @@ import http from "node:http";
 import os from "node:os";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { isAuthorized, type PairingManager } from "./auth.js";
+import { GateBusyError, SerialGate } from "./limit.js";
 import { loadRegistry, negotiateRegistry, readSharedJson } from "./registry.js";
 import { processStreaming, runPipeline } from "./pipeline.js";
 import type { Store } from "./store.js";
@@ -186,12 +187,18 @@ load();
 </html>
 `;
 
+/** 需要串行化的推理端点（都直接调用本地/远程模型）。 */
+const GATED_PATHS = new Set(["/v1/process", "/v1/sync"]);
+
 export function createServer(opts: ServerOptions): http.Server {
   // 注册 shared schemas，使 sync-request 内的相对 $ref 可解析
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   for (const name of ["raw-message", "category-registry", "structured-item", "sync-request"]) {
     ajv.addSchema(readSharedJson(`schemas/${name}.schema.json`) as object);
   }
+  // 并发闸（P2-4）：默认同时只跑 1 个推理请求，最多排 8 个，再多直接 429
+  const processGate = new SerialGate(1, 8);
+
   const validateSyncRequest = ajv.getSchema("https://msgrepo.dev/schemas/sync-request.schema.json");
   if (!validateSyncRequest) throw new Error("sync-request schema 加载失败");
 
@@ -199,6 +206,22 @@ export function createServer(opts: ServerOptions): http.Server {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       const pathname = url.pathname;
+
+      // 推理端点串行化（P2-4）：多个手机/手动请求并发会打满本地模型进程。
+      // 槽位在响应结束时释放（close 覆盖正常完成与客户端断开两种情况）。
+      if (GATED_PATHS.has(pathname)) {
+        let releaseSlot: (() => void) | null = null;
+        try {
+          releaseSlot = await processGate.acquireSlot();
+        } catch (e) {
+          if (e instanceof GateBusyError) {
+            res.setHeader("Retry-After", "5");
+            return sendJson(res, 429, { error: "busy", retryAfter: 5 });
+          }
+          throw e;
+        }
+        res.on("close", () => releaseSlot?.());
+      }
 
       // 免认证
       if (req.method === "GET" && pathname === "/v1/health") {
