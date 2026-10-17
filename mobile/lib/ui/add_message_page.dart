@@ -33,6 +33,7 @@ class _AddMessagePageState extends State<AddMessagePage> {
   Future<void> _pickImage() async {
     final x = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (x == null) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       _attachments.add(Attachment(
         id: _uuid.v4(),
@@ -51,6 +52,7 @@ class _AddMessagePageState extends State<AddMessagePage> {
     final result = await FilePicker.platform.pickFiles();
     final f = result?.files.firstOrNull;
     if (f == null) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       _attachments.add(Attachment(
         id: _uuid.v4(),
@@ -73,6 +75,7 @@ class _AddMessagePageState extends State<AddMessagePage> {
       hint: '粘贴网页链接',
     );
     if (value == null || value.isEmpty) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       _attachments.add(Attachment(
         id: _uuid.v4(),
@@ -90,6 +93,7 @@ class _AddMessagePageState extends State<AddMessagePage> {
       hint: '小程序页面路径',
     );
     if (value == null || value.isEmpty) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       _attachments.add(Attachment(
         id: _uuid.v4(),
