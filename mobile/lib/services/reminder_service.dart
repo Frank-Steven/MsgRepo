@@ -1,15 +1,38 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../models/task.dart';
 import 'database.dart';
 
+/// 是否该为这个任务排提醒：active + 有未来的 start_at。纯函数，便于单测。
+bool shouldScheduleReminder(Task task, {required int nowMs}) {
+  if (task.status != TaskStatus.active) return false;
+  final s = task.startAt;
+  if (s == null) return false;
+  return s > nowMs;
+}
+
+/// 依据是否具备精确闹钟权限选择调度模式：未授权时降级为不精确。
+/// 纯函数，使「降级」这件事能在单测里断言（P1-5）。
+AndroidScheduleMode scheduleModeFor({required bool exactAllowed}) =>
+    exactAllowed
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+
 /// 本地提醒调度（设计 §0，v2）：有 start_at 的 active 任务在 start_at 时刻
 /// 发一条本地通知（标题 = 任务名）。无时间任务不排。
 ///
 /// 任务增删改/完成/归档由 database.dart 的 tasks 写方法触发 [rescheduleAll]
 /// 全量重排；应用启动时也重排一次（main.dart）。
+///
+/// P1-4 / P1-5（2026-10-17）：
+/// - 重排不再用 cancelAll()，只取消「上次排过的任务提醒」，AI 完成通知不再被误清；
+/// - 精确闹钟权限先查询，未授予时降级为 inexactAllowWhileIdle（提醒仍会响，
+///   可能延迟数分钟），状态由 [exactAlarmsAllowed] 暴露给设置页；
+/// - 整个重排包在 try/catch 中并记录 [lastError]，不再静默失效。
 class ReminderService {
   ReminderService._();
 
@@ -24,10 +47,31 @@ class ReminderService {
   static const _aiChannelDesc = 'AI 后台处理完成提醒';
   static const _aiNotificationId = 0xA1;
 
+  /// 已排上的任务提醒 id 列表（重排时只取消这些，避免波及别的通知）。
+  static const _keyScheduledIds = 'reminder_scheduled_ids';
+
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+
+  /// 精确闹钟权限（null = 尚未查询）。
+  bool? _exactAllowed;
+
+  /// 最近一次重排失败的原因（null = 无错误）。
+  String? _lastError;
+
+  bool get initialized => _initialized;
+
+  /// 最近一次重排失败的原因，设置页展示用。
+  String? get lastError => _lastError;
+
+  /// 是否具备精确闹钟权限；未查询过时按 true 处理（乐观，首次重排会校准）。
+  bool get exactAlarmsAllowed => _exactAllowed ?? true;
+
+  AndroidFlutterLocalNotificationsPlugin? get _android =>
+      _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
 
   Future<void> init() async {
     if (_initialized) return;
@@ -40,13 +84,38 @@ class ReminderService {
     await _plugin.initialize(initSettings);
 
     // Android 13+ 运行时通知权限
-    final android =
-        _plugin.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
-    await android?.requestNotificationsPermission();
+    await _android?.requestNotificationsPermission();
+    await refreshExactAlarms();
 
     _initialized = true;
   }
+
+  /// 查询精确闹钟权限并缓存（init / 重排 / 设置页刷新时调用）。
+  Future<bool> refreshExactAlarms() async {
+    try {
+      final v = await _android?.canScheduleExactNotifications();
+      _exactAllowed = v ?? true;
+    } catch (e) {
+      // 老版本 Android 或通道异常：按可用处理，由调度层自行决定
+      _exactAllowed = true;
+      debugPrint('canScheduleExactNotifications 查询失败: $e');
+    }
+    return exactAlarmsAllowed;
+  }
+
+  /// 请求精确闹钟权限（Android 12+ 跳系统设置页）。返回请求后的实际状态。
+  Future<bool> requestExactAlarms() async {
+    try {
+      await _android?.requestExactAlarmsPermission();
+    } catch (e) {
+      debugPrint('requestExactAlarmsPermission 失败: $e');
+    }
+    return refreshExactAlarms();
+  }
+
+  /// 排提醒用的调度模式：有精确权限用精确，否则降级为不精确。
+  AndroidScheduleMode get _scheduleMode =>
+      scheduleModeFor(exactAllowed: exactAlarmsAllowed);
 
   /// 未引入 flutter_timezone：先按系统时区名匹配，失败则按当前 UTC 偏移
   /// 在数据库中找一个偏移一致的 location，再不行退回 UTC。
@@ -68,34 +137,70 @@ class ReminderService {
 
   int _notificationId(String taskId) => taskId.hashCode & 0x7fffffff;
 
-  /// 为单个任务排提醒：仅 active + startAt 在未来。
-  Future<void> scheduleForTask(Task task) async {
-    if (!_initialized) return;
-    await _plugin.cancel(_notificationId(task.id));
-    if (task.status != TaskStatus.active) return;
-    final startAt = task.startAt;
-    if (startAt == null) return;
-    if (startAt <= DateTime.now().millisecondsSinceEpoch) return;
+  /// 为单个任务排提醒：仅 active + startAt 在未来。返回是否真的排上了。
+  Future<bool> scheduleForTask(Task task) async {
+    if (!_initialized) return false;
+    final id = _notificationId(task.id);
+    await _plugin.cancel(id);
+    if (!shouldScheduleReminder(task,
+        nowMs: DateTime.now().millisecondsSinceEpoch)) {
+      return false;
+    }
+    final startAt = task.startAt!;
     await _plugin.zonedSchedule(
-      _notificationId(task.id),
+      id,
       task.title,
       task.description?.isNotEmpty == true ? task.description : task.title,
       tz.TZDateTime.fromMillisecondsSinceEpoch(tz.local, startAt),
       _details,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      androidScheduleMode: _scheduleMode,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
       payload: task.id,
     );
+    return true;
   }
 
-  /// 全量重排：先清空本应用全部通知再逐个重排（任务写操作后/启动时调用）。
+  /// 全量重排：只取消「上次排过的任务提醒」，再按当前任务重排。
+  ///
+  /// 不用 cancelAll()：那会连带清掉 AI 完成通知（P1-4）；
+  /// 失败一律记录到 [lastError] 并 debugPrint，不再静默（P1-5）。
   Future<void> rescheduleAll() async {
     if (!_initialized) return;
-    await _plugin.cancelAll();
-    final tasks = await AppDatabase.instance.getTasks(status: TaskStatus.active);
-    for (final task in tasks) {
-      await scheduleForTask(task);
+    _lastError = null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final prev = prefs.getStringList(_keyScheduledIds) ?? const <String>[];
+      for (final s in prev) {
+        final id = int.tryParse(s);
+        if (id == null) continue;
+        try {
+          await _plugin.cancel(id);
+        } catch (_) {
+          // 单条取消失败不影响后续
+        }
+      }
+
+      await refreshExactAlarms();
+
+      final tasks =
+          await AppDatabase.instance.getTasks(status: TaskStatus.active);
+      final scheduled = <String>[];
+      for (final task in tasks) {
+        try {
+          if (await scheduleForTask(task)) {
+            scheduled.add(_notificationId(task.id).toString());
+          }
+        } catch (e) {
+          // 单条失败不阻塞其余任务，但要留下痕迹
+          _lastError = '任务「${task.title}」排提醒失败：$e';
+          debugPrint(_lastError!);
+        }
+      }
+      await prefs.setStringList(_keyScheduledIds, scheduled);
+    } catch (e) {
+      _lastError = '提醒重排失败：$e';
+      debugPrint(_lastError!);
     }
   }
 
@@ -110,8 +215,8 @@ class ReminderService {
       );
 
   /// AI 后台处理完成的一次性通知（v2.6.2）：面板收起期间跑完时提醒回来确认结果。
-  /// 普通通知即可，不引入前台服务；注意会被任务提醒重排（rescheduleAll 的
-  /// cancelAll）一并清掉，应用内顶部指示条才是可靠入口。
+  /// 普通通知即可，不引入前台服务。
+  /// 注意：任务重排只取消任务提醒 id，不再 cancelAll，本条通知不会被误清（P1-4）。
   Future<void> notifyAiProcessingDone(int pendingConfirm, int failed) async {
     if (!_initialized) return;
     await _plugin.show(

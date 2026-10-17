@@ -7,6 +7,7 @@ import 'shared/segmented_selector.dart';
 import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
+import '../services/reminder_service.dart';
 
 /// v2 设置页（设计 §9）：外观 / 自定义提示词 / AI 接口 / 连接 / 采集过滤。
 class SettingsPage extends StatefulWidget {
@@ -35,6 +36,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _listenerEnabled = false;
   bool _batteryOptimized = true; // true = 已加入白名单（不需要再优化）
+  bool _exactAlarms = true; // 精确闹钟权限（Android 12+ 可能需要手动开启）
   AppFilterConfig _filterConfig = const AppFilterConfig();
   Map<String, String?> _knownAppNames = {};
 
@@ -63,6 +65,7 @@ class _SettingsPageState extends State<SettingsPage> {
         await NotificationBridge.instance.isListenerEnabled();
     final batteryOptimized =
         await NotificationBridge.instance.isIgnoringBatteryOptimizations();
+    final exactAlarms = await ReminderService.instance.refreshExactAlarms();
     final filterConfig = await AppFilterService.instance.load();
     final seenApps = await AppFilterService.instance.getSeenApps();
     if (!mounted) return;
@@ -77,6 +80,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _desktopOnline = online;
       _listenerEnabled = listenerEnabled;
       _batteryOptimized = batteryOptimized;
+      _exactAlarms = exactAlarms;
       _filterConfig = filterConfig;
       _knownAppNames = {for (final a in seenApps) a.packageName: a.appName};
     });
@@ -331,6 +335,14 @@ class _SettingsPageState extends State<SettingsPage> {
     // 系统设置返回后状态可能已变，延迟刷新
     await Future.delayed(const Duration(seconds: 1));
     _load();
+  }
+
+  /// 请求精确闹钟权限（Android 12+ 可能需要用户手动开启）。
+  Future<void> _requestExactAlarms() async {
+    final ok = await ReminderService.instance.requestExactAlarms();
+    if (!mounted) return;
+    setState(() => _exactAlarms = ok);
+    _toast(ok ? '已允许精确提醒' : '未获得精确闹钟权限：提醒仍会触发，但可能延迟数分钟');
   }
 
   Future<void> _openAutoStartSettings() async {
@@ -695,6 +707,26 @@ class _SettingsPageState extends State<SettingsPage> {
                 if (!_batteryOptimized)
                   TextButton(
                     onPressed: _requestBatteryWhitelist,
+                    child: const Text('去设置'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  _exactAlarms ? Icons.alarm_on_outlined : Icons.alarm_off_outlined,
+                  color: _exactAlarms ? cs.primary : cs.error,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(_exactAlarms
+                      ? '任务提醒：精确闹钟已允许'
+                      : '任务提醒：未允许精确闹钟，提醒可能延迟数分钟'),
+                ),
+                if (!_exactAlarms)
+                  TextButton(
+                    onPressed: _requestExactAlarms,
                     child: const Text('去设置'),
                   ),
               ],
