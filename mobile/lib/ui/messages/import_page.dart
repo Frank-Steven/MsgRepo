@@ -70,6 +70,7 @@ class _ImportPageState extends State<ImportPage> {
     var granted = await bridge.hasSmsPermission();
     if (!granted) granted = await bridge.requestSmsPermission();
     if (!granted) {
+      if (!mounted) return; // P3-5
       setState(() => _error = '未授予读取短信权限');
       return;
     }

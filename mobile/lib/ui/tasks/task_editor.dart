@@ -190,6 +190,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       lastDate: DateTime(2100),
     );
     if (picked == null) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       final merged = DateTime(picked.year, picked.month, picked.day,
           current?.hour ?? 9, current?.minute ?? 0);
@@ -209,6 +210,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
       initialTime: TimeOfDay.fromDateTime(current),
     );
     if (picked == null) return;
+    if (!mounted) return; // P3-5：await 之后页面可能已销毁
     setState(() {
       final merged = DateTime(current.year, current.month, current.day,
           picked.hour, picked.minute);
@@ -320,6 +322,7 @@ class _TaskEditorSheetState extends State<_TaskEditorSheet> {
   }
 
   void _snack(String text) {
+    if (!mounted) return; // P3-5：await 之后调用时页面可能已销毁
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(

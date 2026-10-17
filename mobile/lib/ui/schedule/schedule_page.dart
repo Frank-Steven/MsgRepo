@@ -198,6 +198,7 @@ class SchedulePageState extends State<SchedulePage> {
           }
         },
       );
+      if (!mounted) return; // P3-5：删除后可能已离开页面
       setState(() => _selectedTask = null);
       _detailMode = false;
       await reload();

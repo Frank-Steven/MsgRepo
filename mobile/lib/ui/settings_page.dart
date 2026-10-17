@@ -99,6 +99,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _toast(String text) {
+    if (!mounted) return; // P3-5：await 之后调用时页面可能已销毁
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
