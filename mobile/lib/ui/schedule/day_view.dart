@@ -466,6 +466,9 @@ class _DayLayout {
   final int labelStride;
   final List<_DayItem> items;
   final Map<String, DayNameSlot> nameSlots;
+  /// R1-A：标签分组与「组 → 槽位」映射（唯一一次贪心的结果）
+  final List<LabelGroup> groups;
+  final Map<String, DayNameSlot> groupSlots;
   final List<_HitRegion> hitRegions;
   final Map<String, Task> originals;
   final Map<String, (double, double)> spans; // taskId -> (绝对起, 绝对止)
@@ -487,6 +490,8 @@ class _DayLayout {
     required this.labelStride,
     required this.items,
     required this.nameSlots,
+    required this.groups,
+    required this.groupSlots,
     required this.hitRegions,
     required this.originals,
     required this.spans,
@@ -523,21 +528,46 @@ class _DayLayout {
     double xOf(double absMin) => (absMin - scrollMin) * ppm;
 
     // 名称空位：贪心放置（v2.3），轴 = 绝对分钟
-    final slots = assignAngledNames(
-      tasks,
-      axisOf: (t) {
-        final startMin = (t.startAt! - epochMs) / 60000.0;
-        final endMin = t.endAt == null
-            ? startMin
-            : math.max(startMin, (t.endAt! - epochMs) / 60000.0);
-        return (startMin, endMin);
-      },
-      axisPerPx: 1 / ppm,
-      anchorStep: 5,
-      measureText: measure,
-    );
-    final nameSlots = {for (final s in slots) s.taskId: s};
-    final namesH = slots.any((e) => e.visible) ? nameLayerH : 0.0;
+      // R1-A：先按「开始时间相近」分组，再对**组**做唯一一次贪心放置。
+      // 点任务与时段任务一视同仁；子任务不参与（与父同 y 叠加，画笔也不画它的名字）。
+      final labelTasks = [
+        for (final t in tasks)
+          if (t.parentId == null || !originals.containsKey(t.parentId)) t,
+      ];
+      final groups = buildLabelGroups(
+        labelTasks,
+        axisOf: (t) {
+          final startMin = (t.startAt! - epochMs) / 60000.0;
+          final endMin = t.endAt == null
+              ? startMin
+              : math.max(startMin, (t.endAt! - epochMs) / 60000.0);
+          return (startMin, endMin);
+        },
+        axisPerPx: 1 / ppm,
+        thresholdPx: 12,
+      );
+      final groupSlots = assignGroupNames(
+        groups,
+        axisPerPx: 1 / ppm,
+        anchorStep: 5,
+        measureText: measure,
+      );
+      // 命中区域仍按任务粒度：组内每个任务共享该组的槽位
+      final nameSlots = <String, DayNameSlot>{};
+      for (final g in groups) {
+        final s = groupSlots[g.id];
+        if (s == null) continue;
+        for (final id in g.taskIds) {
+          nameSlots[id] = DayNameSlot(
+            taskId: id,
+            centerMinutes: s.centerMinutes,
+            textWidth: s.textWidth,
+            visible: s.visible,
+          );
+        }
+      }
+      final namesH =
+          groupSlots.values.any((e) => e.visible) ? nameLayerH : 0.0;
 
     double laneY(int laneIdx) =>
         namesH + headerH + laneIdx * laneH + laneH / 2;
@@ -626,6 +656,8 @@ class _DayLayout {
       labelStride: labelStride,
       items: items,
       nameSlots: nameSlots,
+        groups: groups,
+        groupSlots: groupSlots,
       hitRegions: hitRegions,
       originals: originals,
       spans: spans,
@@ -655,78 +687,28 @@ class _DayPainter extends CustomPainter {
   double _xOf(double absMin) => (absMin - layout.scrollMin) * layout.ppm;
 
 
-  // U11：两个半径 5 的点相距 <= 12px 时视觉上已经相碰，合并为一个点。
-  static const double _clusterThresholdPx = 12;
 
-  NodeClusters? _cachedClusters;
-
-  /// U11：把时间点任务的节点聚类（重合的画一个代表点）。
-  /// 画布标签每行最多 8 个字（折行，不截断）。
-  static const int _labelCharsPerLine = 8;
-
-  /// 按字符折行：名字**一个字都不砍**（用户 2026-10-18 要求去掉行数限制）。
-  String _wrapTitle(String title) {
-    final chars = title.trim().characters.toList();
-    if (chars.isEmpty) return '';
-    final lines = <String>[];
-    for (var i = 0; i < chars.length; i += _labelCharsPerLine) {
-      final end =
-          (i + _labelCharsPerLine) > chars.length ? chars.length : i + _labelCharsPerLine;
-      lines.add(chars.sublist(i, end).join());
-    }
-    return lines.join('\n');
-  }
-
-  /// 合并标题：每个任务名完整显示（折行），名字末尾加「；」再接下一个，最后一个不加。
-  /// 顺序与下方任务列表一致（第一个任务在最上）。
-  String _mergedTitle(List<String> ids) {
-    // 顺序：高优先级在前（用户 2026-10-18：应优先显示优先级最高的任务）
-    final ordered = [...ids]..sort((a, b) {
-        final ra = _priorityRank(a);
-        final rb = _priorityRank(b);
-        if (ra != rb) return ra.compareTo(rb);
-        return ids.indexOf(a).compareTo(ids.indexOf(b));
-      });
-    final titles = [
-      for (final id in ordered)
-        (layout.originals[id]?.title ?? '').trim(),
-    ].where((s) => s.isNotEmpty).toList();
-    if (titles.isEmpty) return '';
-    if (titles.length == 1) return _wrapTitle(titles.first);
-
-    final lines = <String>[];
-    for (var i = 0; i < titles.length; i++) {
-      final wrapped = _wrapTitle(titles[i]).split('\n');
-      if (i < titles.length - 1) {
-        wrapped[wrapped.length - 1] = '${wrapped.last}；';
+  /// R1-A：组内「代表点」与「点任务个数」，供节点放大与虚线定位使用。
+  ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})
+      _groupInfo() {
+    final rep = <String, String>{};
+    final points = <String, int>{};
+    final byTask = <String, LabelGroup>{};
+    for (final g in layout.groups) {
+      _DayItem? best;
+      var n = 0;
+      for (final it in layout.items) {
+        if (!g.taskIds.contains(it.task.id)) continue;
+        byTask[it.task.id] = g;
+        if (!it.isPoint) continue;
+        n++;
+        if (best == null || it.y < best.y) best = it;
       }
-      lines.addAll(wrapped);
+      points[g.id] = n;
+      if (best != null) rep[g.id] = best.task.id;
     }
-    return lines.join('\n');
+    return (rep: rep, points: points, byTask: byTask);
   }
-  /// 优先级排序权重：数值越小优先级越高（important < normal < minor）。
-  /// 优先级权重：important=0 < normal=1 < minor=2。
-  int _priorityRank(String taskId) {
-    switch (layout.originals[taskId]?.priority ?? 'normal') {
-      case 'important':
-        return 0;
-      case 'minor':
-        return 2;
-      default:
-        return 1;
-    }
-  }
-
-  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
-        [
-          for (final it in layout.items)
-            if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
-        ],
-        thresholdPx: _clusterThresholdPx,
-        // 跨泳道（不同优先级）用同一个距离阈值：用户 2026-10-18 决定保留跨泳道合并，
-        // 且要求不要「高优先级更难合并」
-        crossLaneThresholdPx: _clusterThresholdPx,
-      );
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
@@ -737,20 +719,20 @@ class _DayPainter extends CustomPainter {
 
     // 任务：时间点=节点；时间段=带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）
-      // U11：时间几乎重合的点会叠在一起，只画一个代表点（否则「一个点 + 多个标题」）。
-      final clusters = _clusters();
+      // 节点：点任务按「标签组」只画一个代表点（组内 y 最小者，即优先级最高），
+      // 组内点任务 ≥2 时点画大一圈；时段任务照常画线段。
+      final info = _groupInfo();
       for (final it in layout.items) {
         if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
         final done = it.task.status == TaskStatus.done;
         final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
         if (it.isPoint) {
-          if (!clusters.isRepresentative(it.task.id)) continue;
-          final ci = clusters.indexOfId(it.task.id)!;
-          final c = clusters.anchor(ci);
-          // U11 追加：合并了多个任务时点画大一圈，提示「此处不止一个任务」
+          final g = info.byTask[it.task.id];
+          if (g != null && info.rep[g.id] != it.task.id) continue;
           final baseR = it.isSubtask ? 3.5 : 5.0;
-          final radius = clusters.count(ci) > 1 ? baseR + 2.0 : baseR;
-          canvas.drawCircle(Offset(c.$1, c.$2), radius, Paint()..color = color);
+          final mergedDots = g != null && (info.points[g.id] ?? 1) > 1;
+          canvas.drawCircle(Offset(it.x1, it.y),
+              mergedDots ? baseR + 2.0 : baseR, Paint()..color = color);
         } else {
           canvas.drawLine(
             Offset(it.x1, it.y),
@@ -776,48 +758,57 @@ class _DayPainter extends CustomPainter {
         final dashPaint = Paint()
           ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
           ..strokeWidth = 1;
-        final clusters = _clusters();
-        for (final it in layout.items) {
-          if (it.isSubtask) continue; // 子任务不显示名称（与父同 y 叠加）
-          final slot = layout.nameSlots[it.task.id];
-          if (slot == null || !slot.visible) continue; // 放不下就不画
-          final ci = clusters.indexOfId(it.task.id);
-          if (ci != null && !clusters.isRepresentative(it.task.id)) continue;
-          final merged = ci != null && clusters.count(ci) > 1;
-          // 合并组用代表点的 x（保证虚线对准圆点）；单个任务用名字槽位
-          final anchorX = ci != null ? clusters.anchor(ci).$1 : _xOf(slot.centerMinutes);
-          if (anchorX < -100 || anchorX > size.width + 100) continue;
-          final targetY = ci == null ? it.y : clusters.anchor(ci).$2;
-          var dy = layout.namesH - 6.0;
-          while (dy < targetY - 8) {
-            canvas.drawLine(
-                Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
-            dy += 6;
+          final info = _groupInfo();
+          for (final g in layout.groups) {
+            final slot = layout.groupSlots[g.id];
+            if (slot == null || !slot.visible) continue; // 放不下就不画（合作者建议）
+            final anchorX = _xOf(slot.centerMinutes);
+            if (anchorX < -100 || anchorX > size.width + 100) continue;
+            // 虚线连到该组的代表点（组内没有点任务时连到第一个成员）
+            double? targetY;
+            final repId = info.rep[g.id];
+            for (final it in layout.items) {
+              if (repId != null) {
+                if (it.task.id == repId) {
+                  targetY = it.y;
+                  break;
+                }
+              } else if (g.taskIds.contains(it.task.id)) {
+                targetY = it.y;
+                break;
+              }
+            }
+            if (targetY == null) continue;
+            var dy = layout.namesH - 6.0;
+            while (dy < targetY - 8) {
+              canvas.drawLine(
+                  Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
+              dy += 6;
+            }
+            final done = g.taskIds.length == 1 &&
+                layout.originals[g.taskIds.first]?.status == TaskStatus.done;
+            final merged = g.size > 1;
+            final tp = TextPainter(
+              text: TextSpan(
+                text: g.title,
+                style: layout.nameStyle.copyWith(
+                  decoration: (done && !merged)
+                      ? TextDecoration.lineThrough
+                      : null,
+                  color: (done && !merged)
+                      ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
+                      : null,
+                ),
+              ),
+              textDirection: TextDirection.ltr,
+              maxLines: 30,
+            )..layout();
+            canvas.save();
+            canvas.translate(anchorX, layout.namesH - 4);
+            canvas.rotate(-math.pi / 4);
+            tp.paint(canvas, Offset(3, -tp.height + 2));
+            canvas.restore();
           }
-          final done = it.task.status == TaskStatus.done;
-          final titles =
-              merged ? _mergedTitle(clusters.ids(ci)) : _wrapTitle(it.task.title);
-          final tp = TextPainter(
-            text: TextSpan(
-              text: titles,
-                      style: layout.nameStyle.copyWith(
-                        decoration: (done && !merged)
-                            ? TextDecoration.lineThrough
-                            : null,
-                        color: (done && !merged)
-                            ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
-                            : null,
-                      ),
-            ),
-            textDirection: TextDirection.ltr,
-            maxLines: 30,
-          )..layout();
-          canvas.save();
-          canvas.translate(anchorX, layout.namesH - 4);
-          canvas.rotate(-math.pi / 4);
-          tp.paint(canvas, Offset(3, -tp.height + 2));
-          canvas.restore();
-        }
       }
 
     // 「现在」脉冲高亮（1.5 秒）
