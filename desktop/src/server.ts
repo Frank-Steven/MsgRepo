@@ -3,15 +3,14 @@ import os from "node:os";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { isAuthorized, type PairingManager } from "./auth.js";
 import { GateBusyError, SerialGate } from "./limit.js";
-import { loadRegistry, negotiateRegistry, readSharedJson } from "./registry.js";
-import { processStreaming, runPipeline } from "./pipeline.js";
-import type { Store } from "./store.js";
+import { loadRegistry, readSharedJson } from "./registry.js";
+import { processStreaming } from "./pipeline.js";
 import type { AIProvider } from "./ai/provider.js";
 import type {
   ProcessInputMessage,
   ProcessRequestBody,
-  SyncRequest,
-  SyncResponse,
+
+
 } from "./types.js";
 
 export interface ServerOptions {
@@ -19,7 +18,6 @@ export interface ServerOptions {
   port: number;
   pairing: PairingManager;
   provider: AIProvider;
-  store: Store;
   dataDir: string;
 }
 
@@ -82,19 +80,17 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 
 
 /** 需要串行化的推理端点（都直接调用本地/远程模型）。 */
-const GATED_PATHS = new Set(["/v1/process", "/v1/sync"]);
+const GATED_PATHS = new Set(["/v1/process"]);
 
 export function createServer(opts: ServerOptions): http.Server {
   // 注册 shared schemas，使 sync-request 内的相对 $ref 可解析
   const ajv = new Ajv2020({ allErrors: true, strict: false });
-  for (const name of ["raw-message", "category-registry", "structured-item", "sync-request"]) {
+  for (const name of ["category-registry"]) {
     ajv.addSchema(readSharedJson(`schemas/${name}.schema.json`) as object);
   }
   // 并发闸（P2-4）：默认同时只跑 1 个推理请求，最多排 8 个，再多直接 429
   const processGate = new SerialGate(1, 8);
 
-  const validateSyncRequest = ajv.getSchema("https://msgrepo.dev/schemas/sync-request.schema.json");
-  if (!validateSyncRequest) throw new Error("sync-request schema 加载失败");
 
   return http.createServer(async (req, res) => {
     try {
@@ -195,78 +191,6 @@ export function createServer(opts: ServerOptions): http.Server {
       }
 
       // Deprecated：v1 同步协议，保留一个版本周期供旧手机端使用（设计 §12），新端点为 /v1/process
-      if (req.method === "POST" && pathname === "/v1/sync") {
-        res.setHeader("Deprecation", "true");
-        if (!isAuthorized(req, opts.pairing.token))
-          return sendJson(res, 401, { error: "unauthorized" });
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(await readBody(req));
-        } catch {
-          return sendJson(res, 400, { error: "invalid JSON body" });
-        }
-        if (!validateSyncRequest(parsed)) {
-          return sendJson(res, 400, {
-            error: "request failed sync-request schema validation",
-            details: ajv.errorsText(validateSyncRequest.errors),
-          });
-        }
-        const syncReq = parsed as SyncRequest;
-        const startedAt = Date.now();
-        console.log(`[sync] 收到 ${syncReq.messages.length} 条消息（stream=${syncReq.stream === true}），开始处理…`);
-        const current = loadRegistry(opts.dataDir);
-        const { registry, warnings: regWarnings } = negotiateRegistry(syncReq, current, opts.dataDir);
-
-        // 流式模式：NDJSON 逐条下发进度，每条结果在管线内已即时落盘
-        if (syncReq.stream === true) {
-          res.writeHead(200, {
-            "Content-Type": "application/x-ndjson; charset=utf-8",
-            "Cache-Control": "no-cache",
-          });
-          const send = (obj: unknown) => {
-            try {
-              res.write(JSON.stringify(obj) + "\n");
-            } catch {
-              // 客户端已断开：忽略写入错误，管线继续落盘
-            }
-          };
-          for (const w of regWarnings) send({ type: "warning", message: w });
-          const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store, {
-            customPrompt: syncReq.customPrompt,
-            reprocessMessageIds: syncReq.reprocessMessageIds,
-            onProgress: (ev) => send({ type: "progress", ...ev }),
-          });
-          console.log(
-            `[sync] 完成：${result.processedMessageIds.length} 处理 / ${result.failedMessageIds.length} 失败 / ` +
-              `${result.results.length} 条结果，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
-          );
-          send({
-            type: "done",
-            registryVersion: registry.version,
-            failedMessageIds: result.failedMessageIds,
-            warnings: result.warnings,
-          });
-          res.end();
-          return;
-        }
-
-        const result = await runPipeline(syncReq.messages, registry, opts.provider, opts.store, {
-          customPrompt: syncReq.customPrompt,
-          reprocessMessageIds: syncReq.reprocessMessageIds,
-        });
-        console.log(
-          `[sync] 完成：${result.processedMessageIds.length} 处理 / ${result.failedMessageIds.length} 失败 / ` +
-            `${result.results.length} 条结果，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
-        );
-        const response: SyncResponse = {
-          registryVersion: registry.version,
-          results: result.results,
-          processedMessageIds: result.processedMessageIds,
-          failedMessageIds: result.failedMessageIds,
-          warnings: [...regWarnings, ...result.warnings],
-        };
-        return sendJson(res, 200, response);
-      }
 
       sendJson(res, 404, { error: "not found" });
     } catch (err) {

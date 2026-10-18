@@ -1,80 +1,21 @@
 // 与 shared/schemas/*.schema.json 对齐的 TS 类型。字段名以 schema 为唯一事实源。
 
-export type Priority = "P0" | "P1" | "P2" | "P3";
 
-export const SCHEMA_VERSION = "1.0.0";
-export const PIPELINE_VERSION = "1.0.0";
 
 // ---- raw-message.schema.json ----
 
-export interface RawMessageSource {
-  packageName: string;
-  appName?: string;
-  channelId?: string;
-  conversationTitle?: string;
-  sender?: string;
-}
 
-export interface RawMessageAttachment {
-  id: string;
-  kind: "image" | "file" | "miniprogram" | "link" | "other";
-  label?: string;
-  access: {
-    type: "local_path" | "content_uri" | "url" | "app_deeplink" | "miniprogram_path";
-    value: string;
-    mimeType?: string;
-  };
-}
 
-export interface RawMessage {
-  id: string;
-  source: RawMessageSource;
-  title: string;
-  body: string;
-  postedAt: number;
-  captureType: "notification" | "manual";
-  attachments?: RawMessageAttachment[];
-  contentHash: string;
-  status: "pending" | "processed" | "archived";
-}
 
 // ---- structured-item.schema.json ----
 
-export interface TimeInfo {
-  kind: "none" | "point" | "range" | "deadline" | "recurring";
-  startAt?: number;
-  endAt?: number;
-  deadline?: number;
-  rrule?: string;
-  reminderOffsets?: number[];
-}
 
-export interface StructuredItem {
-  id: string;
-  rawMessageIds: string[];
-  category: string;
-  schemaVersion: string;
-  title: string;
-  summary: string;
-  priority: Priority;
-  confidence: number;
-  time: TimeInfo;
-  payload: Record<string, unknown>;
-  tags?: string[];
-  processedBy: {
-    provider: string;
-    model?: string;
-    pipelineVersion: string;
-  };
-}
 
 // ---- category-registry.schema.json ----
 
-export interface GenericField {
-  key: string;
-  value: string | number | boolean | unknown[];
-  valueType?: "string" | "number" | "boolean" | "datetime" | "list";
-}
+
+/** 分类的默认优先级（v1 沿用，注册表与 AI 输出仍用 P0-P3 表示分类倾向）。 */
+export type Priority = "P0" | "P1" | "P2" | "P3";
 
 export interface CategoryDef {
   key: string;
@@ -95,35 +36,9 @@ export interface CategoryRegistry {
 
 // ---- sync-request / sync-response ----
 
-export interface SyncRequest {
-  deviceId: string;
-  registryVersion: string;
-  registry?: CategoryRegistry;
-  customPrompt?: string;
-  reprocessMessageIds?: string[];
-  /** true 时以 application/x-ndjson 流式返回逐条进度 */
-  stream?: boolean;
-  messages: RawMessage[];
-}
 
 /** 流式同步的 NDJSON 事件：progress 每条消息一个（可多个，item 可选），done 收尾。 */
-export interface SyncStreamEvent {
-  type: "progress" | "warning" | "done";
-  item?: StructuredItem;
-  processedMessageIds?: string[];
-  failedMessageIds?: string[];
-  warnings?: string[];
-  message?: string;
-  registryVersion?: string;
-}
 
-export interface SyncResponse {
-  registryVersion: string;
-  results: StructuredItem[];
-  processedMessageIds: string[];
-  failedMessageIds?: string[];
-  warnings?: string[];
-}
 
 // ---- v2 /v1/process（设计 §8、§12） ----
 

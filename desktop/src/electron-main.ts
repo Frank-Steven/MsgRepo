@@ -4,7 +4,6 @@ import path from "node:path";
 import { loadConfig } from "./config.js";
 import { DESKTOP_ROOT } from "./registry.js";
 import { PairingManager } from "./auth.js";
-import { Store } from "./store.js";
 import { createServer } from "./server.js";
 import { createProvider } from "./ai/factory.js";
 import {
@@ -106,13 +105,11 @@ async function ensureServer(): Promise<void> {
   const provider = createProvider(cfg);
   providerName = provider.name;
   providerModel = provider.model ?? "";
-  const store = new Store(app.getPath("userData"));
   server = createServer({
     host: HOST,
     port: PORT,
     pairing,
     provider,
-    store,
     dataDir: app.getPath("userData"),
   });
   try {
