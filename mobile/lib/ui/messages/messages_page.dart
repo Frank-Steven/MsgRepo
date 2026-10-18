@@ -189,9 +189,18 @@ class MessagesPageState extends State<MessagesPage> {
   /// 触发点：每次列表 reload 之后（即收到新消息 / 下拉刷新 / 启动加载）。
   Future<void> _maybeAutoProcess() async {
     if (_autoProcessRunning) return;
+    final svc = AiProcessingService.instance;
+    // 排除「已在本轮会话里（处理中/待确认）」的消息：
+    // 否则处理完但用户还没确认时，pending 计数不降 → 冷却一过又触发一遍，白烧额度。
+    final sessionIds = <String>{
+      for (final o in svc.session?.outcomes ?? const <AiOutcome>[]) o.message.id,
+    };
     final pending = [
       for (final m in _messages)
-        if (messageGroupKey(m) == kGroupPending) m,
+        if (messageGroupKey(m) == kGroupPending &&
+            !sessionIds.contains(m.id) &&
+            !svc.isProcessing(m.id))
+          m,
     ];
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final lastAt = await AutoProcessState.lastRunAt();
@@ -203,7 +212,6 @@ class MessagesPageState extends State<MessagesPage> {
     );
     if (!ok || !mounted) return;
     _autoProcessRunning = true;
-    await AutoProcessState.markRun(nowMs);
     AppLog.instance.warn('auto-process',
         '未处理 ${pending.length} 条 ≥ $kAutoProcessThreshold，自动提交处理');
     if (!mounted) return;
@@ -211,6 +219,8 @@ class MessagesPageState extends State<MessagesPage> {
         content: Text('未处理已达 ${pending.length} 条，已自动提交处理')));
     try {
       await _processWithAi([for (final m in pending) m.id], auto: true);
+      // 只有真的提交了才记冷却时间：避免一次空跑把 10 分钟冷却浪费掉
+      await AutoProcessState.markRun(nowMs);
     } finally {
       _autoProcessRunning = false;
     }
