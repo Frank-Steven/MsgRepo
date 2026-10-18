@@ -3,7 +3,7 @@ description: >-
   MsgRepo 手机端：采集 Android 通知与手动消息，本地 SQLite 存日程/待办/笔记；
   AI 处理优先走电脑端（adb 通道），电脑端不在线时走远程 OpenAI 兼容接口。
 publish_to: "none"
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
