@@ -731,35 +731,57 @@ class _YearlyPainter extends CustomPainter {
   NodeClusters? _cachedClusters;
 
   /// U11：时间点任务节点聚类（重合的画一个代表点，标题合并）。
-  /// 画布标签最多显示 8 个字（超出加省略号）。
-  ///
-  /// 合作者限制任务名长度的原因就是这个：标签是 45° 斜排的固定宽度文本带，
-  /// 名字一长就会横穿整个图表、和别的标签/虚线打架（2026-10-18 实测 1111… 那条）。
-  static const int _labelMaxChars = 8;
+  /// 画布标签每行最多 8 个字，最多 3 行（45° 斜排文本带放不下更宽的内容）。
+  static const int _labelCharsPerLine = 8;
+  static const int _labelMaxLines = 3;
 
-  String _clipTitle(String title) {
-    final s = title.trim();
-    final chars = s.characters;
-    return chars.length <= _labelMaxChars
-        ? s
-        : '${chars.take(_labelMaxChars)}…';
+  /// 按字符折行（不是截断）：20 个字 → 8 + 8 + 4 三行，全都保留；
+  /// 只有超过 3 行（>24 字）才在最后一行加省略号。
+  String _wrapTitle(String title) {
+    final chars = title.trim().characters.toList();
+    if (chars.isEmpty) return '';
+    final lines = <String>[];
+    for (var i = 0; i < chars.length; i += _labelCharsPerLine) {
+      final end =
+          (i + _labelCharsPerLine) > chars.length ? chars.length : i + _labelCharsPerLine;
+      lines.add(chars.sublist(i, end).join());
+      if (lines.length == _labelMaxLines) break;
+    }
+    final truncated = chars.length > _labelCharsPerLine * _labelMaxLines;
+    if (truncated) {
+      lines[lines.length - 1] = '${lines.last}…';
+    }
+    return lines.join('\n');
   }
 
-  /// 合并标题：多个任务名各占一行（自动换行），最多 3 行。
+  /// 合并标题：多个任务名每个各占一行（长名字自己也折行），总行数不超过 3 行；
+  /// 放不下的任务用「等 N 个」收尾。
   String _mergedTitle(List<String> ids) {
     final titles = [
       for (final id in ids)
         (layout.originals[id]?.title ?? '').trim(),
     ].where((s) => s.isNotEmpty).toList();
     if (titles.isEmpty) return '';
-    if (titles.length == 1) return _clipTitle(titles.first);
-    final lines = titles.take(3).map(_clipTitle).toList();
-    if (titles.length > 3) {
-      lines.add('等${titles.length}个');
+    if (titles.length == 1) return _wrapTitle(titles.first);
+
+    final lines = <String>[];
+    for (var i = 0; i < titles.length; i++) {
+      final wrapped = _wrapTitle(titles[i]).split('\n');
+      final remain = _labelMaxLines - lines.length;
+      if (remain <= 0) {
+        lines[lines.length - 1] = '${lines.last} 等${titles.length - i}个';
+        return lines.join('\n');
+      }
+      if (wrapped.length <= remain) {
+        lines.addAll(wrapped);
+      } else {
+        lines.addAll(wrapped.take(remain - 1));
+        lines.add('等${titles.length - i}个');
+        return lines.join('\n');
+      }
     }
     return lines.join('\n');
   }
-
   NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
         [
           for (final it in layout.items)
@@ -845,7 +867,7 @@ class _YearlyPainter extends CustomPainter {
           final done = it.task.status == TaskStatus.done;
           final titles = merged
               ? _mergedTitle(clusters.ids(ci))
-              : _clipTitle(it.task.title);
+              : _wrapTitle(it.task.title);
           final tp = TextPainter(
             text: TextSpan(
               text: titles,
