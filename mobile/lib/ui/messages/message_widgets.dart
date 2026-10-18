@@ -400,16 +400,33 @@ class _MessageTileState extends State<MessageTile> {
     final cs = Theme.of(context).colorScheme;
     final message = widget.message;
     final isJunk = message.priority == MessagePriority.junk;
-    final titleStyle = TextStyle(
+    // U7（后半）：消息页「突出内容、弱化来源」。
+    // - 正文为主视觉（15、onSurface、最多 3 行）；
+    // - 标题（群名/发送者）降为次要信息（13、onSurfaceVariant）；
+    // - 来源应用降到脚注级（11、outline）。
+    // 若消息没有正文（纯标题通知），标题自动升级为主视觉，避免整卡变灰。
+    final hasBody = message.body.isNotEmpty;
+    final contentStyle = TextStyle(
       fontSize: 15,
-      fontWeight: FontWeight.w500,
+      height: 1.35,
       color: isJunk
           ? cs.outline
-          : (widget.linkedTaskDone ? cs.onSurfaceVariant : null),
+          : (widget.linkedTaskDone ? cs.onSurfaceVariant : cs.onSurface),
       decoration:
           (isJunk || widget.linkedTaskDone) ? TextDecoration.lineThrough : null,
     );
-    final subStyle = TextStyle(fontSize: 13, color: cs.onSurfaceVariant);
+    final titleStyle = hasBody
+        ? TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: isJunk ? cs.outline : cs.onSurfaceVariant,
+            decoration: (isJunk || widget.linkedTaskDone)
+                ? TextDecoration.lineThrough
+                : null,
+          )
+        : contentStyle;
+    final timeStyle = TextStyle(fontSize: 12, color: cs.onSurfaceVariant);
+    final sourceStyle = TextStyle(fontSize: 11, color: cs.outline);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -461,25 +478,28 @@ class _MessageTileState extends State<MessageTile> {
                         ],
                         const SizedBox(width: 8),
                         Text(formatMessageTime(message.postedAt),
-                            style: subStyle),
+                            style: timeStyle),
                       ],
                     ),
                     if (message.body.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(
                         message.body,
-                        maxLines: _expanded ? null : 2,
+                        maxLines: _expanded ? null : 3,
                         overflow: _expanded ? null : TextOverflow.ellipsis,
-                        style: subStyle,
+                        style: contentStyle,
                       ),
                     ],
                     const SizedBox(height: 4),
                     Row(
                       children: [
-                        AppIcon(
-                            packageName: message.packageName,
-                            appName: message.appName,
-                            size: 14),
+                        Opacity(
+                          opacity: 0.75,
+                          child: AppIcon(
+                              packageName: message.packageName,
+                              appName: message.appName,
+                              size: 12),
+                        ),
                         const SizedBox(width: 5),
                         Expanded(
                           child: Text(
@@ -491,8 +511,7 @@ class _MessageTileState extends State<MessageTile> {
                                     : ''),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 12, color: cs.onSurfaceVariant),
+                            style: sourceStyle,
                           ),
                         ),
                         if (_expanded)
