@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/message.dart';
 import 'database.dart';
+import '../services/app_log.dart';
 
 /// Kotlin ↔ Dart 桥接：
 /// - MethodChannel 负责通知监听授权检查/跳转、附件 deeplink 拉起；
@@ -117,7 +118,8 @@ class NotificationBridge {
         for (final e in jsonDecode(json) as List)
           (e as Map).cast<String, dynamic>(),
       ];
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('bridge.read-queue', e, st);
       return const [];
     }
   }
@@ -180,12 +182,13 @@ class NotificationBridge {
               .insertMessageIfNew(_fromQueueEntry(map))) {
             imported++;
           }
-        } catch (_) {
+        } catch (e, st) {
+          AppLog.instance.warn('bridge.parse-file', e, st);
           // 单个文件损坏不阻塞其他文件，文件照删避免反复失败
         } finally {
           try {
             await entity.delete();
-          } catch (_) {}
+          } catch (e, st) { AppLog.instance.warn('bridge.delete-file', e, st); }
         }
       }
 
@@ -194,13 +197,14 @@ class NotificationBridge {
         if (entity is Directory) {
           try {
             if (await entity.list().isEmpty) await entity.delete();
-          } catch (_) {}
+          } catch (e, st) { AppLog.instance.warn('bridge.cleanup-dir', e, st); }
         }
       }
 
       if (imported > 0) _onNewMessages.add(imported);
       return imported;
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('bridge.drain', e, st);
       return 0;
     } finally {
       _pulling = false;

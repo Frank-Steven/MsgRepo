@@ -13,6 +13,7 @@ import 'ui/notes/notes_page.dart';
 import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/todos/todos_page.dart';
+import 'services/app_log.dart';
 
 /// 全局主题模式（设置页修改后即时生效）。持久化 key：theme_mode。
 final themeModeNotifier = ValueNotifier<ThemeMode>(ThemeMode.system);
@@ -78,7 +79,7 @@ Future<void> _appendDebugError(String kind, String message, StackTrace? stack) a
       '\n=== ${DateTime.now().toIso8601String()} [$kind] ===\n$message\n$stack\n',
       mode: FileMode.append,
     );
-  } catch (_) {}
+  } catch (e, st) { AppLog.instance.warn('main.log-file', e, st); }
 }
 
 /// SnackBar 主题（v2.6）：深色模式不再用 M3 默认的浅反色底——

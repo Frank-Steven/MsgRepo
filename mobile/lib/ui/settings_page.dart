@@ -8,6 +8,7 @@ import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/reminder_service.dart';
+import '../../services/app_log.dart';
 
 /// v2 设置页（设计 §9）：外观 / 自定义提示词 / AI 接口 / 连接 / 采集过滤。
 class SettingsPage extends StatefulWidget {
@@ -344,6 +345,50 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!mounted) return;
     setState(() => _exactAlarms = ok);
     _toast(ok ? '已允许精确提醒' : '未获得精确闹钟权限：提醒仍会触发，但可能延迟数分钟');
+  }
+
+  /// 展示最近被记录的异常（P2-6）：把以前静默吞掉的失败变成可读列表。
+  Future<void> _showRecentErrors() async {
+    final entries = AppLog.instance.entries;
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('最近错误（${entries.length} 类）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: entries.isEmpty
+              ? const Text('暂无记录。')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: entries.length,
+                  itemBuilder: (_, i) {
+                    final e = entries[i];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: SelectableText(e.oneLine,
+                          style: const TextStyle(
+                              fontSize: 12, fontFamily: 'monospace')),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              AppLog.instance.clear();
+              Navigator.of(ctx).pop();
+              setState(() {});
+            },
+            child: const Text('清空'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _openAutoStartSettings() async {
@@ -754,6 +799,24 @@ class _SettingsPageState extends State<SettingsPage> {
                 '管理 → 允许后台高耗电）。',
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
+            ),
+            const SizedBox(height: 8),
+            // P2-6：异常不再被静默吞掉，这里给出统一查看入口
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                AppLog.instance.count == 0
+                    ? Icons.check_circle_outline
+                    : Icons.bug_report_outlined,
+                color: AppLog.instance.count == 0 ? cs.primary : cs.error,
+              ),
+              title: const Text('最近错误'),
+              subtitle: Text(
+                AppLog.instance.count == 0 ? '暂无可显示的异常' : '${AppLog.instance.count} 类，点击查看',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _showRecentErrors,
             ),
           ]),
         ],

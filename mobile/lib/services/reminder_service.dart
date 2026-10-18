@@ -6,6 +6,7 @@ import 'package:timezone/timezone.dart' as tz;
 
 import '../models/task.dart';
 import 'database.dart';
+import '../services/app_log.dart';
 
 /// 是否该为这个任务排提醒：active + 有未来的 start_at。纯函数，便于单测。
 bool shouldScheduleReminder(Task task, {required int nowMs}) {
@@ -154,7 +155,9 @@ class ReminderService {
     try {
       tz.setLocalLocation(tz.getLocation(now.timeZoneName));
       return;
-    } catch (_) {}
+    } catch (_) {
+      // 预期分支：系统给的不是 IANA 名，走下面的偏移 + DST 规则挑选，不算错误
+    }
     final name = pickLocalZoneName(
       now: now,
       offsetNow: now.timeZoneOffset,
@@ -226,7 +229,8 @@ class ReminderService {
         if (id == null) continue;
         try {
           await _plugin.cancel(id);
-        } catch (_) {
+        } catch (e, st) {
+          AppLog.instance.warn('reminder.cancel', e, st);
           // 单条取消失败不影响后续
         }
       }

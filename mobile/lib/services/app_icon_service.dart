@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import '../services/app_log.dart';
 
 /// 应用图标加载（v2.4）：平台通道从 PackageManager 取 PNG（96px），
 /// 内存 + 磁盘（<cacheDir>/app_icons/<包名>.png）双层缓存；
@@ -46,7 +47,8 @@ class AppIconService {
         await file.writeAsBytes(bytes, flush: true);
         return _mem[packageName] = bytes;
       }
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('icon.cache-write', e, st);
       // 图标是锦上添花，失败静默
     }
     return _mem[packageName] = null;

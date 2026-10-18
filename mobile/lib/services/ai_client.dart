@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../models/message.dart';
 import 'categories.dart';
 import 'junk_rules.dart';
+import '../services/app_log.dart';
 
 /// AI 接口配置（设计 §8.1/§9）。电脑端条目自动生成（isDesktop=true），不持久化、不可删；
 /// 远程接口以 JSON 列表存 shared_preferences。
@@ -209,7 +210,8 @@ class AiClient {
       return (jsonDecode(json) as List)
           .map((e) => AiEndpoint.fromJson((e as Map).cast<String, dynamic>()))
           .toList();
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('ai.read-endpoints', e, st);
       return [];
     }
   }
@@ -326,7 +328,8 @@ class AiClient {
           .get(Uri.parse('$baseUrl/v1/health'))
           .timeout(const Duration(seconds: 2));
       ok = resp.statusCode == 200;
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('ai.health', e, st);
       ok = false;
     }
     _desktopOnlineCache = ok;
@@ -372,7 +375,7 @@ class AiClient {
           if (m is Map && m['id'] is String) ids.add(m['id'] as String);
         }
       }
-    } catch (_) {}
+    } catch (e, st) { AppLog.instance.warn('ai.parse-models', e, st); }
     if (ids.isEmpty) return '连通正常';
     final shown = ids.take(5).join('、');
     return '连通正常（${ids.length} 个模型：$shown${ids.length > 5 ? '…' : ''}）';
@@ -564,7 +567,8 @@ class AiClient {
     Map<String, dynamic> ev;
     try {
       ev = (jsonDecode(line) as Map).cast<String, dynamic>();
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('ai.ndjson-line', e, st);
       return null;
     }
     final messageId = ev['messageId'] as String? ?? '';
@@ -637,7 +641,8 @@ class AiClient {
         Map<String, dynamic> json;
         try {
           json = (jsonDecode(data) as Map).cast<String, dynamic>();
-        } catch (_) {
+        } catch (e, st) {
+          AppLog.instance.warn('ai.sse-json', e, st);
           continue;
         }
         final choices = json['choices'] as List?;
@@ -792,7 +797,9 @@ class AiClient {
             : (err is String ? err : data['message']);
         if (msg is String && msg.trim().isNotEmpty) return msg.trim();
       }
-    } catch (_) {}
+    } catch (_) {
+      // 预期分支：上游返回的不是 JSON（纯文本错误），下面按原文截断即可
+    }
     return text.length > 240 ? '${text.substring(0, 240)}…' : text;
   }
 

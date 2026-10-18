@@ -15,6 +15,7 @@ import 'ai_panel.dart';
 import 'archived_page.dart';
 import 'import_page.dart';
 import 'message_widgets.dart';
+import '../../services/app_log.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
 /// + 多选批量操作。归档消息在独立页面（ArchivedMessagesPage）。
@@ -118,7 +119,8 @@ class MessagesPageState extends State<MessagesPage> {
         _selected.removeWhere((id) => !_messages.any((m) => m.id == id));
         if (_selected.isEmpty) _selecting = false;
       });
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.warn('messages.reload', e, st);
       if (mounted) setState(() => _loading = false);
     }
     // 尽力加载：任务表（绑定消息的优先级色点 +「已完成」筛选/划线）
@@ -126,12 +128,12 @@ class MessagesPageState extends State<MessagesPage> {
       final tasks = await _db.getTasks();
       if (!mounted) return;
       setState(() => _tasksById = {for (final t in tasks) t.id: t});
-    } catch (_) {}
+    } catch (e, st) { AppLog.instance.warn('messages.done-tasks', e, st); }
     // 通知监听权限状态（v2.5：丢失时页面顶部给恢复引导）
     try {
       final enabled = await NotificationBridge.instance.isListenerEnabled();
       if (mounted) setState(() => _listenerEnabled = enabled);
-    } catch (_) {}
+    } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
   }
 
   bool _isLinkedDone(Message m) =>
