@@ -25,6 +25,10 @@ class MainActivity : FlutterActivity() {
     companion object {
         const val CHANNEL = "dev.msgrepo.mobile/bridge"
         const val REQ_SMS_PERMISSION = 4101
+
+        /** 采集服务（独立组件）通过它把「队列有新数据」推给 Dart 侧（P3-3）。 */
+        @Volatile
+        var bridgeChannel: MethodChannel? = null
     }
 
     /** 进行中的运行时权限请求回调（短信导入，v2.6）。 */
@@ -46,8 +50,9 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        bridgeChannel = channel
+        channel.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isNotificationListenerEnabled" ->
                         result.success(isNotificationListenerEnabled())

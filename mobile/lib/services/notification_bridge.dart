@@ -13,7 +13,8 @@ import '../services/app_log.dart';
 /// Kotlin ↔ Dart 桥接：
 /// - MethodChannel 负责通知监听授权检查/跳转、附件 deeplink 拉起；
 /// - 通知数据不走 MethodChannel，Kotlin 的 NotificationListenerService 将每条
-///   通知原子写入 filesDir/queue/<日期>/<uuid>.json，Dart 每 10s 轮询读取、
+///   通知原子写入 filesDir/queue/<日期>/<uuid>.json，写完后立即通过 channel 通知
+///   Dart 拉取（P3-3）；另有 20s 兜底轮询，覆盖应用被杀后重启的情况。
 ///   入库后删除文件。
 class NotificationBridge {
   NotificationBridge._();
@@ -21,7 +22,9 @@ class NotificationBridge {
   static final NotificationBridge instance = NotificationBridge._();
 
   static const _channel = MethodChannel('dev.msgrepo.mobile/bridge');
-  static const _pollInterval = Duration(seconds: 10);
+  /// 兜底轮询（P3-3）：Kotlin 采集服务写队列后会主动推 queueAvailable，
+  /// 正常情况秒级可见；轮询只在应用重启/推送丢失时兜底，故放宽到 20 秒。
+  static const _pollInterval = Duration(seconds: 20);
   static const _uuid = Uuid();
 
   final _onNewMessages = StreamController<int>.broadcast();
@@ -154,9 +157,21 @@ class NotificationBridge {
   }
 
   void startPolling() {
+    _installQueueCallback();
     _timer ??= Timer.periodic(_pollInterval, (_) => pullOnce());
     // 启动时立即拉一次
     unawaited(pullOnce());
+  }
+
+  /// 安装「队列有新数据」回调（P3-3）：采集服务写完文件会调
+  /// `queueAvailable`，此时立刻取一次，不必等兜底轮询。
+  void _installQueueCallback() {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'queueAvailable') {
+        unawaited(pullOnce());
+      }
+      return null;
+    });
   }
 
   void stopPolling() {

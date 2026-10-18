@@ -11,6 +11,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import android.os.Handler
+import android.os.Looper
 
 /**
  * 通知采集服务。监听到的通知提取为一条 JSON，原子写入应用私有目录
@@ -36,7 +38,19 @@ class NotificationCaptureService : NotificationListenerService() {
     // 本应用进程，Listener 重启后窗口清空，最终去重由 Dart 端 contentHash 保证
     private val recentKeys = LinkedHashSet<String>()
 
+    /** 去重窗口的最大长度（内存）与持久化长度（磁盘），见 P3-3。 */
+    private val capturePrefs by lazy {
+        getSharedPreferences("msgrepo_capture_state", MODE_PRIVATE)
+    }
+
+    @Volatile
+    private var persistPending = false
+
     companion object {
+        private const val MAX_DEDUP_KEYS = 512
+        private const val PERSIST_DEDUP_KEYS = 128
+        private const val PREF_DEDUP_KEY = "recent_keys"
+
         /** 折叠正文前缀：[5条] */
         private val FOLD_PREFIX = Regex("^\\[\\d+条\\]\\s*")
 
@@ -45,6 +59,14 @@ class NotificationCaptureService : NotificationListenerService() {
 
         /** 折叠正文里的「发送者: 内容」前缀 */
         private val SENDER_PREFIX = Regex("^([^:：\\n]{1,30})[:：]\\s*")
+    }
+
+
+
+    override fun onCreate() {
+        super.onCreate()
+        // P3-3：进程被杀后内存去重窗口会丢，这里把上次持久化的 key 读回来
+        loadDedupKeys()
     }
 
     private val seenAppsLock = Any()
@@ -172,9 +194,12 @@ class NotificationCaptureService : NotificationListenerService() {
         val dedupKey = "$packageName|$title|$sender|$text|$postedAt"
         synchronized(recentKeys) {
             if (!recentKeys.add(dedupKey)) return
-            if (recentKeys.size > 512) {
+            if (recentKeys.size > MAX_DEDUP_KEYS) {
                 recentKeys.remove(recentKeys.first())
             }
+            // P3-3：进程被杀后内存窗口会丢，导致同一条通知重投时重复入库。
+            // 持久化最近的一小批 key（节流写，避免每条通知都落盘）。
+            schedulePersistDedupKeys()
         }
 
         val obj = JSONObject()
@@ -257,6 +282,44 @@ class NotificationCaptureService : NotificationListenerService() {
         if (!tmp.renameTo(target)) {
             target.writeText(obj.toString())
             tmp.delete()
+        }
+        notifyQueueAvailable()
+    }
+
+    /** 写入成功后在主线程通知 Dart 立即拉取（失败静默：轮询仍是兜底）。 */
+    private fun notifyQueueAvailable() {
+        try {
+            Handler(Looper.getMainLooper()).post {
+                MainActivity.bridgeChannel?.invokeMethod("queueAvailable", null)
+            }
+        } catch (t: Throwable) {
+            // 应用进程已退出时没有 channel，属正常情况
+        }
+    }
+
+    /** 节流持久化去重窗口：最多每 2 秒落盘一次，且只存最近的 PERSIST_DEDUP_KEYS 条。 */
+    private fun schedulePersistDedupKeys() {
+        if (persistPending) return
+        persistPending = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            persistPending = false
+            try {
+                val tail = synchronized(recentKeys) {
+                    recentKeys.toList().takeLast(PERSIST_DEDUP_KEYS)
+                }
+                capturePrefs.edit().putStringSet(PREF_DEDUP_KEY, HashSet(tail)).apply()
+            } catch (t: Throwable) {
+                // 持久化失败不影响采集
+            }
+        }, 2000L)
+    }
+
+    private fun loadDedupKeys() {
+        try {
+            val saved = capturePrefs.getStringSet(PREF_DEDUP_KEY, null) ?: return
+            synchronized(recentKeys) { recentKeys.addAll(saved) }
+        } catch (t: Throwable) {
+            // 读失败从空窗口开始
         }
     }
 
