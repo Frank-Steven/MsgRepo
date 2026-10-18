@@ -133,7 +133,15 @@ export function createServer(opts: ServerOptions): http.Server {
             return sendJson(res, 400, { error: "invalid JSON body" });
           }
         }
-        if ((body as { reset?: unknown }).reset === true) opts.pairing.reset();
+        if ((body as { reset?: unknown }).reset === true) {
+          // P2-2：重置 token 必须证明持有当前 token。此前任何人都能在 loopback 上把
+          // 手机踢下线（或诱导手机重新配对到本机攻击者进程）。首次配对不走 reset，
+          // 因此「USB 即信任、不输入 token」的零配置体验不受影响。
+          if (!isAuthorized(req, opts.pairing.token)) {
+            return sendJson(res, 403, { error: "reset requires current token" });
+          }
+          opts.pairing.reset();
+        }
         return sendJson(res, 200, {
           token: opts.pairing.token,
           deviceName: os.hostname(),
