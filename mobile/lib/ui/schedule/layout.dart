@@ -196,6 +196,15 @@ class _LaneEntry {
 }
 
 /// 斜 45° 名称空位分配结果（设计 §2.3 名称层；日/年度视图共用）。
+/// 拖动/新建时把时间量化到 [stepMinutes] 的整数倍。
+///
+/// U15：用户要求拖动最小单位 = **1 分钟**（原先是 5 分钟，手指小幅移动时节点不动，手感卡顿）。
+/// 抽成纯函数便于单测；年度/月视图按天/月量化，不走这里。
+double snapToMinutes(double rawMinutes, {double stepMinutes = 1}) {
+  if (stepMinutes <= 0) return rawMinutes;
+  return (rawMinutes / stepMinutes).roundToDouble() * stepMinutes;
+}
+
 /// 一个节点的位置（U11 聚类用）。
 typedef NodePos = ({String id, double x, double y});
 
