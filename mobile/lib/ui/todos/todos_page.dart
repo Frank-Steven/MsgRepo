@@ -40,7 +40,7 @@ class TodosPageState extends State<TodosPage> {
     'daily',
     'timed',
   ];
-  static const _tabLabels = ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档'];
+  static const _tabLabels = ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档', '全部'];
 
   int _tab = 6; // 默认「不定时」（原"我的待办"）
 
@@ -172,6 +172,7 @@ class TodosPageState extends State<TodosPage> {
         _untimed.length,
         _done.length,
         _archived.length,
+        _allTasks.length,
       ];
 
   void _showUndoSnack(String label) {
@@ -214,12 +215,34 @@ class TodosPageState extends State<TodosPage> {
         ..._archived,
       ];
 
+  /// 「全部」页签（U8）：活动任务在前（按开始时间，无时间的排后），
+  /// 已完成随后、已归档最后（各自按更新时间倒序）。
+  List<Task> get _allTasksSorted {
+    final active = [
+      for (final l in _byScale.values) ...l,
+      ..._untimed,
+    ]..sort((a, b) {
+        final sa = a.startAt;
+        final sb = b.startAt;
+        if (sa == null && sb == null) return 0;
+        if (sa == null) return 1;
+        if (sb == null) return -1;
+        return sa.compareTo(sb);
+      });
+    final doneSorted = [..._done]
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final archivedSorted = [..._archived]
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return [...active, ...doneSorted, ...archivedSorted];
+  }
+
   List<Task> get _selectedTasks =>
       _allTasks.where((t) => _selected.contains(t.id)).toList();
 
   List<Task> _tasksForTab(int tab) => switch (tab) {
         7 => _done,
         8 => _archived,
+        9 => _allTasks,
         6 => _untimed,
         _ => _byScale[_scaleTabs[tab]] ?? const [],
       };
@@ -553,7 +576,7 @@ class TodosPageState extends State<TodosPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: SegmentedSelector<int>(
-              values: const [0, 1, 2, 3, 4, 5, 6, 7, 8],
+              values: const [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
               labels: _tabLabels,
               badges: _tabBadges,
               selected: _tab,
@@ -610,6 +633,8 @@ class TodosPageState extends State<TodosPage> {
         return _taskListView(_done, done: true);
       case 8:
         return _taskListView(_archived, archived: true);
+      case 9:
+        return _taskListView(_allTasksSorted, mixed: true);
       case 6:
         return _taskListView(_untimed);
       default:
@@ -705,7 +730,7 @@ class TodosPageState extends State<TodosPage> {
   }
 
   Widget _taskListView(List<Task> tasks,
-      {bool done = false, bool archived = false}) {
+      {bool done = false, bool archived = false, bool mixed = false}) {
     if (tasks.isEmpty) {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
@@ -724,7 +749,12 @@ class TodosPageState extends State<TodosPage> {
         if (i == rows.length) return const SizedBox(height: 32);
         final task = rows[i];
         return _tileFor(task, byParent,
-            archived: archived, recent: done && _isRecent(task));
+            archived: mixed
+                ? task.status == TaskStatus.archived
+                : archived,
+            recent: mixed
+                ? (task.status == TaskStatus.done && _isRecent(task))
+                : (done && _isRecent(task)));
       },
     );
   }
