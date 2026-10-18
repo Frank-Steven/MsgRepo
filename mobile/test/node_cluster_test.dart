@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:msgrepo_mobile/models/task.dart';
 import 'package:msgrepo_mobile/ui/schedule/layout.dart';
 
 /// U11 回归：时间几乎重合的节点要聚成一组（画一个点 + 合并标题）。
@@ -100,6 +101,40 @@ void main() {
     expect(snapToMinutes(-2.4), -2);
     expect(snapToMinutes(-2.6), -3);
     expect(snapToMinutes(5.5, stepMinutes: 0), 5.5);
+  });
+
+  test('标签放置优先级：重要 < 一般 < 不重要', () {
+    Task mk(String id, String priority) => Task(
+          id: id,
+          title: id,
+          kind: TaskKind.point,
+          priority: priority,
+          createdAt: 0,
+          updatedAt: 0,
+        );
+    expect(taskLabelPriorityRank(mk('a', 'important')), 0);
+    expect(taskLabelPriorityRank(mk('b', 'normal')), 1);
+    expect(taskLabelPriorityRank(mk('c', 'minor')), 2);
+  });
+
+  test('assignAngledNames 先放高优先级：普通任务挤不掉重要任务', () {
+    Task mk(String id, String priority, int startMin) => Task(
+          id: id,
+          title: id,
+          kind: TaskKind.point,
+          priority: priority,
+          startAt: startMin * 60000,
+          createdAt: 0,
+          updatedAt: 0,
+        );
+    // 22 在前 2 分钟但优先级普通；33 稍晚但重要
+    final slots = assignDayNames(
+      [mk('22', 'normal', 747), mk('33', 'important', 749)],
+      pxPerMinute: 1.0,
+      measureText: (s) => 40,
+    );
+    final byId = {for (final s in slots) s.taskId: s};
+    expect(byId['33']!.visible, isTrue, reason: '重要任务应优先占位');
   });
 
   test('空输入安全', () {

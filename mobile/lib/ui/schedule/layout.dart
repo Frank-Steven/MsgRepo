@@ -196,6 +196,18 @@ class _LaneEntry {
 }
 
 /// 斜 45° 名称空位分配结果（设计 §2.3 名称层；日/年度视图共用）。
+/// 标签放置的优先级权重：重要 < 一般 < 不重要（数值越小越先放、越容易被保留）。
+int taskLabelPriorityRank(Task t) {
+  switch (t.priority) {
+    case 'important':
+      return 0;
+    case 'minor':
+      return 2;
+    default:
+      return 1;
+  }
+}
+
 /// 拖动/新建时把时间量化到 [stepMinutes] 的整数倍。
 ///
 /// U15：用户要求拖动最小单位 = **1 分钟**（原先是 5 分钟，手指小幅移动时节点不动，手感卡顿）。
@@ -360,7 +372,13 @@ List<DayNameSlot> assignAngledNames(
   final k = axisPerPx;
   const sqrt2 = math.sqrt2;
 
+  // 放置顺序：**优先级优先**（important → normal → minor），同一优先级内再按时间。
+  // 标签位置是先到先得，后来者会被判「放不下」而隐藏；
+  // 所以优先级必须排在时间前面，否则时间早 2 分钟的普通任务会挤掉重要任务的名字
+  // （用户 2026-10-18 用 22:12:27(普通) vs 33:12:29(重要) 的情况指出）。
   final sorted = [...tasks]..sort((a, b) {
+      final r = taskLabelPriorityRank(a).compareTo(taskLabelPriorityRank(b));
+      if (r != 0) return r;
       final c = (a.startAt ?? 0).compareTo(b.startAt ?? 0);
       return c != 0 ? c : a.id.compareTo(b.id);
     });
