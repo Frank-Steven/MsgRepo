@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../models/message.dart';
 import '../models/task.dart';
 import 'ai_client.dart';
+import 'app_log.dart';
 import 'database.dart';
 import 'reminder_service.dart';
 import 'undo_service.dart';
@@ -114,6 +115,17 @@ class AiProcessingService extends ChangeNotifier {
 
   /// 追加新消息后重置；队列排空且面板收起时凭它只发一次完成通知。
   bool _notifiedPending = false;
+
+  /// U19：自动触发的那一轮处理结束后是否自动确认（用户 2026-10-18 要求）。
+  /// 只对一次自动触发生效，确认后自动复位；手动处理永远走人工确认。
+  bool _autoConfirm = false;
+
+  /// 武装「处理完自动确认」（由自动触发路径调用）。
+  void armAutoConfirm() => _autoConfirm = true;
+
+  void disarmAutoConfirm() => _autoConfirm = false;
+
+  bool get autoConfirmArmed => _autoConfirm;
 
   Future<void>? _pumpFuture;
 
@@ -305,6 +317,10 @@ class AiProcessingService extends ChangeNotifier {
   /// （普通通知，不引入前台服务；应用内顶部指示条是可靠入口）。
   void _drained() {
     final s = _session;
+    // U19：自动触发的那一轮排空后直接确认（不需要用户再点）
+    if (_autoConfirm && s != null && !_pumping && s.pendingConfirmCount > 0) {
+      unawaited(_autoConfirmNow(s));
+    }
     if (s != null &&
         !_pumping &&
         s.pendingConfirmCount > 0 &&
@@ -315,6 +331,23 @@ class AiProcessingService extends ChangeNotifier {
           .notifyAiProcessingDone(s.pendingConfirmCount, s.failCount);
     }
     _maybeClear();
+  }
+
+  /// 自动确认：把本轮所有「成功且有结果」的条目写回（建任务 + 置 processed）。
+  /// 失败条目保持原样，留给用户手动看。
+  Future<void> _autoConfirmNow(AiProcessingSession s) async {
+    _autoConfirm = false; // 只生效一次
+    final targets = [
+      for (final o in List<AiOutcome>.from(s.outcomes))
+        if (o.settled && o.error == null && o.result != null) o,
+    ];
+    if (targets.isEmpty) return;
+    try {
+      final n = await confirm(targets);
+      AppLog.instance.warn('ai.auto-confirm', '自动确认 $n 条 AI 结果');
+    } catch (e, st) {
+      AppLog.instance.warn('ai.auto-confirm', e, st);
+    }
   }
 
   /// 会话清空条件（v2.6.4）：队列空（无在跑/排队）且结果列表空

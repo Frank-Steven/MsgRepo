@@ -218,10 +218,13 @@ class MessagesPageState extends State<MessagesPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('未处理已达 ${pending.length} 条，已自动提交处理')));
     try {
+      // U19：自动触发的那一轮处理完自动确认（用户要求，省一次点击）
+      svc.armAutoConfirm();
       await _processWithAi([for (final m in pending) m.id], auto: true);
       // 只有真的提交了才记冷却时间：避免一次空跑把 10 分钟冷却浪费掉
       await AutoProcessState.markRun(nowMs);
     } finally {
+      svc.disarmAutoConfirm();
       _autoProcessRunning = false;
     }
   }
