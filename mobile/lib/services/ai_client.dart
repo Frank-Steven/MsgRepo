@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:characters/characters.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'prompt_rules.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/message.dart';
@@ -415,7 +417,12 @@ class AiClient {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    final customPrompt = prefs.getString(keyCustomPrompt)?.trim() ?? '';
+    // U2：结构化规则（类型 → 处理方式）+ 自由文本，拼成同一条附加要求下发；
+    // 自由文本沿用原 key（custom_prompt），老用户已写的内容不受影响。
+    final customPrompt = composeCustomPrompt(
+      rules: await PromptRulesStore.load(),
+      freeText: prefs.getString(keyCustomPrompt) ?? '',
+    );
 
     if (await isDesktopOnline()) {
       final settled = <String>{};

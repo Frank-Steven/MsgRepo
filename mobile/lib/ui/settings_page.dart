@@ -8,6 +8,7 @@ import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/reminder_service.dart';
+import '../services/prompt_rules.dart';
 import '../../services/app_log.dart';
 
 /// v2 设置页（设计 §9）：外观 / 自定义提示词 / AI 接口 / 连接 / 采集过滤。
@@ -20,6 +21,13 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final _promptController = TextEditingController();
+
+  /// 「类型 → 处理方式」规则行（U2）：每行两个输入框
+  final List<({TextEditingController type, TextEditingController treatment})>
+      _ruleRows = [];
+
+  /// 提示词区是否展开（U2：整块可折叠）
+  bool _promptExpanded = true;
 
   String _themeMode = 'system';
   AiEndpoint _desktop = const AiEndpoint(
@@ -50,6 +58,10 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     _promptController.dispose();
+    for (final r in _ruleRows) {
+      r.type.dispose();
+      r.treatment.dispose();
+    }
     super.dispose();
   }
 
@@ -69,10 +81,24 @@ class _SettingsPageState extends State<SettingsPage> {
     final exactAlarms = await ReminderService.instance.refreshExactAlarms();
     final filterConfig = await AppFilterService.instance.load();
     final seenApps = await AppFilterService.instance.getSeenApps();
+    final rules = await PromptRulesStore.load();
     if (!mounted) return;
     setState(() {
       _themeMode = prefs.getString('theme_mode') ?? 'system';
       _promptController.text = prefs.getString(AiClient.keyCustomPrompt) ?? '';
+      for (final r in _ruleRows) {
+        r.type.dispose();
+        r.treatment.dispose();
+      }
+      _ruleRows
+        ..clear()
+        ..addAll([
+          for (final rule in rules)
+            (
+              type: TextEditingController(text: rule.type),
+              treatment: TextEditingController(text: rule.treatment),
+            ),
+        ]);
       _desktop = desktop;
       _remotes = remotes;
       _defaultEndpointId = defaultId;
@@ -121,6 +147,139 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _savePrompt(String value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(AiClient.keyCustomPrompt, value.trim());
+  }
+
+  // ---- 分类规则（U2）：类型 → 处理方式 ----
+
+  Future<void> _saveRules() async {
+    await PromptRulesStore.save([
+      for (final r in _ruleRows)
+        PromptRule(type: r.type.text, treatment: r.treatment.text),
+    ]);
+  }
+
+  void _addRuleRow() {
+    setState(() => _ruleRows.add((
+          type: TextEditingController(),
+          treatment: TextEditingController(),
+        )));
+  }
+
+  void _removeRuleRow(int index) {
+    if (index < 0 || index >= _ruleRows.length) return;
+    final row = _ruleRows.removeAt(index);
+    row.type.dispose();
+    row.treatment.dispose();
+    setState(() {});
+    _saveRules();
+  }
+
+  /// 提示词区（U2）：可折叠；上半是规则表，下半是自由文本。
+  Widget _buildPromptSection(ColorScheme cs) {
+    final validCount = _ruleRows
+        .where((r) =>
+            r.type.text.trim().isNotEmpty && r.treatment.text.trim().isNotEmpty)
+        .length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: () => setState(() => _promptExpanded = !_promptExpanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                Text('自定义提示词',
+                    style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(width: 8),
+                if (validCount > 0)
+                  Text('$validCount 条规则',
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                const Spacer(),
+                Icon(
+                    _promptExpanded ? Icons.expand_less : Icons.expand_more,
+                    color: cs.onSurfaceVariant),
+              ],
+            ),
+          ),
+        ),
+        if (_promptExpanded) ...[
+          Text('左列写消息类型，右列写处理方式；两列都填才生效，顺序即优先级。',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          const SizedBox(height: 8),
+          for (var i = 0; i < _ruleRows.length; i++) _buildRuleRow(i, cs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _addRuleRow,
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('添加规则'),
+            ),
+          ),
+          const SizedBox(height: 4),
+          TextField(
+            controller: _promptController,
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(
+              labelText: '补充要求（自由文本，可选）',
+              hintText: '例：还能让 AI 识别学习委员是谁',
+              helperText: '两处都会原样附加到系统提示词之后，保存即生效',
+              helperMaxLines: 2,
+              border: OutlineInputBorder(),
+            ),
+            onChanged: _savePrompt,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildRuleRow(int index, ColorScheme cs) {
+    final row = _ruleRows[index];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 4,
+            child: TextField(
+              controller: row.type,
+              decoration: const InputDecoration(
+                labelText: '消息类型',
+                hintText: '广告 / 验证码',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (_) => _saveRules(),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Icon(Icons.arrow_forward, size: 16, color: cs.onSurfaceVariant),
+          ),
+          Expanded(
+            flex: 5,
+            child: TextField(
+              controller: row.treatment,
+              decoration: const InputDecoration(
+                labelText: '处理方式',
+                hintText: '当作营销 / 忽略',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (_) => _saveRules(),
+            ),
+          ),
+          IconButton(
+            tooltip: '删除这一行',
+            icon: const Icon(Icons.close, size: 18),
+            onPressed: () => _removeRuleRow(index),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---- AI 接口 ----
@@ -536,21 +695,7 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ]),
           const Divider(height: 32),
-          _section('自定义提示词', [
-            TextField(
-              controller: _promptController,
-              minLines: 2,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                hintText: '例：把直播开播提醒都当作营销处理；工作消息优先级调高',
-                helperText:
-                    '自由描述即可，无需固定格式；会原样附加到系统提示词之后，保存即生效',
-                helperMaxLines: 2,
-                border: OutlineInputBorder(),
-              ),
-              onChanged: _savePrompt,
-            ),
-          ]),
+          _buildPromptSection(cs),
           const Divider(height: 32),
           _section('AI 接口', [
             _buildEndpointTile(_desktop),
