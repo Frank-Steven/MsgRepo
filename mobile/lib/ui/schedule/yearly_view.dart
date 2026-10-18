@@ -725,13 +725,19 @@ class _YearlyPainter extends CustomPainter {
   double _xOf(double yf) => (yf - layout.scrollYf) * layout.ppy;
 
 
+  // U11：两个半径 5 的点相距 <= 12px 时视觉上已经相碰，合并为一个点。
+  static const double _clusterThresholdPx = 12;
+
   NodeClusters? _cachedClusters;
 
   /// U11：时间点任务节点聚类（重合的画一个代表点，标题合并）。
-  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build([
-        for (final it in layout.items)
-          if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
-      ]);
+  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
+        [
+          for (final it in layout.items)
+            if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
+        ],
+        thresholdPx: _clusterThresholdPx,
+      );
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;

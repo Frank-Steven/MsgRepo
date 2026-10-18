@@ -43,6 +43,38 @@ void main() {
     expect(groups[1], ['b']);
   });
 
+  test('真机场景：08:40 与 09:00 相距约 10px → 合并（阈值 12）', () {
+    final groups = clusterOverlappingNodes(
+      nodes([('t22', 345.0, 100.0), ('t11', 355.0, 100.0)]),
+      thresholdPx: 12,
+    );
+    expect(groups.length, 1, reason: '两个点视觉上已经相碰，应合并');
+    expect(groups.single.length, 2);
+  });
+
+  test('阈值 12 下相距 30px 仍是两个点', () {
+    final groups = clusterOverlappingNodes(
+      nodes([('a', 100.0, 10.0), ('b', 130.0, 10.0)]),
+      thresholdPx: 12,
+    );
+    expect(groups.length, 2);
+  });
+
+  test('U15：拖动量化到 1 分钟（不再按 5 分钟跳格）', () {
+    expect(snapToMinutes(0.4), 0);
+    expect(snapToMinutes(0.6), 1);
+    expect(snapToMinutes(12.4), 12);
+    expect(snapToMinutes(12.6), 13);
+    // 旧行为对照：同样输入按 5 分钟会被吃掉
+    expect(snapToMinutes(12.6, stepMinutes: 5), 15);
+  });
+
+  test('U15：负方向、零步长安全', () {
+    expect(snapToMinutes(-2.4), -2);
+    expect(snapToMinutes(-2.6), -3);
+    expect(snapToMinutes(5.5, stepMinutes: 0), 5.5);
+  });
+
   test('空输入安全', () {
     expect(clusterOverlappingNodes(const []), isEmpty);
   });

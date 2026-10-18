@@ -282,7 +282,8 @@ class DayViewState extends State<DayView>
   void _onScaleUpdate(ScaleUpdateDetails d, _DayLayout layout) {
     if (_dragOriginal != null) {
       final raw = (d.localFocalPoint.dx - _startFocalX) / layout.ppm;
-      final snapped = (raw / 5).round() * 5.0;
+      // U15：最小刻度 1 分钟（原先 5 分钟，小幅拖动会「不动」而显得卡顿）
+      final snapped = snapToMinutes(raw);
       setState(() {
         switch (_dragMode!) {
           case _DragMode.move:
@@ -351,7 +352,8 @@ class DayViewState extends State<DayView>
 
   void _onLongPress(LongPressStartDetails d, _DayLayout layout) {
     if (layout.hitTest(d.localPosition) != null) return;
-    final min = ((_scrollMin + d.localPosition.dx / layout.ppm) / 5).round() * 5;
+    // U15：长按空白处新建任务也按 1 分钟量化
+    final min = snapToMinutes(_scrollMin + d.localPosition.dx / layout.ppm);
     widget.onBlankLongPress((_epochMs + min * 60000).round());
   }
 
@@ -653,13 +655,19 @@ class _DayPainter extends CustomPainter {
   double _xOf(double absMin) => (absMin - layout.scrollMin) * layout.ppm;
 
 
+  // U11：两个半径 5 的点相距 <= 12px 时视觉上已经相碰，合并为一个点。
+  static const double _clusterThresholdPx = 12;
+
   NodeClusters? _cachedClusters;
 
   /// U11：把时间点任务的节点聚类（重合的画一个代表点）。
-  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build([
-        for (final it in layout.items)
-          if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
-      ]);
+  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
+        [
+          for (final it in layout.items)
+            if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
+        ],
+        thresholdPx: _clusterThresholdPx,
+      );
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
