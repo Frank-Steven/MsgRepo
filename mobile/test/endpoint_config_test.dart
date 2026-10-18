@@ -58,4 +58,21 @@ void main() {
       expect(out.endsWith('…'), isTrue);
     });
   });
+
+  group('shouldRetryPerMessage（P1-2 收紧）', () {
+    test('模型输出不合格 → 值得逐条重试', () {
+      expect(AiClient.shouldRetryPerMessage('模型未返回 JSON 数组：xxx'), isTrue);
+      expect(AiClient.shouldRetryPerMessage('模型输出 JSON 解析失败：FormatException'), isTrue);
+    });
+
+    test('配置/网络类错误 → 不逐条重发（避免 N 份全量提示词）', () {
+      expect(
+          AiClient.shouldRetryPerMessage(
+              '远程接口返回 400 @ https://api.deepseek.com/chat/completions：The supported API model names are …'),
+          isFalse);
+      expect(AiClient.shouldRetryPerMessage('HTTP 401 @ https://x.com/models：invalid key'), isFalse);
+      expect(AiClient.shouldRetryPerMessage('SocketException: Failed host lookup'), isFalse);
+      expect(AiClient.shouldRetryPerMessage('TimeoutException after 0:03:00'), isFalse);
+    });
+  });
 }

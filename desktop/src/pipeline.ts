@@ -291,6 +291,22 @@ export const EVAL_BATCH_SIZE = 10;
  * 结果按 messageId 拆分），不支持时回退逐条评估。单条/单批失败不影响后续。
  * 不落盘（电脑端无业务数据，设计 §11）。
  */
+/**
+ * 整批失败后是否值得降级为逐条重试（P1-2 收紧）。
+ *
+ * 只有「模型输出本身不合格」才拆开重发；配置错误（400/401/404）、网络与超时会让
+ * 整批以同样方式失败，逐条重发只会把同一份全量提示词付 N 次（实测 15 条消息被放大
+ * 成 15 次请求）。
+ */
+export function shouldRetryPerMessage(errorText: string): boolean {
+  return (
+    errorText.includes("模型未返回 JSON 数组") ||
+    errorText.includes("模型输出不是 JSON 数组") ||
+    errorText.includes("模型输出 JSON 解析失败") ||
+    errorText.includes("模型未返回 JSON:")
+  );
+}
+
 export async function processStreaming(
   messages: ProcessInputMessage[],
   registry: CategoryRegistry,
@@ -334,7 +350,11 @@ export async function processStreaming(
       } catch (err) {
         // P1-2：整批失败时降级为逐条重试（模型偶尔返回非数组/被截断，
         // 整批报废的代价太大）。单条仍失败才计入 failed。
-        if (batch.length > 1 && typeof provider.evaluateStreaming === "function") {
+        if (
+          batch.length > 1 &&
+          typeof provider.evaluateStreaming === "function" &&
+          shouldRetryPerMessage(String(err))
+        ) {
           for (const msg of batch) {
             try {
               const single = await provider.evaluateStreaming(msg, registry, {

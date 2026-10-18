@@ -456,11 +456,14 @@ class AiClient {
           yield ev;
         }
       } on AiException catch (e) {
-        // P1-2：整批失败时降级为逐条重试。模型偶尔返回单对象/被截断，
-        // 让整批 10 条一起报废代价太大（还得多烧一次 token）。
-        if (batch.length == 1) {
-          failed++;
-          yield AiMessageError(batch.first.id, e.message);
+        // P1-2（已收紧）：只有「模型输出不合格」才降级逐条重试；配置/网络类错误
+        // 整批会以同样方式失败，逐条重发等于把一份全量提示词付 N 次（实测 15 条消息
+        // 被放大成 15 次全量请求，拖慢速度且烧 token）。
+        if (batch.length == 1 || !shouldRetryPerMessage(e.message)) {
+          failed += batch.length;
+          for (final m in batch) {
+            yield AiMessageError(m.id, e.message);
+          }
           continue;
         }
         for (final m in batch) {
@@ -761,6 +764,17 @@ class AiClient {
     final noTrail = trimmed.replaceAll(RegExp(r'/+$'), '');
     return noTrail.isEmpty ? path : '$noTrail/$path';
   }
+
+  /// 整批失败后是否值得降级为逐条重试（P1-2 收紧，2026-10-18）。
+  ///
+  /// 只有「模型输出本身不合格」才逐条重试——这类失败往往由某一条的上下文触发，
+  /// 拆开重发有意义。配置错误（400 模型名 / 401 鉴权 / 404 路径）、网络、超时
+  /// 会让整批以同样方式失败，逐条重发等于把同一份全量提示词付 N 次钱。
+  /// 真机实测：模型名配错时 15 条消息被放大成 15 次全量请求（用户反馈
+  /// 「每条消息单独发送，拖累速度且增加 token 消耗」）。
+  static bool shouldRetryPerMessage(String message) =>
+      message.contains('模型未返回 JSON 数组') ||
+      message.contains('模型输出 JSON 解析失败');
 
   /// 从上游响应里提取人类可读的错误信息（N2）。
   ///
