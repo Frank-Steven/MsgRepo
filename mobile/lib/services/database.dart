@@ -27,6 +27,54 @@ int? _intOrNull(dynamic v) => v == null ? null : (v as num).toInt();
 
 /// 本地 SQLite 存储（设计 §1，DB v5）：messages / tasks / 笔记三级为主表；
 /// v1 的 raw_messages / structured_items 旧表保留不删（只删了读写代码）。
+/// 建「消息 ↔ 任务」多对多关联表（N1，DB v6）。抽成顶层函数便于单测。
+Future<void> createMessageTaskLinksTable(DatabaseExecutor db) async {
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS message_task_links(
+      message_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(message_id, task_id)
+    )
+  ''');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_links_task ON message_task_links(task_id)');
+}
+
+/// v5 → v6 数据迁移：把旧的 1:1 绑定（messages.linked_task_id 与
+/// tasks.source_message_id 两个方向）灌进关联表。旧的列保留不删（兼容只读回放）。
+Future<void> migrateLinksToV6(DatabaseExecutor db) async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  await db.rawInsert('''
+    INSERT OR IGNORE INTO message_task_links(message_id, task_id, created_at)
+    SELECT id, linked_task_id, ? FROM messages WHERE linked_task_id IS NOT NULL
+  ''', [now]);
+  await db.rawInsert('''
+    INSERT OR IGNORE INTO message_task_links(message_id, task_id, created_at)
+    SELECT source_message_id, id, ? FROM tasks WHERE source_message_id IS NOT NULL
+  ''', [now]);
+}
+
+/// 单条绑定写入（兼容旧调用点）：同时更新旧列与关联表，保证双向一致。
+Future<void> setSingleMessageTaskLink(
+    DatabaseExecutor db, String messageId, String? taskId) async {
+  await db.update('messages', {'linked_task_id': taskId},
+      where: 'id = ?', whereArgs: [messageId]);
+  await db.delete('message_task_links',
+      where: 'message_id = ?', whereArgs: [messageId]);
+  if (taskId != null) {
+    await db.insert(
+      'message_task_links',
+      {
+        'message_id': messageId,
+        'task_id': taskId,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+}
+
 class AppDatabase {
   AppDatabase._();
 
@@ -44,7 +92,7 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 5,
+      version: 6,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -65,6 +113,11 @@ class AppDatabase {
     }
     if (oldVersion < 5) {
       await db.execute('ALTER TABLE tasks ADD COLUMN parent_id TEXT');
+    }
+    if (oldVersion < 6) {
+      // N1：消息 ↔ 任务从 1:1 升级为多对多（一条消息可产多个任务，多条消息可指向同一任务）
+      await createMessageTaskLinksTable(db);
+      await migrateLinksToV6(db);
     }
   }
 
@@ -175,6 +228,7 @@ class AppDatabase {
     await db.execute('CREATE INDEX idx_messages_status ON messages(status)');
     await db
         .execute('CREATE INDEX idx_messages_posted_at ON messages(posted_at)');
+    await createMessageTaskLinksTable(db);
     await db.execute('''
       CREATE TABLE tasks(
         id TEXT PRIMARY KEY,
@@ -489,8 +543,100 @@ class AppDatabase {
 
   Future<void> setMessageLinkedTask(String messageId, String? taskId) async {
     final db = await database;
-    await db.update('messages', {'linked_task_id': taskId},
+    await setSingleMessageTaskLink(db, messageId, taskId);
+  }
+
+  // ---- N1：消息 ↔ 任务 多对多 ----
+
+  /// 追加一条关联（一条消息可以关联多个任务）。旧列 linked_task_id 在为空时补上，
+  /// 让只读旧字段的展示代码仍然有值。
+  Future<void> linkMessageTask(String messageId, String taskId) async {
+    final db = await database;
+    await db.insert(
+      'message_task_links',
+      {
+        'message_id': messageId,
+        'task_id': taskId,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    await db.rawUpdate(
+        'UPDATE messages SET linked_task_id = ? WHERE id = ? AND linked_task_id IS NULL',
+        [taskId, messageId]);
+  }
+
+  /// 解除一条关联；旧列自动改指向剩余的第一条（或清空）。
+  Future<void> unlinkMessageTask(String messageId, String taskId) async {
+    final db = await database;
+    await db.delete('message_task_links',
+        where: 'message_id = ? AND task_id = ?',
+        whereArgs: [messageId, taskId]);
+    final remaining = await taskIdsForMessage(messageId);
+    await db.update('messages',
+        {'linked_task_id': remaining.isEmpty ? null : remaining.first},
         where: 'id = ?', whereArgs: [messageId]);
+  }
+
+  /// 解除某条消息的全部关联（「取消任务」用）。
+  Future<void> unlinkAllForMessage(String messageId) async {
+    final db = await database;
+    await db.delete('message_task_links',
+        where: 'message_id = ?', whereArgs: [messageId]);
+    await db.update('messages', {'linked_task_id': null},
+        where: 'id = ?', whereArgs: [messageId]);
+  }
+
+  /// 删除任务时清理它的所有关联（避免悬挂引用）。
+  Future<void> unlinkAllForTask(String taskId) async {
+    final db = await database;
+    await db.delete('message_task_links',
+        where: 'task_id = ?', whereArgs: [taskId]);
+    await db.rawUpdate(
+        'UPDATE messages SET linked_task_id = NULL WHERE linked_task_id = ?', [taskId]);
+  }
+
+  /// 单条消息关联的任务 id（按关联创建时间升序）。
+  Future<List<String>> taskIdsForMessage(String messageId) async {
+    final db = await database;
+    final rows = await db.query('message_task_links',
+        columns: ['task_id'],
+        where: 'message_id = ?',
+        whereArgs: [messageId],
+        orderBy: 'created_at ASC');
+    return [for (final r in rows) r['task_id'] as String];
+  }
+
+  /// 全量映射 messageId → taskIds（消息列表一次取回，避免 N+1 查询）。
+  Future<Map<String, List<String>>> messageTaskLinks() async {
+    final db = await database;
+    final rows = await db.query('message_task_links',
+        columns: ['message_id', 'task_id'], orderBy: 'created_at ASC');
+    final map = <String, List<String>>{};
+    for (final r in rows) {
+      map.putIfAbsent(r['message_id'] as String, () => []).add(r['task_id'] as String);
+    }
+    return map;
+  }
+
+  /// 全量映射 taskId → messageIds（任务详情展示「来源消息」用）。
+  Future<Map<String, List<String>>> taskMessageLinks() async {
+    final db = await database;
+    final rows = await db.query('message_task_links',
+        columns: ['task_id', 'message_id'], orderBy: 'created_at ASC');
+    final map = <String, List<String>>{};
+    for (final r in rows) {
+      map.putIfAbsent(r['task_id'] as String, () => []).add(r['message_id'] as String);
+    }
+    return map;
+  }
+
+  /// 某个任务的来源消息（可能多条）。
+  Future<List<Message>> messagesForTask(String taskId) async {
+    final ids = await taskMessageLinks();
+    final list = ids[taskId] ?? const <String>[];
+    if (list.isEmpty) return const [];
+    return getMessagesByIds(list);
   }
 
   Future<void> deleteMessages(List<String> ids) async {
