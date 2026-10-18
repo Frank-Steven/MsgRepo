@@ -677,7 +677,14 @@ class _DayPainter extends CustomPainter {
     return lines.join('\n');
   }
 
-  /// 合并标题：名字全部保留（各自折行），不同任务之间用「·」隔断，不限行数。
+  /// 合并标题：每个任务名完整显示，名字**结尾加「；」**再换行接下一个，
+  /// 最后一个任务名后不加符号（用户 2026-10-18 指定）。
+  ///
+  /// 例：22 与 11111111111111111111 →
+  ///   22；
+  ///   11111111
+  ///   11111111
+  ///   1111
   String _mergedTitle(List<String> ids) {
     final titles = [
       for (final id in ids)
@@ -689,12 +696,11 @@ class _DayPainter extends CustomPainter {
     final lines = <String>[];
     for (var i = 0; i < titles.length; i++) {
       final wrapped = _wrapTitle(titles[i]).split('\n');
-      if (i == 0) {
-        lines.addAll(wrapped);
-      } else {
-        lines.add('· ${wrapped.first}');
-        lines.addAll(wrapped.skip(1));
+      if (i < titles.length - 1) {
+        // 隔断符接在该任务名的最后一行末尾
+        wrapped[wrapped.length - 1] = '${wrapped.last}；';
       }
+      lines.addAll(wrapped);
     }
     return lines.join('\n');
   }
