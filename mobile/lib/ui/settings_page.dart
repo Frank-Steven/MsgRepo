@@ -499,7 +499,8 @@ class _SettingsPageState extends State<SettingsPage> {
               decoration: const InputDecoration(
                 hintText: '例：把直播开播提醒都当作营销处理；工作消息优先级调高',
                 helperText:
-                    '自由描述即可，无需固定格式；内容会原样附在系统提示词之后，保存即生效',
+                    '自由描述即可，无需固定格式；会原样附加到系统提示词之后，保存即生效',
+                helperMaxLines: 2,
                 border: OutlineInputBorder(),
               ),
               onChanged: _savePrompt,
