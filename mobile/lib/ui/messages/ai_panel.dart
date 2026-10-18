@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/message.dart';
+import '../../services/fold_markers.dart';
 import '../../models/task.dart';
 import '../../services/ai_client.dart';
 import '../../services/ai_processing.dart';
@@ -162,7 +163,8 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
   Widget _buildProcessingCard(AiProcessingSession session, AiOutcome o) {
     final cs = Theme.of(context).colorScheme;
     final m = o.message;
-    final title = m.title.isEmpty ? '(无标题)' : m.title;
+    // U14：展示层剥离折叠后缀，数据层保持原样
+    final title = m.title.isEmpty ? '(无标题)' : stripFoldMarkers(m.title);
     final isCurrent = o.message.id == session.currentId &&
         o.result == null &&
         o.error == null &&
@@ -266,7 +268,8 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     final m = o.message;
     final error = o.error;
     final result = o.result;
-    final title = m.title.isEmpty ? '(无标题)' : m.title;
+    // U14：展示层剥离折叠后缀，数据层保持原样
+    final title = m.title.isEmpty ? '(无标题)' : stripFoldMarkers(m.title);
 
     if (error != null) {
       return ListTile(

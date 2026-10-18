@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../models/message.dart';
+import '../../services/fold_markers.dart';
 import '../../services/undo_service.dart';
 import '../shared/app_icon.dart';
 import '../shared/priority_dot.dart';
@@ -456,7 +457,9 @@ class _MessageTileState extends State<MessageTile> {
                       children: [
                         Expanded(
                           child: Text(
-                            message.title.isEmpty ? '(无标题)' : message.title,
+                            message.title.isEmpty
+                                ? '(无标题)'
+                                : stripFoldMarkers(message.title),
                             maxLines: _expanded ? null : 1,
                             overflow:
                                 _expanded ? null : TextOverflow.ellipsis,
@@ -507,7 +510,7 @@ class _MessageTileState extends State<MessageTile> {
                                     ? message.appName!
                                     : message.packageName) +
                                 (message.conversationTitle?.isNotEmpty == true
-                                    ? ' · ${message.conversationTitle}'
+                                    ? ' · ${stripFoldMarkers(message.conversationTitle!)}'
                                     : ''),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
