@@ -62,8 +62,22 @@ class NotificationCaptureService : NotificationListenerService() {
         val extras = notification.extras
         val rawTitle =
             extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val rawText =
-            extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        // 正文兜底（P3-1）：邮件摘要、长文类通知常把内容放在 EXTRA_BIG_TEXT，
+        // 只读 EXTRA_TEXT 会把整条消息丢弃。按 正文 > 大文本 > 副文本 > 多行 依次回退。
+        val rawText = extras
+            .getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+            .ifBlank {
+                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+                    .orEmpty()
+            }
+            .ifBlank {
+                extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()
+                    .orEmpty()
+            }
+            .ifBlank {
+                extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                    ?.joinToString("\n").orEmpty()
+            }
 
         // 系统折叠通知会带「(5条新消息)」「[5条]」标记，入库前清洗（P3-13）：
         // 否则群名会被写成「XX群(5条新消息)」，按会话聚合/AI 语境判断都会偏移。
