@@ -16,6 +16,7 @@ import 'archived_page.dart';
 import 'import_page.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
+import '../../services/auto_process.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
 /// + 多选批量操作。归档消息在独立页面（ArchivedMessagesPage）。
@@ -53,6 +54,9 @@ class MessagesPageState extends State<MessagesPage> {
 
   /// 通知监听权限（v2.5：null=未知；false 时顶部显示恢复引导横幅）。
   bool? _listenerEnabled;
+
+  /// U19：自动处理正在执行（防止重入）
+  bool _autoProcessRunning = false;
 
   StreamSubscription<int>? _sub;
 
@@ -139,6 +143,8 @@ class MessagesPageState extends State<MessagesPage> {
       final enabled = await NotificationBridge.instance.isListenerEnabled();
       if (mounted) setState(() => _listenerEnabled = enabled);
     } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
+    // U19：未处理堆到阈值时自动提交处理（放在 reload 末尾，避免与首帧竞争）
+    await _maybeAutoProcess();
   }
 
   /// 某条消息关联的任务 id（N1）：优先关联表，回退旧列。
@@ -179,6 +185,37 @@ class MessagesPageState extends State<MessagesPage> {
   /// 发起 AI 处理。[reprocess]=true 仅用于单条左滑「重新处理」——
   /// 已 processed 的消息只有这条路径允许再次发起（v2.6.2）。
   /// v2.6.4 连续排队：随时可追加，挂到队列尾部按序处理，不等上一批跑完。
+  /// U19：未处理消息达到阈值（默认 400）时自动提交处理。
+  /// 触发点：每次列表 reload 之后（即收到新消息 / 下拉刷新 / 启动加载）。
+  Future<void> _maybeAutoProcess() async {
+    if (_autoProcessRunning) return;
+    final pending = [
+      for (final m in _messages)
+        if (messageGroupKey(m) == kGroupPending) m,
+    ];
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final lastAt = await AutoProcessState.lastRunAt();
+    final ok = shouldAutoProcess(
+      pendingCount: pending.length,
+      alreadyProcessing: AiProcessingService.instance.running,
+      lastAutoAtMs: lastAt,
+      nowMs: nowMs,
+    );
+    if (!ok || !mounted) return;
+    _autoProcessRunning = true;
+    await AutoProcessState.markRun(nowMs);
+    AppLog.instance.warn('auto-process',
+        '未处理 ${pending.length} 条 ≥ $kAutoProcessThreshold，自动提交处理');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('未处理已达 ${pending.length} 条，已自动提交处理')));
+    try {
+      await _processWithAi([for (final m in pending) m.id]);
+    } finally {
+      _autoProcessRunning = false;
+    }
+  }
+
   Future<void> _processWithAi(List<String> ids, {bool reprocess = false}) async {
     final msgs = await _db.getMessagesByIds(ids);
     if (msgs.isEmpty || !mounted) return;
