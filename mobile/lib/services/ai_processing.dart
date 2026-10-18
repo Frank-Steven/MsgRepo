@@ -345,17 +345,22 @@ class AiProcessingService extends ChangeNotifier {
       String messageId,
       String oldPriority,
       String oldStatus,
-      String? oldLinkedTaskId,
-      String? createdTaskId,
+      List<String> oldTaskIds,
+      List<String> createdTaskIds,
     })>[];
     final confirmed = <AiOutcome>[];
     for (final o in targets) {
       final r = o.result;
       if (r == null) continue;
       final m = o.message;
-      String? taskId;
-      final draft = r.taskDraft;
-      if (draft != null && draft.title.isNotEmpty) {
+      // N1：一条消息可能产出多个任务草稿；空标题的丢弃。
+      final drafts = r.taskDrafts.isNotEmpty
+          ? r.taskDrafts
+          : (r.taskDraft != null ? [r.taskDraft!] : const <AiTaskDraft>[]);
+      final oldTaskIds = await db.taskIdsForMessage(m.id);
+      final createdIds = <String>[];
+      for (final draft in drafts) {
+        if (draft.title.trim().isEmpty) continue;
         final task = Task(
           id: const Uuid().v4(),
           title: draft.title,
@@ -373,17 +378,21 @@ class AiProcessingService extends ChangeNotifier {
           updatedAt: now,
         );
         await db.insertTask(task);
-        taskId = task.id;
+        createdIds.add(task.id);
       }
       await db.updateMessagePriority([m.id], r.priority);
       await db.updateMessageStatus([m.id], MessageStatus.processed);
-      await db.setMessageLinkedTask(m.id, taskId);
+      // 关联语义与旧版一致：用本次草稿替换旧绑定（无草稿则清空）。
+      await db.unlinkAllForMessage(m.id);
+      for (final id in createdIds) {
+        await db.linkMessageTask(m.id, id);
+      }
       undoItems.add((
         messageId: m.id,
         oldPriority: m.priority,
         oldStatus: m.status,
-        oldLinkedTaskId: m.linkedTaskId,
-        createdTaskId: taskId,
+        oldTaskIds: oldTaskIds,
+        createdTaskIds: createdIds,
       ));
       confirmed.add(o);
     }
@@ -393,11 +402,15 @@ class AiProcessingService extends ChangeNotifier {
       label: '已确认 $count 条 AI 结果',
       undo: () async {
         for (final u in undoItems.reversed) {
-          final taskId = u.createdTaskId;
-          if (taskId != null) await db.deleteTasks([taskId]);
+          if (u.createdTaskIds.isNotEmpty) {
+            await db.deleteTasks(u.createdTaskIds);
+          }
           await db.updateMessagePriority([u.messageId], u.oldPriority);
           await db.updateMessageStatus([u.messageId], u.oldStatus);
-          await db.setMessageLinkedTask(u.messageId, u.oldLinkedTaskId);
+          await db.unlinkAllForMessage(u.messageId);
+          for (final id in u.oldTaskIds) {
+            await db.linkMessageTask(u.messageId, id);
+          }
         }
       },
     );

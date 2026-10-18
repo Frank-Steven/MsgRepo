@@ -78,12 +78,22 @@ export interface TaskDraft {
 export interface EvalResult {
   priority: EvalPriority;
   reason: string;
+  /** 兼容字段：第一条草稿。 */
   taskDraft: TaskDraft | null;
+  /** N1：一条消息可产出多个任务草稿（0..3）。 */
+  taskDrafts?: TaskDraft[];
 }
 
 /** /v1/process 的 NDJSON 流式事件：token 为模型原始输出透传，result/error 每消息一条，done 收尾。 */
 export type ProcessEvent =
   | { type: "token"; messageId: string; delta: string }
-  | { type: "result"; messageId: string; priority: EvalPriority; reason: string; taskDraft: TaskDraft | null }
+  | {
+      type: "result";
+      messageId: string;
+      priority: EvalPriority;
+      reason: string;
+      taskDraft: TaskDraft | null;
+      taskDrafts?: TaskDraft[];
+    }
   | { type: "error"; messageId: string; error: string }
   | { type: "done"; total: number; failed: number };

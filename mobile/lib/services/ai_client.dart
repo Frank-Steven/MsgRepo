@@ -111,13 +111,19 @@ class AiProcessResult {
   final String messageId;
   final String priority; // MessagePriority.red | yellow | green | junk
   final String reason;
+
+  /// 兼容字段：第一条任务草稿（旧调用点仍读它）。
   final AiTaskDraft? taskDraft;
+
+  /// N1：一条消息可以产出多个任务草稿（0..n）。
+  final List<AiTaskDraft> taskDrafts;
 
   const AiProcessResult({
     required this.messageId,
     required this.priority,
     required this.reason,
     this.taskDraft,
+    this.taskDrafts = const [],
   });
 }
 
@@ -628,13 +634,13 @@ class AiClient {
       case 'token':
         return AiTokenDelta(messageId, ev['delta'] as String? ?? '');
       case 'result':
-        final draft = ev['taskDraft'];
+        final drafts = parseTaskDrafts(ev['taskDraft'], ev['taskDrafts']);
         return AiMessageResult(AiProcessResult(
           messageId: messageId,
           priority: _normalizePriority(ev['priority']),
           reason: ev['reason'] as String? ?? '',
-          taskDraft:
-              draft is Map ? AiTaskDraft.fromJson(draft.cast<String, dynamic>()) : null,
+          taskDraft: drafts.isEmpty ? null : drafts.first,
+          taskDrafts: drafts,
         ));
       case 'error':
         return AiMessageError(messageId, ev['error'] as String? ?? '未知错误');
@@ -737,20 +743,19 @@ class AiClient {
     var prompt = '你是消息评估助手。用户消息里有「消息列表」，为其中每条消息输出一个评估对象，'
         '整体组成一个 JSON 数组（顺序与输入一致）：\n'
         '[{"messageId":"输入消息的 messageId","priority":"red|yellow|green|junk",'
-        '"reason":"一句话理由","taskDraft":null 或 '
+        '"reason":"一句话理由","taskDrafts":['
         '{"title":"...","description":"...","kind":"point|range","startAt":"YYYY-MM-DDTHH:mm",'
-        '"endAt":"YYYY-MM-DDTHH:mm","priority":"important|normal|minor"}}]\n'
+        '"endAt":"YYYY-MM-DDTHH:mm","priority":"important|normal|minor"}]}]\n'
         'priority 语义：red=重要、yellow=值得关注、green=一般、junk=垃圾（营销、推广、无用系统提示等）。'
         '判断重要与垃圾是首要职责。结合来源应用与会话语境判断（如银行/支付类通知多重要、'
         '应用商店的推广多为垃圾）。\n'
-        'taskDraft 规则：\n'
-        '- 消息包含明确可执行事项时给出，否则为 null；值得留存备查但无需执行的内容'
-        '（笔记类，如账号信息、地址、灵感）也给 taskDraft，priority=minor。\n'
+        'taskDrafts 规则（数组，最多 3 个；没有可执行事项给空数组 []）：\n'
+        '- 一条消息里有多件互不相关的事，每件给一个草稿；同一件事的多个步骤仍只给一个草稿。\n'
+        '- 值得留存备查但无需执行的内容（笔记类，如账号信息、地址、灵感）也给一个草稿，priority=minor。\n'
         '- title 不超过 20 个字符（中文按 2 字符计），超长的细节放入 description。\n'
         '- kind=point 时点任务只需 startAt；kind=range 时段任务需要 startAt 和 endAt；'
         '没有明确时间的可执行事项省略 startAt/endAt（不定时任务）。\n'
-        '- 消息包含一个主事项和多个子步骤时，只给主事项草稿，子步骤以换行列表写进 '
-        'description，不要拆成多个草稿。\n'
+        '- 同一件事的多步骤在主事项草稿里用换行列表写进 description；互不相关的事才拆成多个草稿。\n'
         '- 任务 priority：important=重要、normal=一般、minor=不重要。\n'
         '时间用本地时间字符串 "YYYY-MM-DDTHH:mm" 输出（不要自行换算毫秒），相对日期（如"本周五""下周一"）'
         '查用户消息里的日期对照表确定；解析出的时间必须晚于基准时间：若字面日期标注了"已过去"，顺延到下一个未来的同名日期。\n'
@@ -880,6 +885,24 @@ class AiClient {
     return valid.contains(v) ? v as String : 'green';
   }
 
+  /// 解析任务草稿（N1）：优先 `taskDrafts` 数组，兼容旧的单个 `taskDraft`。
+  /// 空标题的草稿直接丢弃（模型偶尔给空壳）。
+  static List<AiTaskDraft> parseTaskDrafts(dynamic single, dynamic multi) {
+    final out = <AiTaskDraft>[];
+    if (multi is List) {
+      for (final e in multi) {
+        if (e is! Map) continue;
+        final d = AiTaskDraft.fromJson(e.cast<String, dynamic>());
+        if (d.title.trim().isNotEmpty) out.add(d);
+      }
+    }
+    if (out.isEmpty && single is Map) {
+      final d = AiTaskDraft.fromJson(single.cast<String, dynamic>());
+      if (d.title.trim().isNotEmpty) out.add(d);
+    }
+    return out;
+  }
+
   /// 解析批量评估输出：取首个 [ 到末个 ] 的 JSON 数组，按 messageId 建 map。
   /// 容忍 markdown 围栏/前后缀文字；数组中缺 messageId 或 id 不在批次内的
   /// 元素忽略；完全没有合法数组时抛 AiException（整批报错）。
@@ -904,14 +927,13 @@ class AiClient {
       final map = item.cast<String, dynamic>();
       final id = map['messageId'] as String?;
       if (id == null || !known.contains(id)) continue;
-      final draft = map['taskDraft'];
+      final drafts = parseTaskDrafts(map['taskDraft'], map['taskDrafts']);
       results[id] = AiProcessResult(
         messageId: id,
         priority: _normalizePriority(map['priority']),
         reason: map['reason'] as String? ?? '',
-        taskDraft: draft is Map
-            ? AiTaskDraft.fromJson(draft.cast<String, dynamic>())
-            : null,
+        taskDraft: drafts.isEmpty ? null : drafts.first,
+        taskDrafts: drafts,
       );
     }
     return results;

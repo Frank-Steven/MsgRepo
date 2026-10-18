@@ -74,7 +74,7 @@ export async function processStreaming(
         for (const msg of batch) {
           const result = results.get(msg.id);
           if (result) {
-            emit({ type: "result", messageId: msg.id, ...result });
+            emit({ type: "result", messageId: msg.id, ...result, taskDrafts: result.taskDrafts ?? [] });
           } else {
             failed++;
             emit({ type: "error", messageId: msg.id, error: "模型未返回该条结果" });
@@ -95,7 +95,7 @@ export async function processStreaming(
                 now: options.now,
                 onToken: (delta) => emit({ type: "token", messageId: msg.id, delta }),
               });
-              emit({ type: "result", messageId: msg.id, ...single });
+              emit({ type: "result", messageId: msg.id, ...single, taskDrafts: single.taskDrafts ?? [] });
             } catch (err2) {
               failed++;
               emit({ type: "error", messageId: msg.id, error: String(err2) });
