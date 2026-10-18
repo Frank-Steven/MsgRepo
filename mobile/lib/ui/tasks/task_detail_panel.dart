@@ -42,7 +42,7 @@ class TaskDetailPanel extends StatefulWidget {
 class _TaskDetailPanelState extends State<TaskDetailPanel> {
   Task? _parent;
   List<Task> _children = [];
-  Message? _source;
+  List<Message> _sources = [];
   bool _loaded = false;
 
   @override
@@ -66,26 +66,28 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
     final parent =
         t.parentId == null ? null : await db.getTaskById(t.parentId!);
     final children = await db.getChildTasks(t.id);
-    final source = t.sourceMessageId == null
-        ? null
-        : await db.getMessageById(t.sourceMessageId!);
+    // N1：一个任务可能有多个来源消息；旧列只剩主来源时回退用它。
+    var sources = await db.messagesForTask(t.id);
+    if (sources.isEmpty && t.sourceMessageId != null) {
+      final legacy = await db.getMessageById(t.sourceMessageId!);
+      if (legacy != null) sources = [legacy];
+    }
+
     if (!mounted) return;
     setState(() {
       _parent = parent;
       _children = children;
-      _source = source;
+      _sources = sources;
       _loaded = true;
     });
   }
 
-  void _showSourceDialog() {
-    final msg = _source;
+  void _showSourceDialog(Message msg) {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(msg?.title ?? '来源消息'),
-        content: SingleChildScrollView(
-            child: Text(msg == null ? '原文已不存在' : msg.body)),
+        title: Text(msg.title),
+        content: SingleChildScrollView(child: Text(msg.body)),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
@@ -243,31 +245,35 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
             Text('父任务', style: Theme.of(context).textTheme.labelLarge),
             _taskLinkRow(context, _parent!),
           ],
-          if (t.sourceMessageId != null) ...[
+          if (_sources.isNotEmpty) ...[
             const SizedBox(height: 8),
-            InkWell(
-              onTap: _showSourceDialog,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  children: [
-                    Icon(Icons.message_outlined,
-                        size: 16, color: scheme.onSurfaceVariant),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _source?.title ?? '来源消息（原文已不存在）',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: scheme.onSurfaceVariant),
+            Text(
+                _sources.length > 1 ? '来源消息（${_sources.length}）' : '来源消息',
+                style: Theme.of(context).textTheme.labelLarge),
+            for (final msg in _sources)
+              InkWell(
+                onTap: () => _showSourceDialog(msg),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Icon(Icons.message_outlined,
+                          size: 16, color: scheme.onSurfaceVariant),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          msg.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: scheme.onSurfaceVariant),
+                        ),
                       ),
-                    ),
-                    Icon(Icons.chevron_right,
-                        size: 16, color: scheme.onSurfaceVariant),
-                  ],
+                      Icon(Icons.chevron_right,
+                          size: 16, color: scheme.onSurfaceVariant),
+                    ],
+                  ),
                 ),
               ),
-            ),
           ],
           if (_children.isNotEmpty) ...[
             const SizedBox(height: 8),

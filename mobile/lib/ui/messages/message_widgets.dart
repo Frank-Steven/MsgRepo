@@ -319,6 +319,8 @@ class MessageTile extends StatefulWidget {
 
   /// 关联任务的优先级（v2.6：绑定任务的消息标记显示任务优先级色点）。
   final String? linkedTaskPriority;
+  /// 关联任务数量（N1 多对多）：>1 时标记处显示数量角标。
+  final int linkedTaskCount;
 
   /// 正在被 AI 处理（v2.6.2，AiProcessingService 内存态）：标题行显示
   /// 旋转标记；左滑由调用方一并禁用。
@@ -335,6 +337,7 @@ class MessageTile extends StatefulWidget {
     this.actions = const [],
     this.linkedTaskDone = false,
     this.linkedTaskPriority,
+    this.linkedTaskCount = 0,
     this.processing = false,
     this.onTap,
     this.onLongPress,
@@ -358,9 +361,9 @@ class _MessageTileState extends State<MessageTile> {
   Widget _marker(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     // v2.6：只有绑定任务的消息才显示颜色（其任务优先级色点）；其余空心圆点。
-    final taskPriority = widget.message.linkedTaskId == null
-        ? null
-        : widget.linkedTaskPriority;
+    // N1：一条消息可能关联多个任务，>1 时右下角改成数量角标。
+    final taskPriority =
+        widget.linkedTaskCount == 0 ? null : widget.linkedTaskPriority;
     final Widget dot = taskPriority == null
         ? Container(
             width: 14,
@@ -377,20 +380,33 @@ class _MessageTileState extends State<MessageTile> {
                 shape: BoxShape.circle,
                 color: taskPriorityDotColor(taskPriority)),
           );
-    if (widget.message.linkedTaskId == null) return dot;
+    if (widget.linkedTaskCount == 0) return dot;
+    final Widget badge = widget.linkedTaskCount > 1
+        ? Container(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            decoration: BoxDecoration(
+              color: cs.primary,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              '${widget.linkedTaskCount}',
+              style: TextStyle(
+                  fontSize: 9,
+                  height: 1.2,
+                  color: cs.onPrimary,
+                  fontWeight: FontWeight.w600),
+            ),
+          )
+        : Icon(Icons.task_alt,
+            size: 12,
+            color: widget.linkedTaskDone ? cs.outline : cs.primary);
     return SizedBox(
-      width: 20,
+      width: 22,
       height: 20,
       child: Stack(
         children: [
           Positioned(left: 0, top: 0, child: dot),
-          Positioned(
-            right: 0,
-            bottom: 0,
-            child: Icon(Icons.task_alt,
-                size: 12,
-                color: widget.linkedTaskDone ? cs.outline : cs.primary),
-          ),
+          Positioned(right: 0, bottom: 0, child: badge),
         ],
       ),
     );

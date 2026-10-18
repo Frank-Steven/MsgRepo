@@ -35,6 +35,9 @@ class MessagesPageState extends State<MessagesPage> {
   /// 全部任务 id → Task（v2.6：绑定消息显示任务优先级色点；
   /// 兼作 v2.4「已完成」筛选与行划线样式数据源）。
   Map<String, Task> _tasksById = {};
+
+  /// messageId → 关联任务 id 列表（N1 多对多）
+  Map<String, List<String>> _taskLinks = {};
   bool _loading = true;
 
   /// 截断提示只提示一次/会话（P3-8）
@@ -90,6 +93,7 @@ class MessagesPageState extends State<MessagesPage> {
         _db.getMessages(packageName: _appFilter),
         _db.getDistinctMessageSources(),
         _db.countMessages(packageName: _appFilter),
+        _db.messageTaskLinks(),
       ]);
       if (!mounted) return;
       // P3-8：超过默认上限时提示一次，不再静默截断
@@ -110,6 +114,7 @@ class MessagesPageState extends State<MessagesPage> {
             .where((m) => m.status != MessageStatus.archived)
             .toList();
         _sources = results[1] as List<SourceApp>;
+        _taskLinks = results[3] as Map<String, List<String>>;
         _loading = false;
         // 所选应用的消息可能已不存在，回退到全部
         if (_appFilter != null &&
@@ -136,9 +141,24 @@ class MessagesPageState extends State<MessagesPage> {
     } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
   }
 
+  /// 某条消息关联的任务 id（N1）：优先关联表，回退旧列。
+  List<String> _linkedTaskIds(Message m) {
+    final ids = _taskLinks[m.id];
+    if (ids != null && ids.isNotEmpty) return ids;
+    final single = m.linkedTaskId;
+    return (single == null || single.isEmpty) ? const [] : [single];
+  }
+
+  /// 任一关联任务已完成即视为「已完成」（用于筛选与划线）。
   bool _isLinkedDone(Message m) =>
-      m.linkedTaskId != null &&
-      _tasksById[m.linkedTaskId]?.status == TaskStatus.done;
+      _linkedTaskIds(m).any((id) => _tasksById[id]?.status == TaskStatus.done);
+
+  /// 主关联任务的优先级（决定消息卡色点）。
+  String? _linkedTaskPriority(Message m) {
+    final ids = _linkedTaskIds(m);
+    if (ids.isEmpty) return null;
+    return _tasksById[ids.first]?.priority;
+  }
 
   List<Message> get _visible => _messages.where((m) {
         if (_groupFilter.contains(messageGroupKey(m))) return true;
@@ -233,33 +253,47 @@ class MessagesPageState extends State<MessagesPage> {
   /// 取消选中消息各自关联的任务（删除任务并清除链接）；撤销整体回滚。
   /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），
   /// 与删除合并为同一个复合撤销（设计 §7）。
+  /// 取消选中消息各自关联的**全部**任务（N1：一条消息可能关联多个任务）。
+  /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），与删除合并为同一复合撤销。
   Future<void> _deleteLinkedTasks(List<Message> targets) async {
-    final pairs = <(Message, Task?)>[];
+    // (消息, 该消息关联的任务列表)
+    final pairs = <(Message, List<Task>)>[];
     for (final m in targets) {
-      final id = m.linkedTaskId;
-      pairs.add((m, id == null ? null : await _db.getTaskById(id)));
+      final ids = _linkedTaskIds(m);
+      final tasks = <Task>[];
+      for (final id in ids) {
+        final t = await _db.getTaskById(id);
+        if (t != null) tasks.add(t);
+      }
+      pairs.add((m, tasks));
     }
     final childrenOf = <String, List<Task>>{};
-    for (final (_, t) in pairs) {
-      if (t == null) continue;
-      final children = await _db.getChildTasks(t.id);
-      if (children.isEmpty) continue;
-      childrenOf[t.id] = children;
-      for (final c in children) {
-        await _db.updateTask(c.copyWith(parentId: () => null));
+    for (final (_, tasks) in pairs) {
+      for (final t in tasks) {
+        final children = await _db.getChildTasks(t.id);
+        if (children.isEmpty) continue;
+        childrenOf[t.id] = children;
+        for (final c in children) {
+          await _db.updateTask(c.copyWith(parentId: () => null));
+        }
       }
     }
-    await _db
-        .deleteTasks([for (final (_, t) in pairs) if (t != null) t.id]);
+    final allIds = [
+      for (final (_, tasks) in pairs)
+        for (final t in tasks) t.id,
+    ];
+    if (allIds.isNotEmpty) await _db.deleteTasks(allIds);
     for (final (m, _) in pairs) {
-      await _db.setMessageLinkedTask(m.id, null);
+      await _db.unlinkAllForMessage(m.id);
     }
     UndoService.instance.register(
       label: '已取消任务',
       undo: () async {
-        for (final (m, t) in pairs) {
-          if (t != null) await _db.insertTask(t);
-          await _db.setMessageLinkedTask(m.id, m.linkedTaskId);
+        for (final (m, tasks) in pairs) {
+          for (final t in tasks) {
+            await _db.insertTask(t);
+            await _db.linkMessageTask(m.id, t.id);
+          }
         }
         for (final children in childrenOf.values) {
           for (final c in children) {
@@ -268,9 +302,6 @@ class MessagesPageState extends State<MessagesPage> {
         }
       },
     );
-    if (!mounted) return;
-    showUndoSnackBar(context, '已取消任务', onUndone: reload);
-    await reload();
   }
 
   /// 彻底删除消息（v2.4：垃圾消息左滑「删除」）；撤销 = 整体回插。
@@ -393,7 +424,7 @@ class MessagesPageState extends State<MessagesPage> {
         color: cs.tertiary,
         onTap: () => _processWithAi([m.id], reprocess: !isPending),
       ),
-      if (m.linkedTaskId == null)
+      if (_linkedTaskIds(m).isEmpty)
         SwipeAction(
           icon: Icons.add_task,
           label: '创建任务',
@@ -755,7 +786,8 @@ class MessagesPageState extends State<MessagesPage> {
                     processing: processing,
                     swipeEnabled: !processing,
                     linkedTaskDone: _isLinkedDone(m),
-                    linkedTaskPriority: _tasksById[m.linkedTaskId]?.priority,
+                    linkedTaskPriority: _linkedTaskPriority(m),
+                    linkedTaskCount: _linkedTaskIds(m).length,
                     actions: _actionsFor(m),
                     onTap: () {
                       if (_selecting) _toggleSelect(m);
@@ -785,7 +817,7 @@ class MessagesPageState extends State<MessagesPage> {
     final allJunk = hasSelection &&
         targets.every((m) => m.priority == MessagePriority.junk);
     final allLinked = hasSelection &&
-        targets.every((m) => m.linkedTaskId != null);
+        targets.every((m) => _linkedTaskIds(m).isNotEmpty);
     final selectedIds = [for (final m in targets) m.id];
     return SelectionActionBar(
       actions: [
