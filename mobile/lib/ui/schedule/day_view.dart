@@ -697,6 +697,7 @@ class _DayPainter extends CustomPainter {
     }
     return lines.join('\n');
   }
+  /// 优先级排序权重：数值越小优先级越高（important < normal < minor）。
   NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
         [
           for (final it in layout.items)
@@ -748,7 +749,9 @@ class _DayPainter extends CustomPainter {
         }
       }
 
-      // 名称层：45° 斜文本带 + 垂直虚线（U11：重合点的标题合并成「A / B」）
+      // 名称层：45° 斜文本 + 垂直虚线。
+      // 规则（2026-10-18 收敛后）：布局算法判定「放不下」就不画 —— 宁可少画，也不把名字
+      // 砍断或挤成一团（合作者建议）。重合点的名字合并成「A；B」，折行不截断。
       if (layout.namesH > 0) {
         final dashPaint = Paint()
           ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
@@ -757,14 +760,13 @@ class _DayPainter extends CustomPainter {
         for (final it in layout.items) {
           if (it.isSubtask) continue; // 子任务不显示名称（与父同 y 叠加）
           final slot = layout.nameSlots[it.task.id];
-          if (slot == null || !slot.visible) continue;
+          if (slot == null || !slot.visible) continue; // 放不下就不画
           final ci = clusters.indexOfId(it.task.id);
-          final merged = ci != null && clusters.count(ci) > 1;
           if (ci != null && !clusters.isRepresentative(it.task.id)) continue;
-          // 合并组：虚线对准代表点的 x（否则点与线错位）；单个任务沿用名字槽位
-          final anchorX = ci == null ? _xOf(slot.centerMinutes) : clusters.anchor(ci).$1;
+          final merged = ci != null && clusters.count(ci) > 1;
+          // 合并组用代表点的 x（保证虚线对准圆点）；单个任务用名字槽位
+          final anchorX = ci != null ? clusters.anchor(ci).$1 : _xOf(slot.centerMinutes);
           if (anchorX < -100 || anchorX > size.width + 100) continue;
-          // 虚线：从文本带起点垂直向下连到节点/线段
           final targetY = ci == null ? it.y : clusters.anchor(ci).$2;
           var dy = layout.namesH - 6.0;
           while (dy < targetY - 8) {
@@ -772,19 +774,20 @@ class _DayPainter extends CustomPainter {
                 Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
             dy += 6;
           }
-          final titles = merged
-              ? _mergedTitle(clusters.ids(ci))
-              : _wrapTitle(it.task.title);
           final done = it.task.status == TaskStatus.done;
+          final titles =
+              merged ? _mergedTitle(clusters.ids(ci)) : _wrapTitle(it.task.title);
           final tp = TextPainter(
             text: TextSpan(
               text: titles,
-              style: layout.nameStyle.copyWith(
-                decoration: (done && !merged) ? TextDecoration.lineThrough : null,
-                color: (done && !merged)
-                    ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
-                    : null,
-              ),
+                      style: layout.nameStyle.copyWith(
+                        decoration: (done && !merged)
+                            ? TextDecoration.lineThrough
+                            : null,
+                        color: (done && !merged)
+                            ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
+                            : null,
+                      ),
             ),
             textDirection: TextDirection.ltr,
             maxLines: 30,
