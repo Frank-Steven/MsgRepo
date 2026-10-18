@@ -208,13 +208,20 @@ double snapToMinutes(double rawMinutes, {double stepMinutes = 1}) {
 /// 一个节点的位置（U11 聚类用）。
 typedef NodePos = ({String id, double x, double y});
 
-/// 把时间位置几乎重合的节点聚成若干组（U11）：
-/// 两个节点的 x 与 y 差异都不超过 [thresholdPx] 时视为同一个「叠在一起的点」。
-/// 年度视图与日视图共用；返回每组按 x 升序、组内顺序与原列表一致。
+/// 把时间位置几乎重合的节点聚成若干组（U11）。
+///
+/// 判定：x 差 ≤ [thresholdPx] 即视为「同一时刻」。**默认忽略 y** —— 不同优先级的任务
+/// 在不同泳道，但同一时刻的两个点上下叠着，仍然应合并成一个点（用户 2026-10-18 追加）。
+/// 需要区分泳道时可传 yTolerancePx（小于容器高度即可）。
 /// 纯函数，便于单测（画布逻辑不参与）。
 List<List<String>> clusterOverlappingNodes(
   List<NodePos> nodes, {
   double thresholdPx = 6,
+  /// 跨泳道（不同优先级）时的阈值：两条泳道上下分开，视觉上本来不挤，
+  /// 只有「几乎同一时刻」才合并，否则会把相隔半小时的任务并成一个点。
+  double crossLaneThresholdPx = 6,
+  /// y 差在此以内算同一泳道。
+  double laneTolerancePx = 6,
 }) {
   final groups = <List<NodePos>>[];
   for (final n in nodes) {
@@ -222,7 +229,8 @@ List<List<String>> clusterOverlappingNodes(
     for (final g in groups) {
       final dx = (g.first.x - n.x).abs();
       final dy = (g.first.y - n.y).abs();
-      if (dx <= thresholdPx && dy <= thresholdPx) {
+      final limit = dy <= laneTolerancePx ? thresholdPx : crossLaneThresholdPx;
+      if (dx <= limit) {
         hit = g;
         break;
       }
@@ -238,48 +246,69 @@ List<List<String>> clusterOverlappingNodes(
     for (final g in groups) [for (final n in g) n.id],
   ];
 }
-
-/// 节点聚类的查询封装（U11）：画笔用它判断「该任务是否被代表点覆盖、组中心在哪」。
+/// 节点聚类的查询封装（U11）：画笔用它判断「谁是代表点、点画多大、标题怎么合并」。
 class NodeClusters {
-  final List<List<String>> groups;
+  final List<List<NodePos>> groups;
   final Map<String, int> _index;
-  final Map<int, (double, double)> _center;
 
-  NodeClusters._(this.groups, this._index, this._center);
+  NodeClusters._(this.groups, this._index);
 
-  factory NodeClusters.build(List<NodePos> nodes, {double thresholdPx = 6}) {
-    final groups = clusterOverlappingNodes(nodes, thresholdPx: thresholdPx);
+  factory NodeClusters.build(
+    List<NodePos> nodes, {
+    double thresholdPx = 12,
+    double crossLaneThresholdPx = 6,
+    double laneTolerancePx = 6,
+  }) {
+    final idGroups = clusterOverlappingNodes(
+      nodes,
+      thresholdPx: thresholdPx,
+      crossLaneThresholdPx: crossLaneThresholdPx,
+      laneTolerancePx: laneTolerancePx,
+    );
     final byId = {for (final n in nodes) n.id: n};
+    final groups = <List<NodePos>>[
+      for (final g in idGroups) [for (final id in g) if (byId[id] != null) byId[id]!],
+    ];
     final index = <String, int>{};
-    final center = <int, (double, double)>{};
     for (var i = 0; i < groups.length; i++) {
-      var sx = 0.0, sy = 0.0;
-      for (final id in groups[i]) {
-        index[id] = i;
-        final n = byId[id];
-        if (n != null) {
-          sx += n.x;
-          sy += n.y;
-        }
+      for (final n in groups[i]) {
+        index[n.id] = i;
       }
-      center[i] = (sx / groups[i].length, sy / groups[i].length);
     }
-    return NodeClusters._(groups, index, center);
+    return NodeClusters._(groups, index);
   }
 
   int? indexOfId(String id) => _index[id];
 
-  List<String> ids(int i) => groups[i];
+  List<String> ids(int i) => groups[i].map((n) => n.id).toList();
 
-  /// 组内第一个任务负责画点与合并后的标题，其余跳过。
-  bool isRepresentative(String id) {
-    final i = _index[id];
-    return i != null && groups[i].isNotEmpty && groups[i].first == id;
+  int count(int i) => groups[i].length;
+
+  /// 代表点：y 最小的那个（泳道越靠上优先级越高），保留最高优先级的颜色与泳道。
+  String representativeId(int i) {
+    var best = groups[i].first;
+    for (final n in groups[i]) {
+      if (n.y < best.y) best = n;
+    }
+    return best.id;
   }
 
-  (double, double) centerOf(int i) => _center[i] ?? (0.0, 0.0);
-}
+  bool isRepresentative(String id) {
+    final i = _index[id];
+    return i != null && representativeId(i) == id;
+  }
 
+  /// 合并点的绘制位置：x 取组内时间均值，y 取代表点所在泳道。
+  (double, double) anchor(int i) {
+    var sx = 0.0;
+    var minY = groups[i].first.y;
+    for (final n in groups[i]) {
+      sx += n.x;
+      if (n.y < minY) minY = n.y;
+    }
+    return (sx / groups[i].length, minY);
+  }
+}
 class DayNameSlot {
   final String taskId;
 

@@ -367,7 +367,7 @@ class DayViewState extends State<DayView>
         () => (TextPainter(
               text: TextSpan(text: title, style: nameStyle),
               textDirection: TextDirection.ltr,
-              maxLines: 1,
+              maxLines: 3,
             )..layout())
             .width);
     final display = _displayTasks();
@@ -661,6 +661,38 @@ class _DayPainter extends CustomPainter {
   NodeClusters? _cachedClusters;
 
   /// U11：把时间点任务的节点聚类（重合的画一个代表点）。
+  /// 画布标签最多显示 8 个字（超出加省略号）。
+  ///
+  /// 合作者限制任务名长度的原因就是这个：标签是 45° 斜排的固定宽度文本带，
+  /// 名字一长就会横穿整个图表、和别的标签/虚线打架（2026-10-18 实测 1111… 那条）。
+  static const int _labelMaxChars = 8;
+
+  String _clipTitle(String title) {
+    final s = title.trim();
+    final chars = s.characters;
+    return chars.length <= _labelMaxChars
+        ? s
+        : '${chars.take(_labelMaxChars)}…';
+  }
+
+  /// 合并标题：多个任务名**各占一行**（自动换行），最多 3 行，多了给「等 N 个」。
+  ///
+  /// 为什么换行而不是「A / B」一行：45° 斜排文本带在宽度方向空间有限，
+  /// 一行串起来会横穿图表（合作者限制任务名长度就是这个原因）。
+  String _mergedTitle(List<String> ids) {
+    final titles = [
+      for (final id in ids)
+        (layout.originals[id]?.title ?? '').trim(),
+    ].where((s) => s.isNotEmpty).toList();
+    if (titles.isEmpty) return '';
+    if (titles.length == 1) return _clipTitle(titles.first);
+    final lines = titles.take(3).map(_clipTitle).toList();
+    if (titles.length > 3) {
+      lines.add('等${titles.length}个');
+    }
+    return lines.join('\n');
+  }
+
   NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
         [
           for (final it in layout.items)
@@ -687,9 +719,11 @@ class _DayPainter extends CustomPainter {
         if (it.isPoint) {
           if (!clusters.isRepresentative(it.task.id)) continue;
           final ci = clusters.indexOfId(it.task.id)!;
-          final c = clusters.centerOf(ci);
-          canvas.drawCircle(Offset(c.$1, c.$2), it.isSubtask ? 3.5 : 5,
-              Paint()..color = color);
+          final c = clusters.anchor(ci);
+          // U11 追加：合并了多个任务时点画大一圈，提示「此处不止一个任务」
+          final baseR = it.isSubtask ? 3.5 : 5.0;
+          final radius = clusters.count(ci) > 1 ? baseR + 2.0 : baseR;
+          canvas.drawCircle(Offset(c.$1, c.$2), radius, Paint()..color = color);
         } else {
           canvas.drawLine(
             Offset(it.x1, it.y),
@@ -719,12 +753,12 @@ class _DayPainter extends CustomPainter {
           final slot = layout.nameSlots[it.task.id];
           if (slot == null || !slot.visible) continue;
           final ci = clusters.indexOfId(it.task.id);
-          final merged = ci != null && clusters.ids(ci).length > 1;
-          if (merged && !clusters.isRepresentative(it.task.id)) continue;
+          final merged = ci != null && clusters.count(ci) > 1;
+          if (ci != null && !clusters.isRepresentative(it.task.id)) continue;
           final anchorX = _xOf(slot.centerMinutes);
           if (anchorX < -100 || anchorX > size.width + 100) continue;
           // 虚线：从文本带起点垂直向下连到节点/线段
-          final targetY = merged ? clusters.centerOf(ci).$2 : it.y;
+          final targetY = ci == null ? it.y : clusters.anchor(ci).$2;
           var dy = layout.namesH - 6.0;
           while (dy < targetY - 8) {
             canvas.drawLine(
@@ -732,11 +766,8 @@ class _DayPainter extends CustomPainter {
             dy += 6;
           }
           final titles = merged
-              ? [
-                  for (final id in clusters.ids(ci))
-                    layout.originals[id]?.title ?? '',
-                ].where((s) => s.isNotEmpty).join(' / ')
-              : it.task.title;
+              ? _mergedTitle(clusters.ids(ci))
+              : _clipTitle(it.task.title);
           final done = it.task.status == TaskStatus.done;
           final tp = TextPainter(
             text: TextSpan(
@@ -749,7 +780,7 @@ class _DayPainter extends CustomPainter {
               ),
             ),
             textDirection: TextDirection.ltr,
-            maxLines: 1,
+            maxLines: 3,
           )..layout();
           canvas.save();
           canvas.translate(anchorX, layout.namesH - 4);

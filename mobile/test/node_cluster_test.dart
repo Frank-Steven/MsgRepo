@@ -24,12 +24,39 @@ void main() {
     expect(groups.length, 2);
   });
 
-  test('同一时刻但不同泳道（y 差大）→ 不合并', () {
+  test('同一时刻但不同泳道（不同优先级）→ 默认仍合并（用户追加需求）', () {
     final groups = clusterOverlappingNodes(nodes([
       ('a', 100.0, 50.0),
       ('b', 100.0, 80.0),
     ]));
+    expect(groups.length, 1, reason: '跨泳道同一时刻也要合成一个点');
+  });
+
+  test('两级阈值：跨泳道 10px 不合并（防止把相隔半小时的任务并成一个点）', () {
+    final groups = clusterOverlappingNodes(
+      nodes([('a', 100.0, 50.0), ('b', 110.0, 80.0)]),
+      thresholdPx: 12,
+      crossLaneThresholdPx: 6,
+    );
     expect(groups.length, 2);
+  });
+
+  test('两级阈值：同泳道 10px 合并（两个点会相碰）', () {
+    final groups = clusterOverlappingNodes(
+      nodes([('a', 100.0, 50.0), ('b', 110.0, 52.0)]),
+      thresholdPx: 12,
+      crossLaneThresholdPx: 6,
+    );
+    expect(groups.length, 1);
+  });
+
+  test('两级阈值：跨泳道 3px 合并（同一时刻不同优先级）', () {
+    final groups = clusterOverlappingNodes(
+      nodes([('a', 100.0, 50.0), ('b', 103.0, 80.0)]),
+      thresholdPx: 12,
+      crossLaneThresholdPx: 6,
+    );
+    expect(groups.length, 1);
   });
 
   test('三个点一簇，组内保持输入顺序、组间按 x 升序', () {
