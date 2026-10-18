@@ -36,4 +36,26 @@ void main() {
       expect(AiClient.endpointConfigHint('api.deepseek.com'), isNotNull);
     });
   });
+
+  group('describeUpstreamError（N2）', () {
+    test('优先取 error.message，而不是整段 JSON', () {
+      const body = '{"error":{"message":"The supported API model names are deepseek-flash '
+          'and deepseek-v4-pro","type":"invalid_request_error"}}';
+      expect(AiClient.describeUpstreamError(body),
+          'The supported API model names are deepseek-flash and deepseek-v4-pro');
+    });
+
+    test('没有 error 字段时退回 message 或原文', () {
+      expect(AiClient.describeUpstreamError('{"message":"bad model"}'), 'bad model');
+      expect(AiClient.describeUpstreamError('plain text error'), 'plain text error');
+      expect(AiClient.describeUpstreamError(''), '');
+    });
+
+    test('超长非 JSON 正文按 240 字截断', () {
+      final long = 'x' * 300;
+      final out = AiClient.describeUpstreamError(long);
+      expect(out.length, 241);
+      expect(out.endsWith('…'), isTrue);
+    });
+  });
 }

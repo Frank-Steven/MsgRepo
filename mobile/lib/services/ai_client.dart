@@ -358,19 +358,24 @@ class AiClient {
       throw AiException('无法连接 $url：$e');
     }
     if (resp.statusCode != 200) {
-      final body = resp.body.trim();
-      final excerpt = body.isEmpty
-          ? ''
-          : '：${body.length > 160 ? body.substring(0, 160) : body}';
-      throw AiException('HTTP ${resp.statusCode} @ $url$excerpt');
+      final detail = describeUpstreamError(resp.body);
+      throw AiException('HTTP ${resp.statusCode} @ $url${detail.isEmpty ? '' : '：$detail'}');
     }
+    // 成功时把模型 id 列出来（U1/N2）：上游只校验 /models 不校验模型名，
+    // 用户很容易填成版本号（如 DeepSeek-V41-Flash）导致真实调用 400。
+    final ids = <String>[];
     try {
       final data = (jsonDecode(resp.body) as Map).cast<String, dynamic>();
-      final count = (data['data'] as List?)?.length;
-      return count != null ? '连通正常（$count 个模型）' : '连通正常';
-    } catch (_) {
-      return '连通正常';
-    }
+      final list = data['data'];
+      if (list is List) {
+        for (final m in list) {
+          if (m is Map && m['id'] is String) ids.add(m['id'] as String);
+        }
+      }
+    } catch (_) {}
+    if (ids.isEmpty) return '连通正常';
+    final shown = ids.take(5).join('、');
+    return '连通正常（${ids.length} 个模型：$shown${ids.length > 5 ? '…' : ''}）';
   }
 
   // ---- 处理 ----
@@ -617,10 +622,8 @@ class AiClient {
           await client.send(req).timeout(const Duration(seconds: 30));
       if (streamed.statusCode != 200) {
         final errBody = await streamed.stream.bytesToString();
-        final errText = errBody.trim();
-        final excerpt =
-            errText.length > 160 ? errText.substring(0, 160) : errText;
-        throw AiException('远程接口返回 ${streamed.statusCode} @ $url：$excerpt');
+        throw AiException(
+            '远程接口返回 ${streamed.statusCode} @ $url：${describeUpstreamError(errBody)}');
       }
       final full = StringBuffer();
       await for (final line
@@ -757,6 +760,26 @@ class AiClient {
     final trimmed = baseUrl.trim();
     final noTrail = trimmed.replaceAll(RegExp(r'/+$'), '');
     return noTrail.isEmpty ? path : '$noTrail/$path';
+  }
+
+  /// 从上游响应里提取人类可读的错误信息（N2）。
+  ///
+  /// 上游常把真正原因放在 error.message 里（如 DeepSeek 的
+  /// 「The supported API model names are …」），直接截断原始 JSON 会把它切掉。
+  static String describeUpstreamError(String body) {
+    final text = body.trim();
+    if (text.isEmpty) return '';
+    try {
+      final data = jsonDecode(text);
+      if (data is Map) {
+        final err = data['error'];
+        final msg = err is Map
+            ? err['message']
+            : (err is String ? err : data['message']);
+        if (msg is String && msg.trim().isNotEmpty) return msg.trim();
+      }
+    } catch (_) {}
+    return text.length > 240 ? '${text.substring(0, 240)}…' : text;
   }
 
   /// 常见配置错误的前置提示（N2）：返回 null 表示没发现明显问题。
