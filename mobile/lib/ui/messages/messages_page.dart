@@ -203,20 +203,24 @@ class MessagesPageState extends State<MessagesPage> {
           m,
     ];
     final nowMs = DateTime.now().millisecondsSinceEpoch;
+    // 阈值与开关都可由用户在设置里调整（合作者建议：参数应该放出来）
+    if (!await AutoProcessState.enabled()) return;
+    final threshold = await AutoProcessState.threshold();
     final lastAt = await AutoProcessState.lastRunAt();
     final ok = shouldAutoProcess(
       pendingCount: pending.length,
       alreadyProcessing: AiProcessingService.instance.running,
       lastAutoAtMs: lastAt,
       nowMs: nowMs,
+      threshold: threshold,
     );
     if (!ok || !mounted) return;
     _autoProcessRunning = true;
     AppLog.instance.warn('auto-process',
-        '未处理 ${pending.length} 条 ≥ $kAutoProcessThreshold，自动提交处理');
+        '未处理 ${pending.length} 条 ≥ $threshold，自动提交处理');
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('未处理已达 ${pending.length} 条，已自动提交处理')));
+        content: Text('未处理已达 ${pending.length} 条（阈值 $threshold），已自动提交处理')));
     try {
       // U19：自动触发的那一轮处理完自动确认（用户要求，省一次点击）
       svc.armAutoConfirm();

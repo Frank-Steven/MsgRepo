@@ -8,6 +8,7 @@ import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/reminder_service.dart';
+import '../services/auto_process.dart';
 import '../services/prompt_rules.dart';
 import '../../services/app_log.dart';
 
@@ -37,6 +38,10 @@ class _SettingsPageState extends State<SettingsPage> {
     isDesktop: true,
   );
   bool? _desktopOnline;
+
+  /// U19 自动处理：开关 + 未处理阈值（用户可调，合作者 2026-10-18 建议）
+  bool _autoProcessEnabled = true;
+  int _autoThreshold = kAutoProcessThreshold;
   String _token = '';
   String? _desktopDeviceName;
   List<AiEndpoint> _remotes = [];
@@ -67,6 +72,8 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
+    final autoEnabled = await AutoProcessState.enabled();
+    final autoThreshold = await AutoProcessState.threshold();
     final ai = AiClient.instance;
     final desktop = await ai.desktopEndpoint();
     final remotes = await ai.getRemoteEndpoints();
@@ -110,6 +117,8 @@ class _SettingsPageState extends State<SettingsPage> {
       _exactAlarms = exactAlarms;
       _filterConfig = filterConfig;
       _knownAppNames = {for (final a in seenApps) a.packageName: a.appName};
+      _autoProcessEnabled = autoEnabled;
+      _autoThreshold = autoThreshold;
     });
   }
 
@@ -721,6 +730,48 @@ class _SettingsPageState extends State<SettingsPage> {
                 icon: const Icon(Icons.add),
                 label: const Text('添加远程接口'),
               ),
+            ),
+          ]),
+          const Divider(height: 32),
+          _section('自动处理', [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('未处理达到阈值时自动处理'),
+              subtitle: const Text('不用手动点「自动处理」；跑完会自动确认结果'),
+              value: _autoProcessEnabled,
+              onChanged: (v) async {
+                await AutoProcessState.setEnabled(v);
+                if (mounted) setState(() => _autoProcessEnabled = v);
+              },
+            ),
+            Row(
+              children: [
+                const Text('阈值'),
+                Expanded(
+                  child: Slider(
+                    value: _autoThreshold.toDouble(),
+                    min: kAutoProcessThresholdMin.toDouble(),
+                    max: kAutoProcessThresholdMax.toDouble(),
+                    divisions:
+                        (kAutoProcessThresholdMax - kAutoProcessThresholdMin) ~/ 50,
+                    label: '$_autoThreshold 条',
+                    onChanged: _autoProcessEnabled
+                        ? (v) =>
+                            setState(() => _autoThreshold = (v / 50).round() * 50)
+                        : null,
+                    onChangeEnd: (v) async {
+                      final t = (v / 50).round() * 50;
+                      await AutoProcessState.setThreshold(t);
+                      if (mounted) setState(() => _autoThreshold = t);
+                    },
+                  ),
+                ),
+                Text('$_autoThreshold 条'),
+              ],
+            ),
+            Text(
+              '上限 500：消息页一次只加载 500 条，再高就数不到了',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
           ]),
           const Divider(height: 32),

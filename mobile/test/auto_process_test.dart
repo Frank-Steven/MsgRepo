@@ -62,4 +62,57 @@ void main() {
     await AutoProcessState.markRun(now);
     expect(await AutoProcessState.lastRunAt(), now);
   });
+
+  group('阈值可配置（合作者建议：参数放出来给用户调）', () {
+    test('clamp：低于 100 抬到 100，高于 500 压到 500', () {
+      expect(clampAutoProcessThreshold(10), kAutoProcessThresholdMin);
+      expect(clampAutoProcessThreshold(400), 400);
+      expect(clampAutoProcessThreshold(999), kAutoProcessThresholdMax);
+    });
+
+    test('默认值：开关开、阈值 400', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await AutoProcessState.enabled(), isTrue);
+      expect(await AutoProcessState.threshold(), kAutoProcessThreshold);
+    });
+
+    test('读写的阈值会被夹到合法区间', () async {
+      SharedPreferences.setMockInitialValues({});
+      await AutoProcessState.setThreshold(300);
+      expect(await AutoProcessState.threshold(), 300);
+      await AutoProcessState.setThreshold(9999);
+      expect(await AutoProcessState.threshold(), kAutoProcessThresholdMax);
+      await AutoProcessState.setThreshold(1);
+      expect(await AutoProcessState.threshold(), kAutoProcessThresholdMin);
+    });
+
+    test('总开关可关闭并可重新打开', () async {
+      SharedPreferences.setMockInitialValues({});
+      await AutoProcessState.setEnabled(false);
+      expect(await AutoProcessState.enabled(), isFalse);
+      await AutoProcessState.setEnabled(true);
+      expect(await AutoProcessState.enabled(), isTrue);
+    });
+
+    test('用户调低阈值后，同样数量会触发', () {
+      expect(
+          shouldAutoProcess(
+            pendingCount: 120,
+            alreadyProcessing: false,
+            lastAutoAtMs: null,
+            nowMs: now,
+            threshold: 100,
+          ),
+          isTrue);
+      expect(
+          shouldAutoProcess(
+            pendingCount: 120,
+            alreadyProcessing: false,
+            lastAutoAtMs: null,
+            nowMs: now,
+            threshold: 400,
+          ),
+          isFalse);
+    });
+  });
 }
