@@ -750,8 +750,15 @@ class _YearlyPainter extends CustomPainter {
   /// 合并标题：每个任务名完整显示（折行），名字末尾加「；」再接下一个，最后一个不加。
   /// 顺序与下方任务列表一致（第一个任务在最上）。
   String _mergedTitle(List<String> ids) {
+    // 顺序：高优先级在前（用户 2026-10-18：应优先显示优先级最高的任务）
+    final ordered = [...ids]..sort((a, b) {
+        final ra = _priorityRank(a);
+        final rb = _priorityRank(b);
+        if (ra != rb) return ra.compareTo(rb);
+        return ids.indexOf(a).compareTo(ids.indexOf(b));
+      });
     final titles = [
-      for (final id in ids)
+      for (final id in ordered)
         (layout.originals[id]?.title ?? '').trim(),
     ].where((s) => s.isNotEmpty).toList();
     if (titles.isEmpty) return '';
@@ -767,14 +774,27 @@ class _YearlyPainter extends CustomPainter {
     }
     return lines.join('\n');
   }
+  /// 优先级权重：important=0 < normal=1 < minor=2。
+  int _priorityRank(String taskId) {
+    switch (layout.originals[taskId]?.priority ?? 'normal') {
+      case 'important':
+        return 0;
+      case 'minor':
+        return 2;
+      default:
+        return 1;
+    }
+  }
+
   NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build(
         [
           for (final it in layout.items)
             if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
         ],
         thresholdPx: _clusterThresholdPx,
-        // 不同优先级（不同泳道）不合并：各泳道独立成点
-        crossLaneThresholdPx: 0,
+        // 跨泳道（不同优先级）用同一个距离阈值：用户 2026-10-18 决定保留跨泳道合并，
+        // 且要求不要「高优先级更难合并」
+        crossLaneThresholdPx: _clusterThresholdPx,
       );
   @override
   void paint(Canvas canvas, Size size) {
