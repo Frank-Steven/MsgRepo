@@ -17,6 +17,9 @@ import java.util.UUID
  * filesDir/queue/<yyyy-MM-dd>/<uuid>.json（先写 .tmp 再 rename），
  * 由 Dart 侧轮询读取并删除，避免与 Dart 端 SQLite 产生并发写冲突。
  *
+ * 折叠标记清洗（P3-13）：只对 FLAG_GROUP_SUMMARY 的系统摘要通知去掉「(N条新消息)」
+ * 与「[N条]」；普通通知原样保留（昵称里含该串是真实场景，不能误伤）。
+ *
  * 采集过滤：读取 Dart 侧 shared_preferences 写入的配置（SharedPreferences 文件
  * "FlutterSharedPreferences"，key "flutter.app_filter_config"，值为
  * {"mode": "all"|"allowlist"|"blacklist", "packages": [...]}）。allowlist 模式
@@ -79,12 +82,20 @@ class NotificationCaptureService : NotificationListenerService() {
                     ?.joinToString("\n").orEmpty()
             }
 
-        // 系统折叠通知会带「(5条新消息)」「[5条]」标记，入库前清洗（P3-13）：
-        // 否则群名会被写成「XX群(5条新消息)」，按会话聚合/AI 语境判断都会偏移。
-        val folded = FOLD_PREFIX.containsMatchIn(rawText) ||
-            FOLD_SUFFIX.containsMatchIn(rawTitle)
-        val title = FOLD_SUFFIX.replace(rawTitle, "").trim()
-        var text = FOLD_PREFIX.replace(rawText, "").trim()
+        // 折叠标记清洗（P3-13，2026-10-18 收紧为路线 B）：
+        // 只有「系统分组摘要」（FLAG_GROUP_SUMMARY）才可能是折叠产生的标记。
+        // 普通单条通知里出现的「(N条新消息)」「[N条]」可能是真实内容
+        // （例如用户把昵称改成「Frank（1000条新消息）」），一律原样保留。
+        val isGroupSummary =
+            (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
+        val folded = isGroupSummary &&
+            (FOLD_PREFIX.containsMatchIn(rawText) ||
+                FOLD_SUFFIX.containsMatchIn(rawTitle))
+
+        val title =
+            if (folded) FOLD_SUFFIX.replace(rawTitle, "").trim() else rawTitle.trim()
+        var text =
+            if (folded) FOLD_PREFIX.replace(rawText, "").trim() else rawText.trim()
         if (title.isBlank() && text.isBlank()) return
 
         // 折叠正文常以「发送者: 内容」开头；只在确实是折叠通知且 sender 未知时拆分，
