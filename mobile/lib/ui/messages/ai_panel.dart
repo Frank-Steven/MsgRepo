@@ -14,20 +14,23 @@ import 'message_widgets.dart';
 Future<void> showAiProcessPanel(
   BuildContext context, {
   VoidCallback? onChanged,
+  /// true = 由「未处理达到阈值」自动触发（面板标题会标出来，便于区分）。
+  bool auto = false,
 }) {
   return showModalBottomSheet(
     context: context,
     isDismissible: false,
     enableDrag: false,
     isScrollControlled: true,
-    builder: (_) => AiProcessPanel(onChanged: onChanged),
+    builder: (_) => AiProcessPanel(onChanged: onChanged, auto: auto),
   );
 }
 
 class AiProcessPanel extends StatefulWidget {
   final VoidCallback? onChanged;
+  final bool auto;
 
-  const AiProcessPanel({super.key, this.onChanged});
+  const AiProcessPanel({super.key, this.onChanged, this.auto = false});
 
   @override
   State<AiProcessPanel> createState() => _AiProcessPanelState();
@@ -467,6 +470,7 @@ class AiProcessingHeader extends StatelessWidget {
   final int settled;
   final int enqueued;
   final int pending;
+  final bool auto;
   final VoidCallback? onCancel;
   final VoidCallback? onBackground;
 
@@ -475,6 +479,7 @@ class AiProcessingHeader extends StatelessWidget {
     required this.settled,
     required this.enqueued,
     required this.pending,
+    this.auto = false,
     this.onCancel,
     this.onBackground,
   });

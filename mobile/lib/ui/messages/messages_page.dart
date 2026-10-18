@@ -210,13 +210,14 @@ class MessagesPageState extends State<MessagesPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('未处理已达 ${pending.length} 条，已自动提交处理')));
     try {
-      await _processWithAi([for (final m in pending) m.id]);
+      await _processWithAi([for (final m in pending) m.id], auto: true);
     } finally {
       _autoProcessRunning = false;
     }
   }
 
-  Future<void> _processWithAi(List<String> ids, {bool reprocess = false}) async {
+  Future<void> _processWithAi(List<String> ids,
+      {bool reprocess = false, bool auto = false}) async {
     final msgs = await _db.getMessagesByIds(ids);
     if (msgs.isEmpty || !mounted) return;
     // 保持传入顺序（多选时为用户点选顺序）
@@ -247,7 +248,7 @@ class MessagesPageState extends State<MessagesPage> {
           SnackBar(content: Text('跳过 ${parts.join('、')}')));
     }
     if (added == 0) return;
-    await showAiProcessPanel(context, onChanged: reload);
+    await showAiProcessPanel(context, onChanged: reload, auto: auto);
     await reload();
   }
 
