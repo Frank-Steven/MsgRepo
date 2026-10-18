@@ -342,20 +342,27 @@ class AiClient {
       await isDesktopOnline(force: true);
       return '已连接${deviceName.isNotEmpty ? '：$deviceName' : ''}';
     }
+    final hint = endpointConfigHint(endpoint.baseUrl);
+    if (hint != null) throw AiException(hint);
     final headers = <String, String>{};
     if (endpoint.apiKey.isNotEmpty) {
       headers['Authorization'] = 'Bearer ${endpoint.apiKey}';
     }
+    final url = joinEndpointUrl(endpoint.baseUrl, 'models');
     final http.Response resp;
     try {
       resp = await http
-          .get(Uri.parse('${endpoint.baseUrl}/models'), headers: headers)
+          .get(Uri.parse(url), headers: headers)
           .timeout(const Duration(seconds: 8));
     } catch (e) {
-      throw AiException('无法连接：$e');
+      throw AiException('无法连接 $url：$e');
     }
     if (resp.statusCode != 200) {
-      throw AiException('HTTP ${resp.statusCode}');
+      final body = resp.body.trim();
+      final excerpt = body.isEmpty
+          ? ''
+          : '：${body.length > 160 ? body.substring(0, 160) : body}';
+      throw AiException('HTTP ${resp.statusCode} @ $url$excerpt');
     }
     try {
       final data = (jsonDecode(resp.body) as Map).cast<String, dynamic>();
@@ -585,8 +592,10 @@ class AiClient {
     final now = DateTime.now();
     final streamId = batch.first.id; // 流式原文归属的卡片（批首消息）
 
-    final req = http.Request(
-        'POST', Uri.parse('${endpoint.baseUrl}/chat/completions'));
+    final hint = endpointConfigHint(endpoint.baseUrl);
+    if (hint != null) throw AiException(hint);
+    final url = joinEndpointUrl(endpoint.baseUrl, 'chat/completions');
+    final req = http.Request('POST', Uri.parse(url));
     req.headers['Content-Type'] = 'application/json';
     if (endpoint.apiKey.isNotEmpty) {
       req.headers['Authorization'] = 'Bearer ${endpoint.apiKey}';
@@ -608,7 +617,10 @@ class AiClient {
           await client.send(req).timeout(const Duration(seconds: 30));
       if (streamed.statusCode != 200) {
         final errBody = await streamed.stream.bytesToString();
-        throw AiException('远程接口返回 ${streamed.statusCode}：$errBody');
+        final errText = errBody.trim();
+        final excerpt =
+            errText.length > 160 ? errText.substring(0, 160) : errText;
+        throw AiException('远程接口返回 ${streamed.statusCode} @ $url：$excerpt');
       }
       final full = StringBuffer();
       await for (final line
@@ -738,6 +750,33 @@ class AiClient {
       lines.add('下${names[i]}=${fmt(day(i - dow + 7))}');
     }
     return lines.join('\n');
+  }
+
+  /// 拼接 baseUrl 与接口路径：去掉尾部多余斜杠，避免 `//` 之类的 404（N2 诊断）。
+  static String joinEndpointUrl(String baseUrl, String path) {
+    final trimmed = baseUrl.trim();
+    final noTrail = trimmed.replaceAll(RegExp(r'/+$'), '');
+    return noTrail.isEmpty ? path : '$noTrail/$path';
+  }
+
+  /// 常见配置错误的前置提示（N2）：返回 null 表示没发现明显问题。
+  /// 背景：DeepSeek 同时提供两种格式——Anthropic 格式的 base_url 是
+  /// https://api.deepseek.com/anthropic ，而本应用走 OpenAI 兼容的
+  /// /chat/completions 与 /models；把 Anthropic 地址填进来只会得到 401/404。
+  static String? endpointConfigHint(String baseUrl) {
+    final b = baseUrl.trim();
+    final lower = b.toLowerCase();
+    if (b.isEmpty) {
+      return 'Base URL 为空：请填写接口地址（如 https://api.deepseek.com）';
+    }
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      return 'Base URL 需以 http:// 或 https:// 开头';
+    }
+    if (lower.endsWith('/anthropic') || lower.contains('/anthropic/')) {
+      return '该地址是 Anthropic 兼容格式（…/anthropic），而本应用使用 OpenAI 兼容格式。'
+          'DeepSeek 请改为 https://api.deepseek.com（去掉 /anthropic）。';
+    }
+    return null;
   }
 
   static String _normalizePriority(dynamic v) {
