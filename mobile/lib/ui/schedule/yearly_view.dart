@@ -724,6 +724,14 @@ class _YearlyPainter extends CustomPainter {
 
   double _xOf(double yf) => (yf - layout.scrollYf) * layout.ppy;
 
+
+  NodeClusters? _cachedClusters;
+
+  /// U11：时间点任务节点聚类（重合的画一个代表点，标题合并）。
+  NodeClusters _clusters() => _cachedClusters ??= NodeClusters.build([
+        for (final it in layout.items)
+          if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
+      ]);
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
@@ -745,69 +753,85 @@ class _YearlyPainter extends CustomPainter {
 
     // 任务：节点 / 带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）。无泳道底纹（v2.3 §13-8）。
-    for (final it in layout.items) {
-      if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
-      final done = it.task.status == TaskStatus.done;
-      final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
-      if (it.isPoint) {
-        canvas.drawCircle(Offset(it.x1, it.y), it.isSubtask ? 3.5 : 5,
-            Paint()..color = color);
-      } else {
-        canvas.drawLine(
-          Offset(it.x1, it.y),
-          Offset(it.x2, it.y),
-          Paint()
-            ..color = color
-            ..strokeWidth = it.isSubtask ? 1.5 : 3
-            ..strokeCap = StrokeCap.round,
-        );
-        final endR = it.isSubtask ? 3.5 : 5.0;
-        _drawBreak(canvas, it.x1, it.y, color, endR);
-        _drawBreak(canvas, it.x2, it.y, color, endR);
-      }
-      if (it.task.id == layout.selectedTaskId) {
-        _drawSelection(canvas, it, scheme);
-      }
-    }
-
-    // 名称层：45° 斜文本 + 垂直虚线（贪心放置，v2.3）
-    if (layout.namesH > 0) {
-      final dashPaint = Paint()
-        ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
-        ..strokeWidth = 1;
+      // U11：时间几乎重合的点会叠在一起，只画一个代表点（否则「一个点 + 多个标题」）。
+      final clusters = _clusters();
       for (final it in layout.items) {
-        if (it.isSubtask) continue;
-        final slot = layout.nameSlots[it.task.id];
-        if (slot == null || !slot.visible) continue;
-        final anchorX = _xOf(slot.centerMinutes);
-        if (anchorX < -120 || anchorX > size.width + 120) continue;
-        var dy = layout.namesH - 6.0;
-        while (dy < it.y - 8) {
-          canvas.drawLine(
-              Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
-          dy += 6;
-        }
+        if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
         final done = it.task.status == TaskStatus.done;
-        final tp = TextPainter(
-          text: TextSpan(
-            text: it.task.title,
-            style: TextStyle(
-              fontSize: 11,
-              color: scheme.onSurface
-                  .withValues(alpha: done ? doneTaskOpacity : 1.0),
-              decoration: done ? TextDecoration.lineThrough : null,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-          maxLines: 1,
-        )..layout();
-        canvas.save();
-        canvas.translate(anchorX, layout.namesH - 4);
-        canvas.rotate(-math.pi / 4);
-        tp.paint(canvas, Offset(3, -tp.height + 2));
-        canvas.restore();
+        final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
+        if (it.isPoint) {
+          if (!clusters.isRepresentative(it.task.id)) continue;
+          final ci = clusters.indexOfId(it.task.id)!;
+          final c = clusters.centerOf(ci);
+          canvas.drawCircle(Offset(c.$1, c.$2), it.isSubtask ? 3.5 : 5,
+              Paint()..color = color);
+        } else {
+          canvas.drawLine(
+            Offset(it.x1, it.y),
+            Offset(it.x2, it.y),
+            Paint()
+              ..color = color
+              ..strokeWidth = it.isSubtask ? 1.5 : 3
+              ..strokeCap = StrokeCap.round,
+          );
+          final endR = it.isSubtask ? 3.5 : 5.0;
+          _drawBreak(canvas, it.x1, it.y, color, endR);
+          _drawBreak(canvas, it.x2, it.y, color, endR);
+        }
+        if (it.task.id == layout.selectedTaskId) {
+          _drawSelection(canvas, it, scheme);
+        }
       }
-    }
+
+      // 名称层：45° 斜文本 + 垂直虚线（U11：重合点的标题合并成「A / B」）
+      if (layout.namesH > 0) {
+        final dashPaint = Paint()
+          ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
+          ..strokeWidth = 1;
+        final clusters = _clusters();
+        for (final it in layout.items) {
+          if (it.isSubtask) continue;
+          final slot = layout.nameSlots[it.task.id];
+          if (slot == null || !slot.visible) continue;
+          final ci = clusters.indexOfId(it.task.id);
+          final merged = ci != null && clusters.ids(ci).length > 1;
+          if (merged && !clusters.isRepresentative(it.task.id)) continue;
+          final anchorX = _xOf(slot.centerMinutes);
+          if (anchorX < -120 || anchorX > size.width + 120) continue;
+          final targetY = merged ? clusters.centerOf(ci).$2 : it.y;
+          var dy = layout.namesH - 6.0;
+          while (dy < targetY - 8) {
+            canvas.drawLine(
+                Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
+            dy += 6;
+          }
+          final done = it.task.status == TaskStatus.done;
+          final titles = merged
+              ? [
+                  for (final id in clusters.ids(ci))
+                    layout.originals[id]?.title ?? '',
+                ].where((s) => s.isNotEmpty).join(' / ')
+              : it.task.title;
+          final tp = TextPainter(
+            text: TextSpan(
+              text: titles,
+              style: TextStyle(
+                fontSize: 11,
+                color: scheme.onSurface
+                    .withValues(alpha: done ? doneTaskOpacity : 1.0),
+                decoration: (done && !merged) ? TextDecoration.lineThrough : null,
+              ),
+            ),
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+          )..layout();
+          canvas.save();
+          canvas.translate(anchorX, layout.namesH - 4);
+          canvas.rotate(-math.pi / 4);
+          tp.paint(canvas, Offset(3, -tp.height + 2));
+          canvas.restore();
+        }
+      }
 
     // 「现在」脉冲高亮（1.5 秒）
     final pulseYear = layout.pulseYear;

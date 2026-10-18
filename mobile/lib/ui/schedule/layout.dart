@@ -196,6 +196,81 @@ class _LaneEntry {
 }
 
 /// 斜 45° 名称空位分配结果（设计 §2.3 名称层；日/年度视图共用）。
+/// 一个节点的位置（U11 聚类用）。
+typedef NodePos = ({String id, double x, double y});
+
+/// 把时间位置几乎重合的节点聚成若干组（U11）：
+/// 两个节点的 x 与 y 差异都不超过 [thresholdPx] 时视为同一个「叠在一起的点」。
+/// 年度视图与日视图共用；返回每组按 x 升序、组内顺序与原列表一致。
+/// 纯函数，便于单测（画布逻辑不参与）。
+List<List<String>> clusterOverlappingNodes(
+  List<NodePos> nodes, {
+  double thresholdPx = 6,
+}) {
+  final groups = <List<NodePos>>[];
+  for (final n in nodes) {
+    List<NodePos>? hit;
+    for (final g in groups) {
+      final dx = (g.first.x - n.x).abs();
+      final dy = (g.first.y - n.y).abs();
+      if (dx <= thresholdPx && dy <= thresholdPx) {
+        hit = g;
+        break;
+      }
+    }
+    if (hit != null) {
+      hit.add(n);
+    } else {
+      groups.add([n]);
+    }
+  }
+  groups.sort((a, b) => a.first.x.compareTo(b.first.x));
+  return [
+    for (final g in groups) [for (final n in g) n.id],
+  ];
+}
+
+/// 节点聚类的查询封装（U11）：画笔用它判断「该任务是否被代表点覆盖、组中心在哪」。
+class NodeClusters {
+  final List<List<String>> groups;
+  final Map<String, int> _index;
+  final Map<int, (double, double)> _center;
+
+  NodeClusters._(this.groups, this._index, this._center);
+
+  factory NodeClusters.build(List<NodePos> nodes, {double thresholdPx = 6}) {
+    final groups = clusterOverlappingNodes(nodes, thresholdPx: thresholdPx);
+    final byId = {for (final n in nodes) n.id: n};
+    final index = <String, int>{};
+    final center = <int, (double, double)>{};
+    for (var i = 0; i < groups.length; i++) {
+      var sx = 0.0, sy = 0.0;
+      for (final id in groups[i]) {
+        index[id] = i;
+        final n = byId[id];
+        if (n != null) {
+          sx += n.x;
+          sy += n.y;
+        }
+      }
+      center[i] = (sx / groups[i].length, sy / groups[i].length);
+    }
+    return NodeClusters._(groups, index, center);
+  }
+
+  int? indexOfId(String id) => _index[id];
+
+  List<String> ids(int i) => groups[i];
+
+  /// 组内第一个任务负责画点与合并后的标题，其余跳过。
+  bool isRepresentative(String id) {
+    final i = _index[id];
+    return i != null && groups[i].isNotEmpty && groups[i].first == id;
+  }
+
+  (double, double) centerOf(int i) => _center[i] ?? (0.0, 0.0);
+}
+
 class DayNameSlot {
   final String taskId;
 
