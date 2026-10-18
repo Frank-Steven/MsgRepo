@@ -117,38 +117,88 @@ class ReminderService {
   AndroidScheduleMode get _scheduleMode =>
       scheduleModeFor(exactAllowed: exactAlarmsAllowed);
 
-  /// 未引入 flutter_timezone：先按系统时区名匹配，失败则按当前 UTC 偏移
-  /// 在数据库中找一个偏移一致的 location，再不行退回 UTC。
-  void _resolveLocalTimezone() {
-    try {
-      tz.setLocalLocation(tz.getLocation(DateTime.now().timeZoneName));
-      return;
-    } catch (_) {}
-    final offset = DateTime.now().timeZoneOffset;
+  /// 依据「当前偏移 / 半年后偏移 / 时区缩写」在 tz 数据库里挑选本地时区（P3-6）。
+  ///
+  /// 旧实现只按当前 UTC 偏移取第一个匹配项：中文系统的 timeZoneName 常是
+  /// 「CST」「中国标准时间」这类非 IANA 名，匹配失败后就退化成「按偏移扫描」，
+  /// 而同一偏移下 DST 规则不同的地区会排错（例如把 +8 无 DST 的地方选成有 DST 的区）。
+  /// 这里再加一个「半年后偏移」维度过滤 DST 规则，最后用缩写优先命中。
+  /// 纯函数（时间由调用方传入），便于单测。
+  String pickLocalZoneName({
+    required DateTime now,
+    required Duration offsetNow,
+    required Duration offsetLater,
+    required String abbreviation,
+  }) {
+    final later = now.add(const Duration(days: 180));
+    String? sameAbbrev;
+    String? sameRules;
     for (final name in tz.timeZoneDatabase.locations.keys) {
       final loc = tz.getLocation(name);
-      if (tz.TZDateTime.now(loc).timeZoneOffset == offset) {
-        tz.setLocalLocation(loc);
-        return;
+      final nowLoc = tz.TZDateTime.from(now, loc);
+      if (nowLoc.timeZoneOffset != offsetNow) continue;
+      if (tz.TZDateTime.from(later, loc).timeZoneOffset != offsetLater) continue;
+      sameRules ??= name;
+      if (nowLoc.timeZoneName.toUpperCase() == abbreviation) {
+        sameAbbrev = name;
+        break;
       }
     }
-    tz.setLocalLocation(tz.UTC);
+    return sameAbbrev ?? sameRules ?? 'UTC';
+  }
+
+  /// 未引入 flutter_timezone：先按系统时区名匹配（Android 通常返回 IANA 名），
+  /// 失败再按偏移 + DST 规则挑选，最后退回 UTC。
+  void _resolveLocalTimezone() {
+    final now = DateTime.now();
+    try {
+      tz.setLocalLocation(tz.getLocation(now.timeZoneName));
+      return;
+    } catch (_) {}
+    final name = pickLocalZoneName(
+      now: now,
+      offsetNow: now.timeZoneOffset,
+      offsetLater: now.add(const Duration(days: 180)).timeZoneOffset,
+      abbreviation: now.timeZoneName.toUpperCase(),
+    );
+    tz.setLocalLocation(tz.getLocation(name));
   }
 
   int _notificationId(String taskId) => taskId.hashCode & 0x7fffffff;
 
+  /// 为一批任务分配互不冲突的通知 id（P3-7）。
+  ///
+  /// 旧实现直接用 `taskId.hashCode & 0x7fffffff`：两个任务撞上同一 id 时，
+  /// 后者的提醒会把前者覆盖掉（表现为「某个任务永远不提醒」）。
+  /// 这里以 hashCode 为起点做线性探测，并避开 AI 完成通知占用的 id。
+  Map<String, int> assignNotificationIds(Iterable<String> taskIds) {
+    final used = <int>{_aiNotificationId};
+    final out = <String, int>{};
+    var probe = 1;
+    for (final id in taskIds) {
+      var n = _notificationId(id);
+      while (used.contains(n)) {
+        n = probe++ & 0x7fffffff;
+        if (n == 0) n = 1;
+      }
+      used.add(n);
+      out[id] = n;
+    }
+    return out;
+  }
+
   /// 为单个任务排提醒：仅 active + startAt 在未来。返回是否真的排上了。
-  Future<bool> scheduleForTask(Task task) async {
+  Future<bool> scheduleForTask(Task task, {int? id}) async {
     if (!_initialized) return false;
-    final id = _notificationId(task.id);
-    await _plugin.cancel(id);
+    final nid = id ?? _notificationId(task.id);
+    await _plugin.cancel(nid);
     if (!shouldScheduleReminder(task,
         nowMs: DateTime.now().millisecondsSinceEpoch)) {
       return false;
     }
     final startAt = task.startAt!;
     await _plugin.zonedSchedule(
-      id,
+      nid,
       task.title,
       task.description?.isNotEmpty == true ? task.description : task.title,
       tz.TZDateTime.fromMillisecondsSinceEpoch(tz.local, startAt),
@@ -186,10 +236,12 @@ class ReminderService {
       final tasks =
           await AppDatabase.instance.getTasks(status: TaskStatus.active);
       final scheduled = <String>[];
+      final ids = assignNotificationIds(tasks.map((t) => t.id));
       for (final task in tasks) {
         try {
-          if (await scheduleForTask(task)) {
-            scheduled.add(_notificationId(task.id).toString());
+          final id = ids[task.id];
+          if (await scheduleForTask(task, id: id)) {
+            scheduled.add(id.toString());
           }
         } catch (e) {
           // 单条失败不阻塞其余任务，但要留下痕迹
