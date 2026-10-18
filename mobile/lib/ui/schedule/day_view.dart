@@ -367,7 +367,7 @@ class DayViewState extends State<DayView>
         () => (TextPainter(
               text: TextSpan(text: title, style: nameStyle),
               textDirection: TextDirection.ltr,
-              maxLines: 3,
+              maxLines: 30,
             )..layout())
             .width);
     final display = _displayTasks();
@@ -453,7 +453,7 @@ class _DayLayout {
   /// 刻度带高度：容纳斜 45° 向上的时间标注 + 跨日日期标注。
   static const headerH = 44.0;
   static const laneH = 40.0;
-  static const nameLayerH = 100.0;
+  static const nameLayerH = 160.0;
 
   final double viewW;
   final double viewH;
@@ -661,12 +661,10 @@ class _DayPainter extends CustomPainter {
   NodeClusters? _cachedClusters;
 
   /// U11：把时间点任务的节点聚类（重合的画一个代表点）。
-  /// 画布标签每行最多 8 个字，最多 3 行（45° 斜排文本带放不下更宽的内容）。
+  /// 画布标签每行最多 8 个字（折行，不截断）。
   static const int _labelCharsPerLine = 8;
-  static const int _labelMaxLines = 3;
 
-  /// 按字符折行（不是截断）：20 个字 → 8 + 8 + 4 三行，全都保留；
-  /// 只有超过 3 行（>24 字）才在最后一行加省略号。
+  /// 按字符折行：名字**一个字都不砍**（用户 2026-10-18 要求去掉行数限制）。
   String _wrapTitle(String title) {
     final chars = title.trim().characters.toList();
     if (chars.isEmpty) return '';
@@ -675,17 +673,11 @@ class _DayPainter extends CustomPainter {
       final end =
           (i + _labelCharsPerLine) > chars.length ? chars.length : i + _labelCharsPerLine;
       lines.add(chars.sublist(i, end).join());
-      if (lines.length == _labelMaxLines) break;
-    }
-    final truncated = chars.length > _labelCharsPerLine * _labelMaxLines;
-    if (truncated) {
-      lines[lines.length - 1] = '${lines.last}…';
     }
     return lines.join('\n');
   }
 
-  /// 合并标题：多个任务名每个各占一行（长名字自己也折行），总行数不超过 3 行；
-  /// 放不下的任务用「等 N 个」收尾。
+  /// 合并标题：名字全部保留（各自折行），不同任务之间用「·」隔断，不限行数。
   String _mergedTitle(List<String> ids) {
     final titles = [
       for (final id in ids)
@@ -697,17 +689,11 @@ class _DayPainter extends CustomPainter {
     final lines = <String>[];
     for (var i = 0; i < titles.length; i++) {
       final wrapped = _wrapTitle(titles[i]).split('\n');
-      final remain = _labelMaxLines - lines.length;
-      if (remain <= 0) {
-        lines[lines.length - 1] = '${lines.last} 等${titles.length - i}个';
-        return lines.join('\n');
-      }
-      if (wrapped.length <= remain) {
+      if (i == 0) {
         lines.addAll(wrapped);
       } else {
-        lines.addAll(wrapped.take(remain - 1));
-        lines.add('等${titles.length - i}个');
-        return lines.join('\n');
+        lines.add('· ${wrapped.first}');
+        lines.addAll(wrapped.skip(1));
       }
     }
     return lines.join('\n');
@@ -799,7 +785,7 @@ class _DayPainter extends CustomPainter {
               ),
             ),
             textDirection: TextDirection.ltr,
-            maxLines: 3,
+            maxLines: 30,
           )..layout();
           canvas.save();
           canvas.translate(anchorX, layout.namesH - 4);
