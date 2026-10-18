@@ -51,17 +51,22 @@ class Attachment {
   final String? label;
   final AttachmentAccess access;
 
+  /// 文件大小（字节）；旧数据可能为 null。
+  final int? bytes;
+
   const Attachment({
     required this.id,
     required this.kind,
     this.label,
     required this.access,
+    this.bytes,
   });
 
   factory Attachment.fromJson(Map<String, dynamic> json) => Attachment(
         id: json['id'] as String,
         kind: json['kind'] as String,
         label: json['label'] as String?,
+        bytes: (json['bytes'] as num?)?.toInt(),
         access:
             AttachmentAccess.fromJson(json['access'] as Map<String, dynamic>),
       );
@@ -70,6 +75,7 @@ class Attachment {
         'id': id,
         'kind': kind,
         if (label != null) 'label': label,
+        if (bytes != null) 'bytes': bytes,
         'access': access.toJson(),
       };
 }

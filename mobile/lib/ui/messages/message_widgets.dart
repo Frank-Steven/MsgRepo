@@ -348,14 +348,11 @@ class MessageTile extends StatefulWidget {
 }
 
 class _MessageTileState extends State<MessageTile> {
-  bool _expanded = false;
 
   void _handleTap() {
-    if (widget.selecting) {
-      widget.onTap?.call();
-    } else {
-      setState(() => _expanded = !_expanded);
-    }
+    // P3-2：非选中状态下点击 = 打开详情面板（正文 + 附件预览）。
+    // 原地展开仍由右侧箭头按钮负责，避免两种行为抢同一个手势。
+    widget.onTap?.call();
   }
 
   Widget _marker(BuildContext context) {
@@ -476,9 +473,9 @@ class _MessageTileState extends State<MessageTile> {
                             message.title.isEmpty
                                 ? '(无标题)'
                                 : stripFoldMarkers(message.title),
-                            maxLines: _expanded ? null : 1,
+                            maxLines: 1,
                             overflow:
-                                _expanded ? null : TextOverflow.ellipsis,
+                                TextOverflow.ellipsis,
                             style: titleStyle,
                           ),
                         ),
@@ -504,8 +501,8 @@ class _MessageTileState extends State<MessageTile> {
                       const SizedBox(height: 2),
                       Text(
                         message.body,
-                        maxLines: _expanded ? null : 3,
-                        overflow: _expanded ? null : TextOverflow.ellipsis,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
                         style: contentStyle,
                       ),
                     ],
@@ -533,9 +530,6 @@ class _MessageTileState extends State<MessageTile> {
                             style: sourceStyle,
                           ),
                         ),
-                        if (_expanded)
-                          Icon(Icons.expand_less,
-                              size: 16, color: cs.onSurfaceVariant),
                       ],
                     ),
                   ],

@@ -14,6 +14,7 @@ import '../tasks/task_editor.dart';
 import 'ai_panel.dart';
 import 'archived_page.dart';
 import 'import_page.dart';
+import 'message_detail_sheet.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
 import '../../services/auto_process.dart';
@@ -845,7 +846,12 @@ class MessagesPageState extends State<MessagesPage> {
                     linkedTaskCount: _linkedTaskIds(m).length,
                     actions: _actionsFor(m),
                     onTap: () {
-                      if (_selecting) _toggleSelect(m);
+                      if (_selecting) {
+                        _toggleSelect(m);
+                      } else {
+                        // P3-2：点开详情看正文与附件（图片可放大）
+                        showMessageDetail(context, m);
+                      }
                     },
                     onLongPress: () {
                       if (!_selecting) {
