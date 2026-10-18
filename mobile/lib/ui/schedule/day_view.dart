@@ -677,14 +677,8 @@ class _DayPainter extends CustomPainter {
     return lines.join('\n');
   }
 
-  /// 合并标题：每个任务名完整显示，名字**结尾加「；」**再换行接下一个，
-  /// 最后一个任务名后不加符号（用户 2026-10-18 指定）。
-  ///
-  /// 例：22 与 11111111111111111111 →
-  ///   22；
-  ///   11111111
-  ///   11111111
-  ///   1111
+  /// 合并标题：每个任务名完整显示（折行），名字末尾加「；」再接下一个，最后一个不加。
+  /// 顺序与下方任务列表一致（第一个任务在最上）。
   String _mergedTitle(List<String> ids) {
     final titles = [
       for (final id in ids)
@@ -697,7 +691,6 @@ class _DayPainter extends CustomPainter {
     for (var i = 0; i < titles.length; i++) {
       final wrapped = _wrapTitle(titles[i]).split('\n');
       if (i < titles.length - 1) {
-        // 隔断符接在该任务名的最后一行末尾
         wrapped[wrapped.length - 1] = '${wrapped.last}；';
       }
       lines.addAll(wrapped);
@@ -710,6 +703,8 @@ class _DayPainter extends CustomPainter {
             if (it.isPoint) (id: it.task.id, x: it.x1, y: it.y),
         ],
         thresholdPx: _clusterThresholdPx,
+        // 不同优先级（不同泳道）不合并：各泳道独立成点
+        crossLaneThresholdPx: 0,
       );
   @override
   void paint(Canvas canvas, Size size) {
@@ -766,7 +761,8 @@ class _DayPainter extends CustomPainter {
           final ci = clusters.indexOfId(it.task.id);
           final merged = ci != null && clusters.count(ci) > 1;
           if (ci != null && !clusters.isRepresentative(it.task.id)) continue;
-          final anchorX = _xOf(slot.centerMinutes);
+          // 合并组：虚线对准代表点的 x（否则点与线错位）；单个任务沿用名字槽位
+          final anchorX = ci == null ? _xOf(slot.centerMinutes) : clusters.anchor(ci).$1;
           if (anchorX < -100 || anchorX > size.width + 100) continue;
           // 虚线：从文本带起点垂直向下连到节点/线段
           final targetY = ci == null ? it.y : clusters.anchor(ci).$2;

@@ -298,15 +298,14 @@ class NodeClusters {
     return i != null && representativeId(i) == id;
   }
 
-  /// 合并点的绘制位置：x 取组内时间均值，y 取代表点所在泳道。
+  /// 合并点的绘制位置：直接用**代表点自己的位置**（不取平均）。
+  /// 取平均会让点和上方虚线错开 —— 用户 2026-10-18 报过这个问题。
   (double, double) anchor(int i) {
-    var sx = 0.0;
-    var minY = groups[i].first.y;
+    var best = groups[i].first;
     for (final n in groups[i]) {
-      sx += n.x;
-      if (n.y < minY) minY = n.y;
+      if (n.y < best.y) best = n;
     }
-    return (sx / groups[i].length, minY);
+    return (best.x, best.y);
   }
 }
 class DayNameSlot {
