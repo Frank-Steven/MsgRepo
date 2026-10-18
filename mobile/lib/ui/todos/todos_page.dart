@@ -41,8 +41,11 @@ class TodosPageState extends State<TodosPage> {
     'timed',
   ];
   static const _tabLabels = ['年度', '季度', '月度', '整周', '整日', '定时', '不定时', '已完成', '已归档', '全部'];
+  /// 页签展示顺序（U8）：「全部」放第一个并作为默认页签；其余顺序不变。
+  /// 注意：这里只改**展示顺序**，各页签的 tab 值仍由 _tabLabels 下标决定。
+  static const _tabOrder = [9, 0, 1, 2, 3, 4, 5, 6, 7, 8];
 
-  int _tab = 6; // 默认「不定时」（原"我的待办"）
+  int _tab = 9; // 默认「全部」（U8：一屏看所有状态的任务）
 
   /// 六个时间尺度各自的 active 任务（按开始时间升序）。
   final Map<String, List<Task>> _byScale = {for (final s in _scaleTabs) s: []};
@@ -71,7 +74,7 @@ class TodosPageState extends State<TodosPage> {
   bool _selecting = false;
   final Set<String> _selected = {};
 
-  final PageController _pageController = PageController(initialPage: 6);
+  final PageController _pageController = PageController(initialPage: 0);
   final ScrollController _tabScrollController = ScrollController();
 
   @override
@@ -576,9 +579,9 @@ class TodosPageState extends State<TodosPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: SegmentedSelector<int>(
-              values: const [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-              labels: _tabLabels,
-              badges: _tabBadges,
+              values: _tabOrder,
+              labels: [for (final t in _tabOrder) _tabLabels[t]],
+              badges: [for (final t in _tabOrder) _tabBadges[t]],
               selected: _tab,
               equalWidth: false,
               itemWidth: 64,
@@ -588,7 +591,7 @@ class TodosPageState extends State<TodosPage> {
                   _tab = i;
                   _detailTask = null; // 切换页签自动回列表模式
                 });
-                _pageController.animateToPage(i,
+                _pageController.animateToPage(_tabOrder.indexOf(i),
                     duration: const Duration(milliseconds: 250),
                     curve: Curves.easeOut);
               },
@@ -611,12 +614,12 @@ class TodosPageState extends State<TodosPage> {
                       : PageView(
                           controller: _pageController,
                           onPageChanged: (i) => setState(() {
-                            _tab = i;
+                            _tab = _tabOrder[i];
                             _detailTask = null; // 滑动翻页自动回列表模式
                           }),
                           children: [
-                            for (var i = 0; i < _tabLabels.length; i++)
-                              _buildTabBody(i),
+                            for (final t in _tabOrder)
+                              _buildTabBody(t),
                           ],
                         ),
             ),
