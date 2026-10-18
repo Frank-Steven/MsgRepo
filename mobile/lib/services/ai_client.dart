@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'prompt_rules.dart';
+import 'secret_store.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/message.dart';
@@ -174,6 +175,11 @@ class AiClient {
   static const _keyDeviceName = 'desktop_device_name';
   static const keyCustomPrompt = 'custom_prompt';
 
+  /// 凭据存储（P2-1）：key 与配对 token 走安全存储；测试可替换为内存实现。
+  static SecretStore secretStore = SecureSecretStore();
+
+  static String _secretKeyFor(String endpointId) => 'ai_key_$endpointId';
+
   http.Client? _activeClient;
   bool _cancelled = false;
 
@@ -208,20 +214,49 @@ class AiClient {
     final prefs = await SharedPreferences.getInstance();
     final json = prefs.getString(_keyEndpoints);
     if (json == null) return [];
+    List<AiEndpoint> parsed;
     try {
-      return (jsonDecode(json) as List)
+      parsed = (jsonDecode(json) as List)
           .map((e) => AiEndpoint.fromJson((e as Map).cast<String, dynamic>()))
           .toList();
     } catch (e, st) {
       AppLog.instance.warn('ai.read-endpoints', e, st);
       return [];
     }
+
+    // P2-1：密钥单独从安全存储取；同时把旧版明文 key 迁移出去。
+    var migrated = false;
+    final withKeys = <AiEndpoint>[];
+    for (final e in parsed) {
+      final stored = await secretStore.read(_secretKeyFor(e.id)) ?? '';
+      final legacy = e.apiKey;
+      if (legacy.isNotEmpty && stored.isEmpty) {
+        await secretStore.write(_secretKeyFor(e.id), legacy);
+        migrated = true;
+      }
+      withKeys.add(e.copyWith(apiKey: legacy.isNotEmpty ? legacy : stored));
+    }
+    if (migrated) {
+      await _saveRemoteEndpoints(withKeys);
+      AppLog.instance.warn('ai.migrate-keys',
+          StateError('已把 ${withKeys.length} 个接口的明文 key 迁入安全存储'));
+    }
+    return withKeys;
   }
 
   Future<void> _saveRemoteEndpoints(List<AiEndpoint> endpoints) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-        _keyEndpoints, jsonEncode(endpoints.map((e) => e.toJson()).toList()));
+    // P2-1：密钥进安全存储，SharedPreferences 里只留不含 key 的配置。
+    final plain = <Map<String, dynamic>>[];
+    for (final e in endpoints) {
+      if (e.apiKey.isNotEmpty) {
+        await secretStore.write(_secretKeyFor(e.id), e.apiKey);
+      } else {
+        await secretStore.delete(_secretKeyFor(e.id));
+      }
+      plain.add(e.toJson()..remove('apiKey'));
+    }
+    await prefs.setString(_keyEndpoints, jsonEncode(plain));
   }
 
   Future<void> upsertEndpoint(AiEndpoint endpoint) async {
@@ -239,6 +274,7 @@ class AiClient {
     if (id == desktopEndpointId) return;
     final list = await getRemoteEndpoints();
     list.removeWhere((e) => e.id == id);
+    await secretStore.delete(_secretKeyFor(id));
     await _saveRemoteEndpoints(list);
     if (await getDefaultEndpointId() == id) {
       final prefs = await SharedPreferences.getInstance();
@@ -271,14 +307,23 @@ class AiClient {
 
   // ---- 电脑端配对 / 探测 ----
 
+  // P2-1：配对 token 同样是凭据，一起放进安全存储；旧值自动迁移一次。
   Future<String> getDesktopToken() async {
+    final stored = await secretStore.read(_keyToken) ?? '';
+    if (stored.isNotEmpty) return stored;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keyToken) ?? '';
+    final legacy = prefs.getString(_keyToken) ?? '';
+    if (legacy.isNotEmpty) {
+      await secretStore.write(_keyToken, legacy);
+      await prefs.remove(_keyToken);
+    }
+    return legacy;
   }
 
   Future<void> setDesktopToken(String token) async {
+    await secretStore.write(_keyToken, token);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_keyToken, token);
+    await prefs.remove(_keyToken); // 清掉可能存在的明文旧值
   }
 
   /// POST /v1/pair（免认证）：无 body 取当前 token，reset=true 重新签发。
