@@ -134,28 +134,15 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
   }
 
   Widget _buildProcessing(AiProcessingSession session) {
-    final cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2)),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text('AI 处理中',
-                  style: Theme.of(context).textTheme.titleMedium),
-            ),
-            Text(
-                '已处理 ${session.settledCount}/${session.enqueuedCount}'
-                ' · 待确认 ${session.pendingConfirmCount}',
-                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-            TextButton(onPressed: _cancel, child: const Text('取消')),
-            TextButton(onPressed: _goBackground, child: const Text('后台')),
-          ],
+        AiProcessingHeader(
+          settled: session.settledCount,
+          enqueued: session.enqueuedCount,
+          pending: session.pendingConfirmCount,
+          onCancel: _cancel,
+          onBackground: _goBackground,
         ),
         const SizedBox(height: 8),
         // 每条消息一张状态卡片（v2.4）：等待/处理中/完成/失败图标 + 标题；
@@ -463,6 +450,65 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 「AI 处理中」头部（U9 神秘排版修复）：标题与计数分成两行。
+///
+/// 修复前的结构是 Row[spinner, Expanded(标题), 计数, 取消, 后台]：计数与两个按钮
+/// 是固定宽度，窄屏或大字号下会把剩余宽度吃光，Expanded 分到 0 宽 —— 标题于是
+/// 逐字换行变成竖排，并溢出压到下一行的进度文字上（真机截图所见）。
+/// 现在计数单独一行、标题固定单行省略，任何字号下都不会再互相挤压。
+class AiProcessingHeader extends StatelessWidget {
+  final int settled;
+  final int enqueued;
+  final int pending;
+  final VoidCallback? onCancel;
+  final VoidCallback? onBackground;
+
+  const AiProcessingHeader({
+    super.key,
+    required this.settled,
+    required this.enqueued,
+    required this.pending,
+    this.onCancel,
+    this.onBackground,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text('AI 处理中',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium),
+            ),
+            TextButton(onPressed: onCancel, child: const Text('取消')),
+            TextButton(onPressed: onBackground, child: const Text('后台')),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 28, bottom: 4),
+          child: Text(
+            '已处理 $settled/$enqueued · 待确认 $pending',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+          ),
+        ),
+      ],
     );
   }
 }
