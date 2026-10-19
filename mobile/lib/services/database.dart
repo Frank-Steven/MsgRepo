@@ -7,6 +7,7 @@ import 'package:sqflite/sqflite.dart';
 import '../models/message.dart';
 import '../models/note.dart';
 import '../models/task.dart';
+import 'app_log.dart';
 import 'reminder_service.dart';
 
 /// 收件箱按应用筛选用的来源应用项。
@@ -706,6 +707,57 @@ class AppDatabase {
     return rows.map(Task.fromRow).toList();
   }
 
+  /// AI 确认批量落库：**一个事务 + batch**。
+  ///
+  /// 2026-10-20 性能修复：原确认流对每条消息做 6~8 次独立 SQL（预取旧关联、
+  /// 逐条建任务、改优先级/状态、解绑、逐条建关联），上千条时是上万次串行 await，
+  /// 界面在点「确认」后会明显卡住。现在统一攒好再一次性提交。
+  Future<void> applyAiConfirmBatch(
+      List<
+              ({
+                String messageId,
+                String priority,
+                List<Task> newTasks,
+                List<String> linkIds,
+              })>
+          items) async {
+    if (items.isEmpty) return;
+    final db = await database;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final it in items) {
+        for (final task in it.newTasks) {
+          batch.insert('tasks', task.toRow());
+        }
+        batch.update(
+          'messages',
+          {'priority': it.priority, 'status': MessageStatus.processed},
+          where: 'id = ?',
+          whereArgs: [it.messageId],
+        );
+        batch.delete('message_task_links',
+            where: 'message_id = ?', whereArgs: [it.messageId]);
+        for (final taskId in it.linkIds) {
+          batch.insert(
+            'message_task_links',
+            {
+              'message_id': it.messageId,
+              'task_id': taskId,
+              'created_at': now,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+        }
+        batch.rawUpdate(
+            'UPDATE messages SET linked_task_id = ? WHERE id = ?',
+            [it.linkIds.isEmpty ? null : it.linkIds.first, it.messageId]);
+      }
+      await batch.commit(noResult: true);
+    });
+    _rescheduleReminders();
+  }
+
   /// 全部「进行中」任务（AI 确认前查重复用；写操作量小，不做分页）。
   /// 已完成/已放弃的任务不参与复用：同一件事再次出现时应当新建。
   Future<List<Task>> getActiveTasks() async {
@@ -825,9 +877,37 @@ class AppDatabase {
     _rescheduleReminders();
   }
 
-  /// 任务写操作后全量重排本地提醒（ReminderService 未初始化时内部直接返回）。
+  Timer? _rescheduleTimer;
+  bool _rescheduling = false;
+  bool _rescheduleAgain = false;
+
+  /// 任务写操作后重排本地提醒。
+  ///
+  /// **合并 + 单飞**（2026-10-20 性能修复）：原实现每次写任务都 fire-and-forget 一次
+  /// `rescheduleAll()`——它要取消上一轮 N 个提醒再逐个 zonedSchedule（2N 次平台通道
+  /// 调用）且无互斥。AI 批量确认时等于上百次并发全量重排，直接把界面拖卡。
   void _rescheduleReminders() {
-    unawaited(ReminderService.instance.rescheduleAll());
+    _rescheduleTimer?.cancel();
+    _rescheduleTimer = Timer(const Duration(milliseconds: 400), _runReschedule);
+  }
+
+  Future<void> _runReschedule() async {
+    if (_rescheduling) {
+      _rescheduleAgain = true; // 跑到一半又来了写操作：等这轮结束再补一次
+      return;
+    }
+    _rescheduling = true;
+    try {
+      await ReminderService.instance.rescheduleAll();
+    } catch (e, st) {
+      AppLog.instance.warn('db.reschedule', e, st);
+    } finally {
+      _rescheduling = false;
+      if (_rescheduleAgain) {
+        _rescheduleAgain = false;
+        _rescheduleReminders();
+      }
+    }
   }
 
   // ---- v2: 笔记三级 ----

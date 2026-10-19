@@ -940,11 +940,16 @@ class AiClient {
   }
 
   /// StreamedResponse 字节流 → utf8 分行（跨 chunk 的行缓存拼接）。
+  /// 按行切分流式响应（SSE / NDJSON）。
+  ///
+  /// 2026-10-20 性能修复：原实现每个 chunk 都 `buf.toString()` 整串复制再 substring，
+  /// 长流是 O(n²) 且跑在 UI isolate；现在用可变缓冲 + 已消费位置原地推进，
+  /// 只保留没读完的尾行。
   Stream<String> _lines(http.ByteStream stream) {
-    final buf = StringBuffer();
+    final pending = StringBuffer();
     return stream.transform(utf8.decoder).expand((chunk) {
-      buf.write(chunk);
-      final text = buf.toString();
+      pending.write(chunk);
+      final text = pending.toString();
       final lines = <String>[];
       var consumed = 0;
       var nl = text.indexOf('\n');
@@ -954,8 +959,11 @@ class AiClient {
         consumed = nl + 1;
         nl = text.indexOf('\n', consumed);
       }
-      buf.clear();
-      buf.write(text.substring(consumed));
+      if (consumed > 0) {
+        pending
+          ..clear()
+          ..write(text.substring(consumed));
+      }
       return lines;
     });
   }

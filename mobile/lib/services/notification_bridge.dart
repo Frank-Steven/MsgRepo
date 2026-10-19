@@ -180,8 +180,15 @@ class NotificationBridge {
   }
 
   /// 读取队列文件并入库，返回新入库条数。
+  bool _pullPending = false;
+
   Future<int> pullOnce() async {
-    if (_pulling) return 0;
+    if (_pulling) {
+      // 正在拉取时又来了 queueAvailable：记一笔，本轮结束后立刻补拉，
+      // 否则这批通知要等 20s 兜底轮询（子代理审查指出）。
+      _pullPending = true;
+      return 0;
+    }
     _pulling = true;
     try {
       final root = Directory(await _getQueueDir());
@@ -223,6 +230,10 @@ class NotificationBridge {
       return 0;
     } finally {
       _pulling = false;
+      if (_pullPending) {
+        _pullPending = false;
+        unawaited(pullOnce());
+      }
     }
   }
 

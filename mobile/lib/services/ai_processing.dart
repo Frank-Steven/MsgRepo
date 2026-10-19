@@ -470,6 +470,13 @@ class AiProcessingService extends ChangeNotifier {
     })>[];
     final confirmed = <AiOutcome>[];
     var createdTasks = 0;
+    final batchItems = <
+        ({
+          String messageId,
+          String priority,
+          List<Task> newTasks,
+          List<String> linkIds,
+        })>[];
     for (final o in targets) {
       final r = o.result;
       if (r == null) continue;
@@ -531,6 +538,8 @@ class AiProcessingService extends ChangeNotifier {
       }
       confirmed.add(o);
     }
+    // 一次性提交（单事务 + batch），避免上千条消息逐条写库把界面拖住
+    await db.applyAiConfirmBatch(batchItems);
     lastConfirmCreatedTasks = createdTasks;
     if (undoItems.isEmpty) return 0;
     final count = undoItems.length;
