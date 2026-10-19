@@ -68,9 +68,19 @@ class MessagesPageState extends State<MessagesPage> {
   /// 只在会话状态变化（开始/逐条结果/完成/确认/清空）时 setState。
   int _aiRevision = 0;
 
+  /// 自动处理的定时兜底（2026-10-20，真机验收发现）：
+  /// 原来只在 reload() 尾部判断，而 reload 只在「来新消息 / 下拉刷新 / 切回消息页」时发生。
+  /// 如果积压已过阈值但既没新消息也没人切 tab，就会一直不触发。
+  /// 这里每 5 分钟评估一次（_maybeAutoProcess 自带阈值/冷却/互斥保护）。
+  Timer? _autoTick;
+
   @override
   void initState() {
     super.initState();
+    _autoTick = Timer.periodic(const Duration(minutes: 5), (_) {
+      if (!mounted) return;
+      unawaited(_maybeAutoProcess());
+    });
     _sub = NotificationBridge.instance.onNewMessages.listen((_) => reload());
     _aiRevision = AiProcessingService.instance.revision;
     AiProcessingService.instance.addListener(_onAiProcessingChanged);
@@ -79,6 +89,7 @@ class MessagesPageState extends State<MessagesPage> {
 
   @override
   void dispose() {
+    _autoTick?.cancel();
     AiProcessingService.instance.removeListener(_onAiProcessingChanged);
     _sub?.cancel();
     super.dispose();
