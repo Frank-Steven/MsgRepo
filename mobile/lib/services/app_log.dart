@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 /// 一条错误记录。
@@ -68,11 +69,25 @@ class AppLog extends ChangeNotifier {
     while (_entries.length > capacity) {
       _entries.removeAt(0);
     }
-    notifyListeners();
+    _notifyThrottled();
+  }
+
+  /// 通知节流（2026-10-20 性能）：高频失败路径上每条都 notifyListeners 会带动
+  /// 设置页/指示条重建；合并到 500ms 一次。
+  Timer? _notifyTimer;
+
+  void _notifyThrottled() {
+    if (_notifyTimer != null) return;
+    _notifyTimer = Timer(const Duration(milliseconds: 500), () {
+      _notifyTimer = null;
+      notifyListeners();
+    });
   }
 
   void clear() {
     _entries.clear();
+    _notifyTimer?.cancel();
+    _notifyTimer = null;
     notifyListeners();
   }
 }

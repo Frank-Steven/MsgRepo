@@ -57,9 +57,36 @@ class AiProcessingSession {
   int get pendingConfirmCount =>
       outcomes.where((o) => o.result != null).length;
 
+  /// id → outcome 索引（2026-10-20 性能）：原来每次线性扫描，enqueue 与每个结果
+  /// 事件都调一次 → 上千条时 O(N²)。
+  final Map<String, AiOutcome> _byId = {};
+
+  void addOutcome(AiOutcome o) {
+    outcomes.add(o);
+    _byId[o.message.id] = o;
+  }
+
+  void removeOutcome(AiOutcome o) {
+    outcomes.remove(o);
+    _byId.remove(o.message.id);
+  }
+
+  void removeOutcomesWhere(bool Function(AiOutcome) test) {
+    final removed = [for (final o in outcomes) if (test(o)) o];
+    for (final o in removed) {
+      removeOutcome(o);
+    }
+  }
+
   AiOutcome? outcomeOf(String messageId) {
+    final hit = _byId[messageId];
+    if (hit != null) return hit;
+    // 兜底：有代码（含测试）直接往 outcomes 里 add，索引里可能还没有
     for (final o in outcomes) {
-      if (o.message.id == messageId) return o;
+      if (o.message.id == messageId) {
+        _byId[messageId] = o;
+        return o;
+      }
     }
     return null;
   }
@@ -183,10 +210,21 @@ class AiProcessingService extends ChangeNotifier {
   bool get running => _pumping;
 
   /// 排队中 + 处理中的消息 id 集（v2.6.2：列表处理中标记 + 发起前排除）。
+  Set<String>? _processingIdsCache;
+  int _processingIdsRevision = -1;
+
+  /// 进行中的消息 id 集合（按 revision 缓存）。
+  /// 消息列表逐行调用它，原实现每次重建 Set → 单帧 O(N²)。
   Set<String> get processingIds {
     final s = _session;
     if (s == null) return const {};
-    return {for (final o in s.outcomes) if (!o.settled) o.message.id};
+    if (_processingIdsCache != null && _processingIdsRevision == revision) {
+      return _processingIdsCache!;
+    }
+    final ids = {for (final o in s.outcomes) if (!o.settled) o.message.id};
+    _processingIdsCache = ids;
+    _processingIdsRevision = revision;
+    return ids;
   }
 
   bool isProcessing(String messageId) => processingIds.contains(messageId);
@@ -226,13 +264,13 @@ class AiProcessingService extends ChangeNotifier {
       if (existing != null) {
         if (existing.error != null) {
           // 重试失败条目：移除旧条目，重新排队
-          session.outcomes.remove(existing);
+          session.removeOutcome(existing);
         } else {
           skipped++;
           continue;
         }
       }
-      session.outcomes.add(AiOutcome(m));
+      session.addOutcome(AiOutcome(m));
       session.enqueuedCount++;
       added++;
     }
@@ -560,7 +598,11 @@ class AiProcessingService extends ChangeNotifier {
       },
     );
     // 确认过的条目从列表移除；队列空且列表空时会话随之清空
-    _session?.outcomes.removeWhere(confirmed.contains);
+    _session?.removeOutcomesWhere(confirmed.contains);
+    // 确认后释放该消息的流式原文（上千条 ×4KB 很可观）
+    for (final o in confirmed) {
+      _session?.rawById.remove(o.message.id);
+    }
     revision++;
     notifyListeners();
     _maybeClear();

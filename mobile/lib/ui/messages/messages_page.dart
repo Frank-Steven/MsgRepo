@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/message.dart';
@@ -187,17 +188,44 @@ class MessagesPageState extends State<MessagesPage> {
     return _tasksById[ids.first]?.priority;
   }
 
-  List<Message> get _visible => _messages.where((m) {
-        if (_groupFilter.contains(messageGroupKey(m))) return true;
-        // 「已完成」筛选：额外放行关联任务已完成的消息（不占分组）
-        return _groupFilter.contains(kFilterDone) && _isLinkedDone(m);
-      }).toList();
+  // 分组结果缓存（2026-10-20 性能）：原来每次 setState（多选一行、折叠、切 chip）
+  // 都重跑「全量过滤 + 分组 List 分配」；500 条时每帧都是 O(n) 分配。
+  List<Message>? _visibleCache;
+  Map<String, List<Message>>? _groupedCache;
+  Object? _cacheKeyMessages;
+  Object? _cacheKeyTasks;
+  Set<String>? _cacheKeyFilter;
+
+  bool _cachesFresh() =>
+      _visibleCache != null &&
+      identical(_cacheKeyMessages, _messages) &&
+      identical(_cacheKeyTasks, _tasksById) &&
+      setEquals(_cacheKeyFilter, _groupFilter);
+
+  List<Message> get _visible {
+    final cached = _visibleCache;
+    if (cached != null && _cachesFresh()) return cached;
+    final visible = _messages.where((m) {
+      if (_groupFilter.contains(messageGroupKey(m))) return true;
+      // 「已完成」筛选：额外放行关联任务已完成的消息（不占分组）
+      return _groupFilter.contains(kFilterDone) && _isLinkedDone(m);
+    }).toList();
+    _visibleCache = visible;
+    _groupedCache = null;
+    _cacheKeyMessages = _messages;
+    _cacheKeyTasks = _tasksById;
+    _cacheKeyFilter = Set.of(_groupFilter);
+    return visible;
+  }
 
   Map<String, List<Message>> get _grouped {
+    final cached = _groupedCache;
+    if (cached != null && _cachesFresh()) return cached;
     final map = {for (final k in kGroupOrder) k: <Message>[]};
     for (final m in _visible) {
       map[messageGroupKey(m)]!.add(m);
     }
+    _groupedCache = map;
     return map;
   }
 

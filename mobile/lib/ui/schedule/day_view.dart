@@ -69,6 +69,10 @@ class DayViewState extends State<DayView>
 
   /// 当前比例尺（px/分钟）；null = 未初始化，首帧定位到当前时刻。
   double? _ppm;
+
+  /// 文本宽度测量缓存（跨帧复用，键 = 标题）。
+  final Map<String, double> _measureCache = {};
+
   double _scrollMin = 0; // 左边缘的绝对分钟数
   bool _positioned = false;
   double _viewW = 0;
@@ -361,7 +365,9 @@ class DayViewState extends State<DayView>
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final nameStyle = TextStyle(fontSize: 11, color: scheme.onSurface);
-    final measureCache = <String, double>{};
+    // measure 缓存常驻 State（2026-10-20 性能）：原来每帧新建，
+    // 拖拽时每帧都要为每个标签组标题的每一行重新 TextPainter.layout 量宽。
+    final measureCache = _measureCache;
     double measure(String title) => measureCache.putIfAbsent(
         title,
         () => (TextPainter(
@@ -689,8 +695,13 @@ class _DayPainter extends CustomPainter {
 
 
   /// R1-A：组内「代表点」与「点任务个数」，供节点放大与虚线定位使用。
+  ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})?
+      _infoCache;
+
   ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})
       _groupInfo() {
+    final cached = _infoCache;
+    if (cached != null) return cached;
     final rep = <String, String>{};
     final points = <String, int>{};
     final byTask = <String, LabelGroup>{};
@@ -707,7 +718,9 @@ class _DayPainter extends CustomPainter {
       points[g.id] = n;
       if (best != null) rep[g.id] = best.task.id;
     }
-    return (rep: rep, points: points, byTask: byTask);
+    final result = (rep: rep, points: points, byTask: byTask);
+    _infoCache = result;
+    return result;
   }
   @override
   void paint(Canvas canvas, Size size) {
@@ -958,5 +971,19 @@ class _DayPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_DayPainter oldDelegate) => true;
+  bool shouldRepaint(_DayPainter oldDelegate) {
+    final a = oldDelegate.layout;
+    final b = layout;
+    // 2026-10-20：原来恒 true，任何 rebuild 都强制重绘整幅画布。
+    return a.scrollMin != b.scrollMin ||
+        a.ppm != b.ppm ||
+        a.viewW != b.viewW ||
+        a.viewH != b.viewH ||
+        a.namesH != b.namesH ||
+        a.selectedTaskId != b.selectedTaskId ||
+        a.pulseMin != b.pulseMin ||
+        a.nowMin != b.nowMin ||
+        !identical(a.items, b.items) ||
+        !identical(a.groups, b.groups);
+  }
 }

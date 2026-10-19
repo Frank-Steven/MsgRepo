@@ -83,6 +83,8 @@ class _MessageDetail extends StatelessWidget {
             child: Image.file(
               file,
               height: 180,
+              // 只为 180px 缩略图，别整幅原图解码（手机照片可达数十 MB）
+              cacheHeight: (180 * MediaQuery.devicePixelRatioOf(context)).round(),
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) =>
                   _attachmentRow(cs, tt, a, '图片无法解码'),
