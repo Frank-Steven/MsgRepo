@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'services/app_ui_state.dart';
 import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
 import 'ui/messages/messages_page.dart';
@@ -134,7 +135,25 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    AppUiState.instance.setTab(_index);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // U19-C：后台时不弹 AI 面板，改用系统通知告知
+    AppUiState.instance.setForeground(state == AppLifecycleState.resumed);
+  }
   int _index = 0;
 
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
@@ -155,35 +174,51 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: IndexedStack(index: _index, children: _pages),
-      bottomNavigationBar: NavigationBar(
-        height: 72,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        selectedIndex: _index,
-        onDestinationSelected: (i) {
-          setState(() => _index = i);
-          switch (i) {
-            case 0:
-              _scheduleKey.currentState?.reload();
-            case 1:
-              _todosKey.currentState?.reload();
-            case 2:
-              _notesKey.currentState?.reload();
-            case 3:
-              _messagesKey.currentState?.reload();
-          }
-        },
-        destinations: const [
-          NavigationDestination(
-              icon: Icon(Icons.calendar_month_outlined), label: '日程'),
-          NavigationDestination(
-              icon: Icon(Icons.check_circle_outline), label: '待办'),
-          NavigationDestination(icon: Icon(Icons.notes_outlined), label: '笔记'),
-          NavigationDestination(
-              icon: Icon(Icons.mail_outline), label: '消息'),
-          NavigationDestination(
-              icon: Icon(Icons.settings_outlined), label: '设置'),
-        ],
+      bottomNavigationBar: AnimatedBuilder(
+        animation: MessageBadges.instance,
+        builder: (context, _) => _buildNavBar(),
       ),
+    );
+  }
+
+  /// U19-B：底部导航；「消息」带未处理数角标（页面常驻，后台也会刷新）
+  Widget _buildNavBar() {
+    final pending = MessageBadges.instance.pending;
+    return NavigationBar(
+      height: 72,
+      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      selectedIndex: _index,
+      onDestinationSelected: (i) {
+        setState(() => _index = i);
+        AppUiState.instance.setTab(i);
+        switch (i) {
+          case 0:
+            _scheduleKey.currentState?.reload();
+          case 1:
+            _todosKey.currentState?.reload();
+          case 2:
+            _notesKey.currentState?.reload();
+          case 3:
+            _messagesKey.currentState?.reload();
+        }
+      },
+      destinations: [
+        const NavigationDestination(
+            icon: Icon(Icons.calendar_month_outlined), label: '日程'),
+        const NavigationDestination(
+            icon: Icon(Icons.check_circle_outline), label: '待办'),
+        const NavigationDestination(
+            icon: Icon(Icons.notes_outlined), label: '笔记'),
+        NavigationDestination(
+            icon: Badge(
+              isLabelVisible: pending > 0,
+              label: Text(pending > 99 ? '99+' : '$pending'),
+              child: const Icon(Icons.mail_outline),
+            ),
+            label: '消息'),
+        const NavigationDestination(
+            icon: Icon(Icons.settings_outlined), label: '设置'),
+      ],
     );
   }
 }

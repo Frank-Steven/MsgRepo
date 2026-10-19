@@ -17,6 +17,8 @@ import 'import_page.dart';
 import 'message_detail_sheet.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
+import '../../services/app_ui_state.dart';
+import '../../services/reminder_service.dart';
 import '../../services/auto_process.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
@@ -144,6 +146,9 @@ class MessagesPageState extends State<MessagesPage> {
       final enabled = await NotificationBridge.instance.isListenerEnabled();
       if (mounted) setState(() => _listenerEnabled = enabled);
     } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
+    // U19-B：更新底部导航「消息」角标（未处理数）
+    MessageBadges.instance.setPending(
+        _messages.where((m) => messageGroupKey(m) == kGroupPending).length);
     // U19：未处理堆到阈值时自动提交处理（放在 reload 末尾，避免与首帧竞争）
     await _maybeAutoProcess();
   }
@@ -278,12 +283,17 @@ class MessagesPageState extends State<MessagesPage> {
     }
     if (added == 0) return 0;
     if (auto) {
-      // 自动触发：面板照常弹出（用户能看到进度），但不在这里等它关闭——
-      // 否则一旦有失败条目，面板停在汇总页，自动流程与冷却记录都会被挂住。
-      unawaited(showAiProcessPanel(context, onChanged: reload, auto: true)
-          .catchError((Object e, StackTrace st) {
-        AppLog.instance.warn('ai.panel-auto', e, st);
-      }));
+      // 自动触发：只有「用户正看着消息页」才弹面板（不阻塞等它关闭，
+      // 否则有失败条目时面板停在汇总页，自动流程与冷却记录都会被挂住）。
+      // 后台 / 不在消息页时弹面板没人看得见，改用系统通知告知（U19-A/C）。
+      if (AppUiState.instance.messagesVisible) {
+        unawaited(showAiProcessPanel(context, onChanged: reload, auto: true)
+            .catchError((Object e, StackTrace st) {
+          AppLog.instance.warn('ai.panel-auto', e, st);
+        }));
+      } else {
+        unawaited(ReminderService.instance.notifyAutoStarted(added));
+      }
       await reload();
     } else {
       await showAiProcessPanel(context, onChanged: reload);

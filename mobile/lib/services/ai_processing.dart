@@ -7,6 +7,7 @@ import '../models/message.dart';
 import '../models/task.dart';
 import 'ai_client.dart';
 import 'app_log.dart';
+import 'app_ui_state.dart';
 import 'task_dedupe.dart';
 import 'database.dart';
 import 'reminder_service.dart';
@@ -343,7 +344,10 @@ class AiProcessingService extends ChangeNotifier {
     if (armedIds != null && s != null && !_pumping && s.pendingConfirmCount > 0) {
       unawaited(_autoConfirmNow(s, armedIds));
     }
-    if (s != null &&
+    // 已武装自动确认时不再发「待确认」通知：否则用户会先后收到
+    // 「N 条待确认」和「已自动确认 N 条」两条互相矛盾的通知。
+    if (armedIds == null &&
+        s != null &&
         !_pumping &&
         s.pendingConfirmCount > 0 &&
         _panelDepth == 0 &&
@@ -366,6 +370,10 @@ class AiProcessingService extends ChangeNotifier {
     try {
       final n = await confirm(targets);
       AppLog.instance.warn('ai.auto-confirm', '自动确认 $n 条 AI 结果');
+      // U19-A：后台/非消息页场景下，这是用户唯一能察觉「跑完了 + 任务已写入」的提示
+      if (!AppUiState.instance.messagesVisible) {
+        await ReminderService.instance.notifyAutoFinished(n);
+      }
     } catch (e, st) {
       AppLog.instance.warn('ai.auto-confirm', e, st);
     }

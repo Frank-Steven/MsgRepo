@@ -48,6 +48,9 @@ class ReminderService {
   static const _aiChannelDesc = 'AI 后台处理完成提醒';
   static const _aiNotificationId = 0xA1;
 
+  /// U19-A：自动处理开始/结束的独立 id（不与「处理完成待确认」互相覆盖）
+  static const _aiAutoNotificationId = 0xA2;
+
   /// 已排上的任务提醒 id 列表（重排时只取消这些，避免波及别的通知）。
   static const _keyScheduledIds = 'reminder_scheduled_ids';
 
@@ -175,7 +178,7 @@ class ReminderService {
   /// 后者的提醒会把前者覆盖掉（表现为「某个任务永远不提醒」）。
   /// 这里以 hashCode 为起点做线性探测，并避开 AI 完成通知占用的 id。
   Map<String, int> assignNotificationIds(Iterable<String> taskIds) {
-    final used = <int>{_aiNotificationId};
+    final used = <int>{_aiNotificationId, _aiAutoNotificationId};
     final out = <String, int>{};
     var probe = 1;
     for (final id in taskIds) {
@@ -269,6 +272,42 @@ class ReminderService {
           priority: Priority.high,
         ),
       );
+
+  /// U19-A：自动触发处理时告知用户（后台/非消息页时唯一能察觉的提示）。
+  Future<void> notifyAutoStarted(int count) async {
+    if (!_initialized) return;
+    await _plugin.show(
+      _aiAutoNotificationId,
+      '已自动处理消息',
+      '$count 条未处理消息已提交 AI 处理（可在消息页查看进度）',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _aiChannelId,
+          _aiChannelName,
+          channelDescription: _aiChannelDesc,
+          importance: Importance.defaultImportance,
+        ),
+      ),
+    );
+  }
+
+  /// U19-A：自动确认完成后告知（后台场景下用户唯一的「钱花在哪」反馈）。
+  Future<void> notifyAutoFinished(int confirmed) async {
+    if (!_initialized) return;
+    await _plugin.show(
+      _aiAutoNotificationId,
+      '自动处理完成',
+      '已自动确认 $confirmed 条结果，任务已写入日程',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _aiChannelId,
+          _aiChannelName,
+          channelDescription: _aiChannelDesc,
+          importance: Importance.defaultImportance,
+        ),
+      ),
+    );
+  }
 
   /// AI 后台处理完成的一次性通知（v2.6.2）：面板收起期间跑完时提醒回来确认结果。
   /// 普通通知即可，不引入前台服务。
