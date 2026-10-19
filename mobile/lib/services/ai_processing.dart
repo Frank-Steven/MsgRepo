@@ -7,6 +7,7 @@ import '../models/message.dart';
 import '../models/task.dart';
 import 'ai_client.dart';
 import 'app_log.dart';
+import 'task_dedupe.dart';
 import 'database.dart';
 import 'reminder_service.dart';
 import 'undo_service.dart';
@@ -374,6 +375,10 @@ class AiProcessingService extends ChangeNotifier {
   Future<int> confirm(List<AiOutcome> targets) async {
     final db = AppDatabase.instance;
     final now = DateTime.now().millisecondsSinceEpoch;
+    // 防重复任务：先取一遍进行中的任务，草稿命中「同一件事」就复用它、只建关联。
+    // 典型场景：群里把同一条通知发了两遍 → 两条消息各自产出同名同时间的草稿，
+    // 以前会建出两条一模一样的任务（真机数据里已出现过）。
+    final activeTasks = await db.getActiveTasks();
     final undoItems = <({
       String messageId,
       String oldPriority,
@@ -392,8 +397,17 @@ class AiProcessingService extends ChangeNotifier {
           : (r.taskDraft != null ? [r.taskDraft!] : const <AiTaskDraft>[]);
       final oldTaskIds = await db.taskIdsForMessage(m.id);
       final createdIds = <String>[];
+      final reusedIds = <String>[];
       for (final draft in drafts) {
         if (draft.title.trim().isEmpty) continue;
+        final startAtMs = draft.startAt?.millisecondsSinceEpoch;
+        final reuse = findReusableTask(activeTasks,
+            title: draft.title, startAt: startAtMs);
+        if (reuse != null) {
+          // 命中已有任务：不新建，稍后只加一条关联（多对多的本意）
+          if (!reusedIds.contains(reuse.id)) reusedIds.add(reuse.id);
+          continue;
+        }
         final task = Task(
           id: const Uuid().v4(),
           title: draft.title,
@@ -412,12 +426,13 @@ class AiProcessingService extends ChangeNotifier {
         );
         await db.insertTask(task);
         createdIds.add(task.id);
+        activeTasks.add(task); // 同批内的后续草稿也能命中这条
       }
       await db.updateMessagePriority([m.id], r.priority);
       await db.updateMessageStatus([m.id], MessageStatus.processed);
       // 关联语义与旧版一致：用本次草稿替换旧绑定（无草稿则清空）。
       await db.unlinkAllForMessage(m.id);
-      for (final id in createdIds) {
+      for (final id in [...createdIds, ...reusedIds]) {
         await db.linkMessageTask(m.id, id);
       }
       undoItems.add((
@@ -427,6 +442,10 @@ class AiProcessingService extends ChangeNotifier {
         oldTaskIds: oldTaskIds,
         createdTaskIds: createdIds,
       ));
+      if (reusedIds.isNotEmpty) {
+        AppLog.instance.warn('ai.confirm-reuse',
+            '复用已有任务 ${reusedIds.length} 个（消息 ${m.id}）');
+      }
       confirmed.add(o);
     }
     if (undoItems.isEmpty) return 0;

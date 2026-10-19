@@ -704,6 +704,19 @@ class AppDatabase {
     return rows.map(Task.fromRow).toList();
   }
 
+  /// 全部「进行中」任务（AI 确认前查重复用；写操作量小，不做分页）。
+  /// 已完成/已放弃的任务不参与复用：同一件事再次出现时应当新建。
+  Future<List<Task>> getActiveTasks() async {
+    final db = await database;
+    final rows = await db.query(
+      'tasks',
+      where: 'status = ?',
+      whereArgs: [TaskStatus.active],
+      orderBy: 'created_at ASC',
+    );
+    return rows.map(Task.fromRow).toList();
+  }
+
   /// 与 [getMessages] 同条件的总条数（用于提示「仅显示前 N 条」）。
   Future<int> countMessages(
       {String? status, String? packageName, List<String>? priorities}) async {
