@@ -181,8 +181,9 @@ class AiProcessingService extends ChangeNotifier {
   /// 待确认结果条数（跨批累积）。
   int get pendingConfirmCount => _session?.pendingConfirmCount ?? 0;
 
-  /// 测试用：等待泵循环空闲。
-  @visibleForTesting
+  /// 等待泵循环空闲（当前队列排空）。
+  ///
+  /// 自动处理的连续批处理用它：一批跑完（含自动确认）再取下一批。
   Future<void> get idle => _pumpFuture ?? Future.value();
 
   /// 测试用：强制清空会话与泵状态（不改 processor）。

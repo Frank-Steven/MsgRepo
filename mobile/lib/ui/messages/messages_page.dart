@@ -228,38 +228,56 @@ class MessagesPageState extends State<MessagesPage> {
     );
     if (!ok || !mounted) return;
 
-    // 排除已在本轮会话里（处理中/待确认）的消息，否则会重复提交
-    final sessionIds = <String>{
-      for (final o in svc.session?.outcomes ?? const <AiOutcome>[]) o.message.id,
-    };
-    final candidates = (await _db.getMessages(
-      status: MessageStatus.pending,
-      limit: kAutoProcessBatchSize,
-      oldestFirst: true, // 先清最早的积压
-    ))
-        .where((m) => !sessionIds.contains(m.id) && !svc.isProcessing(m.id))
-        .toList();
-    if (candidates.isEmpty || !mounted) return;
-
     _autoProcessRunning = true;
     AppLog.instance.warn('auto-process',
-        'DB 未处理 $pendingTotal 条 ≥ 阈值 $threshold，本轮提交 ${candidates.length} 条（最早优先）');
+        'DB 未处理 $pendingTotal 条 ≥ 阈值 $threshold，开始连续处理（每批 $kAutoProcessBatchSize）');
     if (AppUiState.instance.messagesVisible) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('未处理 $pendingTotal 条（阈值 $threshold），已自动提交 ${candidates.length} 条')));
+          content: Text('未处理 $pendingTotal 条（阈值 $threshold），开始自动处理')));
     }
-    final ids = [for (final m in candidates) m.id];
+
+    var pendingBefore = pendingTotal;
+    var batches = 0;
+    var totalSubmitted = 0;
     try {
-      // 只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
-      svc.armAutoConfirm(ids);
-      final added = await _processWithAi(ids, auto: true);
-      if (added == 0) {
-        svc.disarmAutoConfirm();
-        return;
+      // 连续清积压：每批跑完（含自动确认）再取下一批，直到低于阈值或无进展
+      while (mounted && batches < kAutoProcessMaxBatches) {
+        final sessionIds = <String>{
+          for (final o in svc.session?.outcomes ?? const <AiOutcome>[])
+            o.message.id,
+        };
+        final candidates = (await _db.getMessages(
+          status: MessageStatus.pending,
+          limit: kAutoProcessBatchSize,
+          oldestFirst: true, // 先清最早的积压
+        ))
+            .where((m) =>
+                !sessionIds.contains(m.id) && !svc.isProcessing(m.id))
+            .toList();
+        if (candidates.isEmpty) break;
+
+        final ids = [for (final m in candidates) m.id];
+        // 只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
+        svc.armAutoConfirm(ids);
+        final added = await _processWithAi(ids, auto: true, openPanel: batches == 0);
+        if (added == 0) {
+          svc.disarmAutoConfirm();
+          break;
+        }
+        totalSubmitted += added;
+        batches++;
+        // 等这一批跑完（排空 + 自动确认）再决定要不要继续
+        await svc.idle;
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        await AutoProcessState.markRun(DateTime.now().millisecondsSinceEpoch);
+
+        final after = await _db.countMessages(status: MessageStatus.pending);
+        AppLog.instance.warn('auto-process',
+            '第 $batches 批完成：提交 $totalSubmitted 条，剩余未处理 $after 条（阈值 $threshold）');
+        if (after >= pendingBefore) break; // 没有进展，别硬跑
+        pendingBefore = after;
+        if (after < threshold) break; // 已降到阈值以下，收工
       }
-      // 只有真的提交了才记冷却：避免整轮被过滤时空耗 10 分钟
-      await AutoProcessState.markRun(DateTime.now().millisecondsSinceEpoch);
-      // 注意：这里不能 disarm —— 处理还在后台跑，自动确认在队列排空时消费令牌
     } catch (e, st) {
       svc.disarmAutoConfirm();
       AppLog.instance.warn('auto-process', e, st);
@@ -267,10 +285,9 @@ class MessagesPageState extends State<MessagesPage> {
       _autoProcessRunning = false;
     }
   }
-
   /// 返回实际入队条数（0 表示全部被过滤/跳过）。
   Future<int> _processWithAi(List<String> ids,
-      {bool reprocess = false, bool auto = false}) async {
+      {bool reprocess = false, bool auto = false, bool openPanel = true}) async {
     final msgs = await _db.getMessagesByIds(ids);
     if (msgs.isEmpty || !mounted) return 0;
     // 保持传入顺序（多选时为用户点选顺序）

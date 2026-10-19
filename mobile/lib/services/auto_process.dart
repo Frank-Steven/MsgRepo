@@ -8,12 +8,18 @@ const int kAutoProcessThreshold = 400;
 const int kAutoProcessThresholdMin = 100;
 const int kAutoProcessThresholdMax = 500;
 
-/// 每轮自动处理的消息上限。
+/// 单次自动触发最多取多少条（**等价于不限制**：20000 条远超实际积压）。
 ///
-/// 不能一次把几千条全塞给模型：单轮耗时与额度都不可控，且失败面更大。
-/// 与消息页单次加载上限（500）解耦——积压再多，一轮也只处理这么多，
-/// 冷却结束后下一轮接着清（最早优先）。
-const int kAutoProcessBatchSize = 500;
+/// 用户 2026-10-20 明确要求去掉每批限制：触发一次就把所有未处理一次提交，
+/// 由自动确认统一落库。真正的安全阀是 [kAutoProcessMaxBatches]（防计数不降死循环）。
+const int kAutoProcessBatchSize = 20000;
+
+/// 一次自动触发**连续处理**的防御性批数上限。
+///
+/// 触发一次会一直往下清（每批 kAutoProcessBatchSize 条），直到未处理数低于阈值；
+/// 这个数字只是防止异常情况（比如计数不降）下无限跑，正常情况下远达不到：
+/// 1000 批 × 500 条 = 50 万条，实际永远先因为「低于阈值」而停。
+const int kAutoProcessMaxBatches = 1000;
 
 /// 把阈值夹到合法区间（设置页与读取处共用，便于单测）。
 int clampAutoProcessThreshold(int value) =>

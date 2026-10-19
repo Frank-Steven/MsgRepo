@@ -6,9 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'services/ai_processing.dart';
 import 'services/app_ui_state.dart';
 import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
+import 'ui/messages/ai_panel.dart';
 import 'ui/messages/messages_page.dart';
 import 'ui/notes/notes_page.dart';
 import 'ui/schedule/schedule_page.dart';
@@ -180,10 +182,75 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(index: _index, children: _pages),
+      body: Column(
+        children: [
+          AnimatedBuilder(
+            animation: AiProcessingService.instance,
+            builder: (context, _) => _buildAiBanner(),
+          ),
+          Expanded(child: IndexedStack(index: _index, children: _pages)),
+        ],
+      ),
       bottomNavigationBar: AnimatedBuilder(
         animation: MessageBadges.instance,
         builder: (context, _) => _buildNavBar(),
+      ),
+    );
+  }
+
+  /// 全局 AI 处理横幅（U19-G）：任何 tab 都能看到进度，点击回到消息页并打开面板。
+  Widget _buildAiBanner() {
+    final session = AiProcessingService.instance.session;
+    if (session == null) return const SizedBox.shrink();
+    final running = session.running;
+    final pending = session.pendingConfirmCount;
+    final failed = session.failCount;
+    if (!running && pending == 0 && failed == 0) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    final String text;
+    if (running) {
+      text = 'AI 处理中 ${session.settledCount}/${session.enqueuedCount}'
+          ' · 待确认 $pending';
+    } else if (pending > 0) {
+      text = 'AI 处理完成：$pending 条结果待确认'
+          '${failed > 0 ? '，$failed 条失败' : ''}';
+    } else {
+      text = 'AI 处理完成：$failed 条失败';
+    }
+    final topInset = MediaQuery.of(context).padding.top;
+    return Material(
+      color: cs.primaryContainer,
+      child: InkWell(
+        onTap: () async {
+          setState(() => _index = AppUiState.messagesTabIndex);
+          AppUiState.instance.setTab(AppUiState.messagesTabIndex);
+          _messagesKey.currentState?.reload();
+          await showAiProcessPanel(context,
+              onChanged: () => _messagesKey.currentState?.reload());
+        },
+        child: Padding(
+          // 页面本身不带 SafeArea，横幅要自己避开状态栏（真机截图发现压在时间上）
+          padding: EdgeInsets.fromLTRB(12, 6 + topInset, 12, 6),
+          child: Row(
+            children: [
+              if (running)
+                const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+              else
+                Icon(Icons.check_circle_outline,
+                    size: 16, color: cs.onPrimaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(text,
+                    style: TextStyle(fontSize: 12, color: cs.onPrimaryContainer)),
+              ),
+              Icon(Icons.chevron_right,
+                  size: 16, color: cs.onPrimaryContainer),
+            ],
+          ),
+        ),
       ),
     );
   }
