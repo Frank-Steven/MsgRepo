@@ -128,6 +128,19 @@ class AiProcessingService extends ChangeNotifier {
   static final AiProcessingService instance = AiProcessingService._();
 
   AiProcessingSession? _session;
+  /// 单条消息保留的原始流字符上限（只用于展示）。
+  static const int _rawLimit = 4000;
+
+  Timer? _tokenNotifyTimer;
+
+  void _scheduleTokenNotify() {
+    if (_tokenNotifyTimer != null) return;
+    _tokenNotifyTimer = Timer(const Duration(milliseconds: 100), () {
+      _tokenNotifyTimer = null;
+      notifyListeners();
+    });
+  }
+
   bool _pumping = false;
   bool _cancelRequested = false;
 
@@ -189,6 +202,8 @@ class AiProcessingService extends ChangeNotifier {
   /// 测试用：强制清空会话与泵状态（不改 processor）。
   @visibleForTesting
   void reset() {
+    _tokenNotifyTimer?.cancel();
+    _tokenNotifyTimer = null;
     _session = null;
     _cancelRequested = false;
     _notifiedPending = false;
@@ -312,9 +327,19 @@ class AiProcessingService extends ChangeNotifier {
     switch (ev) {
       case AiTokenDelta(:final messageId, :final delta):
         session.currentId = messageId;
-        session.rawById.putIfAbsent(messageId, StringBuffer.new).write(delta);
+        final buf = session.rawById.putIfAbsent(messageId, StringBuffer.new);
+        buf.write(delta);
+        // 原始流只保留末尾一段：上千条消息时无限累积会让内存与重排都失控
+        if (buf.length > _rawLimit) {
+          final tail = buf.toString().substring(buf.length - _rawLimit);
+          buf
+            ..clear()
+            ..write('…$tail');
+        }
         tokenRevision++;
-        notifyListeners(); // 高频：不 bump revision，只有面板在听
+        // 合并通知：每个 token 都 notifyListeners 会让面板按 token 频率重排，
+        // 上千条队列时直接把主线程压垮（真机 ANR）。这里约 10fps 合并一次。
+        _scheduleTokenNotify();
       case AiMessageResult(:final result):
         final o = session.outcomeOf(result.messageId);
         if (o != null && !o.settled) {

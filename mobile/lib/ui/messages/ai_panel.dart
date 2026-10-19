@@ -76,11 +76,19 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     setState(() {});
   }
 
+  DateTime _lastScrollAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 流式输出时跟随到底部：节流 300ms，且只在用户本来就贴着底部时才跟随
+  /// （每个 token 都 jumpTo 会在上千条的 builder 列表里反复触发布局，是 ANR 的帮凶）。
   void _scrollToEnd() {
+    final now = DateTime.now();
+    if (now.difference(_lastScrollAt).inMilliseconds < 300) return;
+    _lastScrollAt = now;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
+      if (!_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (pos.maxScrollExtent - pos.pixels > 400) return; // 用户上滑看历史时不抢
+      _scroll.jumpTo(pos.maxScrollExtent);
     });
   }
 
