@@ -105,6 +105,22 @@ class AiProcessingSession {
 ///
 /// 同时是「正在处理」消息 id 集的唯一来源（内存态，不落库，页面间天然一致；
 /// 应用重启即清——未确认结果随之丢弃，设计上确认动作必须用户在场完成）。
+/// 自动确认的目标选择（纯函数，便于单测）：
+/// 只取「本轮自动提交的那些消息」里**成功且有结果**的条目；
+/// 失败条目（error != null）与未完成条目一律跳过。
+List<AiOutcome> selectAutoConfirmTargets({
+  required List<AiOutcome> outcomes,
+  required Set<String> messageIds,
+}) =>
+    [
+      for (final o in outcomes)
+        if (messageIds.contains(o.message.id) &&
+            o.settled &&
+            o.error == null &&
+            o.result != null)
+          o,
+    ];
+
 class AiProcessingService extends ChangeNotifier {
   AiProcessingService._();
 
@@ -118,15 +134,19 @@ class AiProcessingService extends ChangeNotifier {
   bool _notifiedPending = false;
 
   /// U19：自动触发的那一轮处理结束后是否自动确认（用户 2026-10-18 要求）。
-  /// 只对一次自动触发生效，确认后自动复位；手动处理永远走人工确认。
-  bool _autoConfirm = false;
+  ///
+  /// **按消息 id 记录**，而不是一个全局开关：自动跑的同时用户手动再选几条处理时，
+  /// 那些手动提交的消息不能被顺带自动确认（用户没点确认）。
+  /// 只对一次自动触发生效，用完即清；手动处理永远走人工确认。
+  Set<String>? _autoConfirmIds;
 
-  /// 武装「处理完自动确认」（由自动触发路径调用）。
-  void armAutoConfirm() => _autoConfirm = true;
+  /// 武装「处理完自动确认」，只对 [messageIds] 生效。
+  void armAutoConfirm(Iterable<String> messageIds) =>
+      _autoConfirmIds = messageIds.toSet();
 
-  void disarmAutoConfirm() => _autoConfirm = false;
+  void disarmAutoConfirm() => _autoConfirmIds = null;
 
-  bool get autoConfirmArmed => _autoConfirm;
+  bool get autoConfirmArmed => _autoConfirmIds != null;
 
   Future<void>? _pumpFuture;
 
@@ -319,8 +339,9 @@ class AiProcessingService extends ChangeNotifier {
   void _drained() {
     final s = _session;
     // U19：自动触发的那一轮排空后直接确认（不需要用户再点）
-    if (_autoConfirm && s != null && !_pumping && s.pendingConfirmCount > 0) {
-      unawaited(_autoConfirmNow(s));
+    final armedIds = _autoConfirmIds;
+    if (armedIds != null && s != null && !_pumping && s.pendingConfirmCount > 0) {
+      unawaited(_autoConfirmNow(s, armedIds));
     }
     if (s != null &&
         !_pumping &&
@@ -334,14 +355,13 @@ class AiProcessingService extends ChangeNotifier {
     _maybeClear();
   }
 
-  /// 自动确认：把本轮所有「成功且有结果」的条目写回（建任务 + 置 processed）。
-  /// 失败条目保持原样，留给用户手动看。
-  Future<void> _autoConfirmNow(AiProcessingSession s) async {
-    _autoConfirm = false; // 只生效一次
-    final targets = [
-      for (final o in List<AiOutcome>.from(s.outcomes))
-        if (o.settled && o.error == null && o.result != null) o,
-    ];
+  /// 自动确认：只把**本次自动提交**的那些消息里「成功且有结果」的写回
+  /// （建任务 + 置 processed）。失败条目与用户手动追加的消息保持原样。
+  Future<void> _autoConfirmNow(
+      AiProcessingSession s, Set<String> armedIds) async {
+    _autoConfirmIds = null; // 只生效一次
+    final targets =
+        selectAutoConfirmTargets(outcomes: s.outcomes, messageIds: armedIds);
     if (targets.isEmpty) return;
     try {
       final n = await confirm(targets);
@@ -366,6 +386,8 @@ class AiProcessingService extends ChangeNotifier {
   /// 已产出的结果保留在汇总面板。
   Future<void> cancel() async {
     _cancelRequested = true;
+    // 用户主动取消：已出结果的条目也不能再自动确认（否则等于「取消无效」）
+    _autoConfirmIds = null;
     AiClient.instance.cancelActive();
   }
 

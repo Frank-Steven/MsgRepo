@@ -222,22 +222,33 @@ class MessagesPageState extends State<MessagesPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('未处理已达 ${pending.length} 条（阈值 $threshold），已自动提交处理')));
+    final ids = [for (final m in pending) m.id];
     try {
-      // U19：自动触发的那一轮处理完自动确认（用户要求，省一次点击）
-      svc.armAutoConfirm();
-      await _processWithAi([for (final m in pending) m.id], auto: true);
+      // U19：只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
+      svc.armAutoConfirm(ids);
+      final added = await _processWithAi(ids, auto: true);
+      if (added == 0) {
+        // 一条都没入队（全被过滤）：没有后续会话要用这次武装，立刻解除
+        svc.disarmAutoConfirm();
+        return;
+      }
       // 只有真的提交了才记冷却时间：避免一次空跑把 10 分钟冷却浪费掉
-      await AutoProcessState.markRun(nowMs);
-    } finally {
+      await AutoProcessState.markRun(DateTime.now().millisecondsSinceEpoch);
+      // 注意：这里**不能** disarm —— 处理还在后台跑，自动确认要在队列排空时才发生
+      // （武装的 id 由服务在 _drained 时消费一次后自行清空）
+    } catch (e, st) {
       svc.disarmAutoConfirm();
+      AppLog.instance.warn('auto-process', e, st);
+    } finally {
       _autoProcessRunning = false;
     }
   }
 
-  Future<void> _processWithAi(List<String> ids,
+  /// 返回实际入队条数（0 表示全部被过滤/跳过）。
+  Future<int> _processWithAi(List<String> ids,
       {bool reprocess = false, bool auto = false}) async {
     final msgs = await _db.getMessagesByIds(ids);
-    if (msgs.isEmpty || !mounted) return;
+    if (msgs.isEmpty || !mounted) return 0;
     // 保持传入顺序（多选时为用户点选顺序）
     final order = {for (var i = 0; i < ids.length; i++) ids[i]: i};
     msgs.sort(
@@ -246,7 +257,7 @@ class MessagesPageState extends State<MessagesPage> {
     // 已 processed（非显式重新处理）/同内容已有 processed 记录的重复消息跳过
     final svc = AiProcessingService.instance;
     final processedHashes = await _db.getProcessedContentHashes();
-    if (!mounted) return;
+    if (!mounted) return 0;
     final (toProcess, skipped) = filterProcessable(
       msgs,
       reprocess: reprocess,
@@ -265,9 +276,20 @@ class MessagesPageState extends State<MessagesPage> {
       ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('跳过 ${parts.join('、')}')));
     }
-    if (added == 0) return;
-    await showAiProcessPanel(context, onChanged: reload, auto: auto);
-    await reload();
+    if (added == 0) return 0;
+    if (auto) {
+      // 自动触发：面板照常弹出（用户能看到进度），但不在这里等它关闭——
+      // 否则一旦有失败条目，面板停在汇总页，自动流程与冷却记录都会被挂住。
+      unawaited(showAiProcessPanel(context, onChanged: reload, auto: true)
+          .catchError((Object e, StackTrace st) {
+        AppLog.instance.warn('ai.panel-auto', e, st);
+      }));
+      await reload();
+    } else {
+      await showAiProcessPanel(context, onChanged: reload);
+      await reload();
+    }
+    return added;
   }
 
   Future<void> _addManually() async {
