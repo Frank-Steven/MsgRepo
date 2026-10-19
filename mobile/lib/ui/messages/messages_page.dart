@@ -808,63 +808,6 @@ class MessagesPageState extends State<MessagesPage> {
     );
   }
 
-  /// AI 处理全局指示（v2.6.2；v2.6.4 排队模型聚合文案）：处理中显示
-  /// 「已处理 x/y · 待确认 n」，队列排空后显示待确认/失败入口；
-  /// 点击回到面板继续确认流。会话状态变化经 _onAiProcessingChanged 触发重建。
-  Widget _buildAiIndicator(BuildContext context) {
-    final session = AiProcessingService.instance.session;
-    if (session == null) return const SizedBox.shrink();
-    final running = session.running;
-    final pending = session.pendingConfirmCount;
-    final failed = session.failCount;
-    if (!running && pending == 0 && failed == 0) return const SizedBox.shrink();
-    final String text;
-    if (running) {
-      text = 'AI 处理中 ${session.settledCount}/${session.enqueuedCount}'
-          ' · 待确认 $pending，点击查看';
-    } else if (pending > 0) {
-      text = 'AI 处理完成：$pending 条结果待确认'
-          '${failed > 0 ? '，$failed 条失败' : ''}';
-    } else {
-      text = 'AI 处理完成：$failed 条失败，点击查看';
-    }
-    final cs = Theme.of(context).colorScheme;
-    return Material(
-      color: cs.primaryContainer,
-      child: InkWell(
-        onTap: () async {
-          await showAiProcessPanel(context, onChanged: reload);
-          await reload();
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: Row(
-            children: [
-              if (running)
-                const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-              else
-                Icon(Icons.fact_check_outlined,
-                    size: 18, color: cs.onPrimaryContainer),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  text,
-                  style:
-                      TextStyle(fontSize: 13, color: cs.onPrimaryContainer),
-                ),
-              ),
-              Icon(Icons.chevron_right,
-                  size: 18, color: cs.onPrimaryContainer),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildList() {
     final grouped = _grouped;
     final empty = grouped.values.every((l) => l.isEmpty);
@@ -1004,7 +947,6 @@ class MessagesPageState extends State<MessagesPage> {
       body: Column(
         children: [
           if (_listenerEnabled == false) _buildListenerBanner(context),
-          _buildAiIndicator(context),
           _buildFilterRow(context),
           const Divider(height: 1),
           Expanded(

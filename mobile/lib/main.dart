@@ -209,13 +209,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final cs = Theme.of(context).colorScheme;
     final String text;
     if (running) {
-      text = 'AI 处理中 ${session.settledCount}/${session.enqueuedCount}'
+      text = 'AI 处理消息中 ${session.settledCount}/${session.enqueuedCount}'
           ' · 待确认 $pending';
     } else if (pending > 0) {
-      text = 'AI 处理完成：$pending 条结果待确认'
+      text = 'AI 处理消息完成：$pending 条结果待确认'
           '${failed > 0 ? '，$failed 条失败' : ''}';
     } else {
-      text = 'AI 处理完成：$failed 条失败';
+      text = 'AI 处理消息完成：$failed 条失败';
     }
     final topInset = MediaQuery.of(context).padding.top;
     return Material(
