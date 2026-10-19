@@ -83,11 +83,27 @@ class MessagesPageState extends State<MessagesPage> {
     super.dispose();
   }
 
+  /// 角标 = DB 里的未处理条数（与页面筛选无关，后台也会被调用）。
+  Future<void> _updateBadge() async {
+    try {
+      final n = await _db.countMessages(status: MessageStatus.pending);
+      if (!mounted) return;
+      MessageBadges.instance.setPending(n);
+    } catch (e, st) {
+      AppLog.instance.warn('messages.badge', e, st);
+    }
+  }
+
   void _onAiProcessingChanged() {
     final rev = AiProcessingService.instance.revision;
     if (!mounted || rev == _aiRevision) return;
     _aiRevision = rev;
     setState(() {});
+    // 自动确认会把消息置 processed 却没有 reload —— 角标要跟着刷新
+    // （子代理审查：否则后台跑完后角标长期停在旧值）。
+    final s = AiProcessingService.instance.session;
+    final drained = s == null || (!s.running && s.outcomes.isEmpty);
+    if (drained) unawaited(_updateBadge());
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
@@ -146,9 +162,8 @@ class MessagesPageState extends State<MessagesPage> {
       final enabled = await NotificationBridge.instance.isListenerEnabled();
       if (mounted) setState(() => _listenerEnabled = enabled);
     } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
-    // U19-B：更新底部导航「消息」角标（未处理数）
-    MessageBadges.instance.setPending(
-        _messages.where((m) => messageGroupKey(m) == kGroupPending).length);
+    // U19-B：更新底部导航「消息」角标（取 DB 的未处理数，不受页面 500 条上限影响）
+    await _updateBadge();
     // U19：未处理堆到阈值时自动提交处理（放在 reload 末尾，避免与首帧竞争）
     await _maybeAutoProcess();
   }
@@ -191,56 +206,60 @@ class MessagesPageState extends State<MessagesPage> {
   /// 发起 AI 处理。[reprocess]=true 仅用于单条左滑「重新处理」——
   /// 已 processed 的消息只有这条路径允许再次发起（v2.6.2）。
   /// v2.6.4 连续排队：随时可追加，挂到队列尾部按序处理，不等上一批跑完。
-  /// U19：未处理消息达到阈值（默认 400）时自动提交处理。
-  /// 触发点：每次列表 reload 之后（即收到新消息 / 下拉刷新 / 启动加载）。
+  /// U19：未处理消息达到阈值时自动提交处理。
+  ///
+  /// **候选集取自数据库，不依赖页面列表**（2026-10-20 修）：此前用 `_messages`，
+  /// 而页面一次只加载 500 条，于是「DB 里 2000+ 未处理」只会送 500 条去处理。
+  /// 现在：阈值按 DB 的 pending 总数判断，每轮只取最早的一批（kAutoProcessBatchSize）。
   Future<void> _maybeAutoProcess() async {
     if (_autoProcessRunning) return;
-    final svc = AiProcessingService.instance;
-    // 排除「已在本轮会话里（处理中/待确认）」的消息：
-    // 否则处理完但用户还没确认时，pending 计数不降 → 冷却一过又触发一遍，白烧额度。
-    final sessionIds = <String>{
-      for (final o in svc.session?.outcomes ?? const <AiOutcome>[]) o.message.id,
-    };
-    final pending = [
-      for (final m in _messages)
-        if (messageGroupKey(m) == kGroupPending &&
-            !sessionIds.contains(m.id) &&
-            !svc.isProcessing(m.id))
-          m,
-    ];
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    // 阈值与开关都可由用户在设置里调整（合作者建议：参数应该放出来）
     if (!await AutoProcessState.enabled()) return;
     final threshold = await AutoProcessState.threshold();
+    final pendingTotal = await _db.countMessages(status: MessageStatus.pending);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     final lastAt = await AutoProcessState.lastRunAt();
+    final svc = AiProcessingService.instance;
     final ok = shouldAutoProcess(
-      pendingCount: pending.length,
-      alreadyProcessing: AiProcessingService.instance.running,
+      pendingCount: pendingTotal,
+      alreadyProcessing: svc.running,
       lastAutoAtMs: lastAt,
       nowMs: nowMs,
       threshold: threshold,
     );
     if (!ok || !mounted) return;
+
+    // 排除已在本轮会话里（处理中/待确认）的消息，否则会重复提交
+    final sessionIds = <String>{
+      for (final o in svc.session?.outcomes ?? const <AiOutcome>[]) o.message.id,
+    };
+    final candidates = (await _db.getMessages(
+      status: MessageStatus.pending,
+      limit: kAutoProcessBatchSize,
+      oldestFirst: true, // 先清最早的积压
+    ))
+        .where((m) => !sessionIds.contains(m.id) && !svc.isProcessing(m.id))
+        .toList();
+    if (candidates.isEmpty || !mounted) return;
+
     _autoProcessRunning = true;
     AppLog.instance.warn('auto-process',
-        '未处理 ${pending.length} 条 ≥ $threshold，自动提交处理');
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('未处理已达 ${pending.length} 条（阈值 $threshold），已自动提交处理')));
-    final ids = [for (final m in pending) m.id];
+        'DB 未处理 $pendingTotal 条 ≥ 阈值 $threshold，本轮提交 ${candidates.length} 条（最早优先）');
+    if (AppUiState.instance.messagesVisible) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('未处理 $pendingTotal 条（阈值 $threshold），已自动提交 ${candidates.length} 条')));
+    }
+    final ids = [for (final m in candidates) m.id];
     try {
-      // U19：只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
+      // 只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
       svc.armAutoConfirm(ids);
       final added = await _processWithAi(ids, auto: true);
       if (added == 0) {
-        // 一条都没入队（全被过滤）：没有后续会话要用这次武装，立刻解除
         svc.disarmAutoConfirm();
         return;
       }
-      // 只有真的提交了才记冷却时间：避免一次空跑把 10 分钟冷却浪费掉
+      // 只有真的提交了才记冷却：避免整轮被过滤时空耗 10 分钟
       await AutoProcessState.markRun(DateTime.now().millisecondsSinceEpoch);
-      // 注意：这里**不能** disarm —— 处理还在后台跑，自动确认要在队列排空时才发生
-      // （武装的 id 由服务在 _drained 时消费一次后自行清空）
+      // 注意：这里不能 disarm —— 处理还在后台跑，自动确认在队列排空时消费令牌
     } catch (e, st) {
       svc.disarmAutoConfirm();
       AppLog.instance.warn('auto-process', e, st);

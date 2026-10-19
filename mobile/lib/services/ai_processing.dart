@@ -339,9 +339,11 @@ class AiProcessingService extends ChangeNotifier {
   /// （普通通知，不引入前台服务；应用内顶部指示条是可靠入口）。
   void _drained() {
     final s = _session;
-    // U19：自动触发的那一轮排空后直接确认（不需要用户再点）
+    // U19：一次性令牌 —— 排空时无论用不用都先取走并清空，
+    // 否则本轮全失败时令牌残留，会干扰之后「用户手动处理」的那一轮。
     final armedIds = _autoConfirmIds;
-    if (armedIds != null && s != null && !_pumping && s.pendingConfirmCount > 0) {
+    _autoConfirmIds = null;
+    if (armedIds != null && s != null && !_pumping) {
       unawaited(_autoConfirmNow(s, armedIds));
     }
     // 已武装自动确认时不再发「待确认」通知：否则用户会先后收到
@@ -363,16 +365,27 @@ class AiProcessingService extends ChangeNotifier {
   /// （建任务 + 置 processed）。失败条目与用户手动追加的消息保持原样。
   Future<void> _autoConfirmNow(
       AiProcessingSession s, Set<String> armedIds) async {
-    _autoConfirmIds = null; // 只生效一次
     final targets =
         selectAutoConfirmTargets(outcomes: s.outcomes, messageIds: armedIds);
-    if (targets.isEmpty) return;
+    final failed = s.outcomes
+        .where((o) => armedIds.contains(o.message.id) && o.error != null)
+        .length;
+    if (targets.isEmpty) {
+      // 全失败：也要告知，否则用户只收到「已提交」却不知道一条都没成
+      AppLog.instance.warn('ai.auto-confirm', '无可确认结果（失败 $failed 条）');
+      if (!AppUiState.instance.messagesVisible) {
+        await ReminderService.instance.notifyAutoFailed(failed);
+      }
+      return;
+    }
     try {
       final n = await confirm(targets);
-      AppLog.instance.warn('ai.auto-confirm', '自动确认 $n 条 AI 结果');
-      // U19-A：后台/非消息页场景下，这是用户唯一能察觉「跑完了 + 任务已写入」的提示
+      AppLog.instance.warn('ai.auto-confirm',
+          '自动确认 $n 条 AI 结果（新建任务 $lastConfirmCreatedTasks 个，失败 $failed 条）');
+      // U19-A：后台/非消息页场景下，这是用户唯一能察觉「跑完了」的提示
       if (!AppUiState.instance.messagesVisible) {
-        await ReminderService.instance.notifyAutoFinished(n);
+        await ReminderService.instance
+            .notifyAutoFinished(n, createdTasks: lastConfirmCreatedTasks, failed: failed);
       }
     } catch (e, st) {
       AppLog.instance.warn('ai.auto-confirm', e, st);
@@ -402,7 +415,20 @@ class AiProcessingService extends ChangeNotifier {
   /// 确认 = 写回 priority + status(processed)；有任务草稿则建任务并互链。
   /// 每次确认作为一个复合逆操作进撤销队列（设计 §5.2/§6）。
   /// 确认过的条目从会话列表移除（v2.6.4），处理继续。返回确认条数。
-  Future<int> confirm(List<AiOutcome> targets) async {
+  /// 确认串行化（子代理审查：自动确认与面板手点可能并发，各自查一遍活动任务
+  /// 再逐条插入 → 重复任务 + 双份撤销记录）。这里用 Future 链把调用排队。
+  Future<void> _confirmQueue = Future<void>.value();
+
+  /// 最近一次 confirm 新建的任务数（给通知文案用）。
+  int lastConfirmCreatedTasks = 0;
+
+  Future<int> confirm(List<AiOutcome> targets) {
+    final result = _confirmQueue.then((_) => _confirmImpl(targets));
+    _confirmQueue = result.then<void>((_) {}, onError: (_) {});
+    return result;
+  }
+
+  Future<int> _confirmImpl(List<AiOutcome> targets) async {
     final db = AppDatabase.instance;
     final now = DateTime.now().millisecondsSinceEpoch;
     // 防重复任务：先取一遍进行中的任务，草稿命中「同一件事」就复用它、只建关联。
@@ -417,6 +443,7 @@ class AiProcessingService extends ChangeNotifier {
       List<String> createdTaskIds,
     })>[];
     final confirmed = <AiOutcome>[];
+    var createdTasks = 0;
     for (final o in targets) {
       final r = o.result;
       if (r == null) continue;
@@ -478,6 +505,7 @@ class AiProcessingService extends ChangeNotifier {
       }
       confirmed.add(o);
     }
+    lastConfirmCreatedTasks = createdTasks;
     if (undoItems.isEmpty) return 0;
     final count = undoItems.length;
     UndoService.instance.register(

@@ -464,12 +464,14 @@ class AppDatabase {
     });
   }
 
+  /// [oldestFirst] = true 时按 posted_at 升序（自动处理用：先清最早的积压）。
   Future<List<Message>> getMessages(
       {String? status,
       String? packageName,
       List<String>? priorities,
       int limit = defaultMessageLimit,
-      int offset = 0}) async {
+      int offset = 0,
+      bool oldestFirst = false}) async {
     final db = await database;
     final wheres = <String>[];
     final args = <Object?>[];

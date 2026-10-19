@@ -8,6 +8,13 @@ const int kAutoProcessThreshold = 400;
 const int kAutoProcessThresholdMin = 100;
 const int kAutoProcessThresholdMax = 500;
 
+/// 每轮自动处理的消息上限。
+///
+/// 不能一次把几千条全塞给模型：单轮耗时与额度都不可控，且失败面更大。
+/// 与消息页单次加载上限（500）解耦——积压再多，一轮也只处理这么多，
+/// 冷却结束后下一轮接着清（最早优先）。
+const int kAutoProcessBatchSize = 500;
+
 /// 把阈值夹到合法区间（设置页与读取处共用，便于单测）。
 int clampAutoProcessThreshold(int value) =>
     value.clamp(kAutoProcessThresholdMin, kAutoProcessThresholdMax);

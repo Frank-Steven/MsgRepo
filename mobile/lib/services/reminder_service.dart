@@ -292,12 +292,36 @@ class ReminderService {
   }
 
   /// U19-A：自动确认完成后告知（后台场景下用户唯一的「钱花在哪」反馈）。
-  Future<void> notifyAutoFinished(int confirmed) async {
+  /// 文案按真实数量分支：一条消息可能建 0~3 个任务，命中已有任务时 0 个，
+  /// 所以不能笼统写「任务已写入日程」（子代理审查指出）。
+  Future<void> notifyAutoFinished(int confirmed,
+      {int createdTasks = 0, int failed = 0}) async {
     if (!_initialized) return;
+    final buf = StringBuffer('已自动确认 $confirmed 条消息');
+    if (createdTasks > 0) buf.write('，新建 $createdTasks 个任务');
+    if (failed > 0) buf.write('，$failed 条处理失败');
     await _plugin.show(
       _aiAutoNotificationId,
       '自动处理完成',
-      '已自动确认 $confirmed 条结果，任务已写入日程',
+      buf.toString(),
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _aiChannelId,
+          _aiChannelName,
+          channelDescription: _aiChannelDesc,
+          importance: Importance.defaultImportance,
+        ),
+      ),
+    );
+  }
+
+  /// U19-A：自动确认一条都没成功（本轮全失败）时告知，避免用户只看到「已提交」。
+  Future<void> notifyAutoFailed(int failed) async {
+    if (!_initialized) return;
+    await _plugin.show(
+      _aiAutoNotificationId,
+      '自动处理未产生结果',
+      failed > 0 ? '$failed 条消息处理失败，可在消息页查看' : '本轮没有可确认的结果',
       const NotificationDetails(
         android: AndroidNotificationDetails(
           _aiChannelId,

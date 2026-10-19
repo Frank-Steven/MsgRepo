@@ -141,6 +141,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     AppUiState.instance.setTab(_index);
+    // 冷启动时可能已在后台（如被通知拉起），用真实生命周期初始化
+    final lc = WidgetsBinding.instance.lifecycleState;
+    AppUiState.instance.setForeground(lc == null || lc == AppLifecycleState.resumed);
   }
 
   @override
@@ -151,8 +154,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // U19-C：后台时不弹 AI 面板，改用系统通知告知
-    AppUiState.instance.setForeground(state == AppLifecycleState.resumed);
+    // U19-C：只有真正离开（pause/hidden/detach）才算后台；
+    // inactive 可能只是分屏/失焦/系统弹窗，不该因此改成发通知。
+    final background = state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached;
+    AppUiState.instance.setForeground(!background);
   }
   int _index = 0;
 
