@@ -625,12 +625,23 @@ class _DayLayout {
     /// 某个 x 区间在「指定行的上方」是否空着（row=0 时上方是名称带，视为空）。
     bool freeAbove(int rowIdx, double left, double right) {
       if (rowIdx <= 0) return true;
-      final above = rowSpans[rowIdx - 1];
-      for (final iv in above) {
-        // 与 yearly_view 口径一致：留 6px 间隙，避免标签贴着别的节点
+      for (final iv in rowSpans[rowIdx - 1]) {
         if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
       }
       return true;
+    }
+
+    // 标签占位（按行记录已画标签的 x 区间）—— 修 bug：同一行上两个任务的标签会叠在一起。
+    final labelSpans = <int, List<(double, double)>>{};
+    bool labelFree(int rowIdx, double left, double right) {
+      for (final iv in labelSpans[rowIdx] ?? const <(double, double)>[]) {
+        if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
+      }
+      return true;
+    }
+
+    void takeLabelSpan(int rowIdx, double left, double right) {
+      (labelSpans[rowIdx] ??= <(double, double)>[]).add((left, right));
     }
 
     for (final it in items) {
@@ -641,12 +652,17 @@ class _DayLayout {
       if (w < 6) continue;
       double? anchorX;
       if (it.isPoint) {
-        if (freeAbove(it.rowIdx, it.x1, it.x1 + w)) anchorX = it.x1;
+        // 点任务：只能挂在自己正上方；上方没空间或与同行标签撞了就不显示（先到先得）
+        if (freeAbove(it.rowIdx, it.x1, it.x1 + w) &&
+            labelFree(it.rowIdx, it.x1, it.x1 + w)) {
+          anchorX = it.x1;
+        }
       } else {
-        // 线段任务：从 x1 起按标签宽度步进，找最左侧「上方空着」的点
+        // 线段任务：从 x1 起步进，找最左侧「上方空着且不与同行标签撞」的点
         var probe = it.x1;
         while (probe <= it.x2) {
-          if (freeAbove(it.rowIdx, probe, probe + w)) {
+          if (freeAbove(it.rowIdx, probe, probe + w) &&
+              labelFree(it.rowIdx, probe, probe + w)) {
             anchorX = probe;
             break;
           }
@@ -654,6 +670,7 @@ class _DayLayout {
         }
       }
       if (anchorX == null) continue;
+      takeLabelSpan(it.rowIdx, anchorX, anchorX + w);
       nameSlots[it.task.id] = DayNameSlot(
         taskId: it.task.id,
         centerMinutes: scrollMin + anchorX / ppm,
