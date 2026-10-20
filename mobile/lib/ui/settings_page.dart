@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'theme_fader.dart';
 import '../main.dart' show themeModeNotifier, themeModeFromString;
 import 'shared/app_icon.dart';
 import 'shared/segmented_selector.dart';
@@ -147,7 +148,10 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _setThemeMode(String mode) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('theme_mode', mode);
-    themeModeNotifier.value = themeModeFromString(mode);
+    // O10：走「快照渐变」切换，避免整棵树逐帧重建造成的卡顿
+    await ThemeFader.switchTo(
+      () => themeModeNotifier.value = themeModeFromString(mode),
+    );
     if (mounted) setState(() => _themeMode = mode);
   }
 

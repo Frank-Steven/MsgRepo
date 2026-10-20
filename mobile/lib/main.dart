@@ -17,6 +17,7 @@ import 'ui/notes/notes_page.dart';
 import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/todos/todos_page.dart';
+import 'ui/theme_fader.dart';
 import 'services/app_log.dart';
 
 /// 全局主题模式（设置页修改后即时生效）。持久化 key：theme_mode。
@@ -150,9 +151,12 @@ class MsgRepoApp extends StatelessWidget {
           themeMode: mode,
           // O10：过渡时长从默认 200ms 收到 160ms。主题切换期间整棵树逐帧重建，
           // 缩短时长能减少「卡一下」的总帧数，观感靠曲线保住平滑。
-          themeAnimationDuration: const Duration(milliseconds: 160),
-          themeAnimationCurve: Curves.easeInOut,
-          home: const HomeShell(),
+            // O10 第二方案：主题切换**不做逐帧插值**（那会让整棵树每帧重建，实测单帧 build 200~960ms），
+            // 改为「抓快照 → 立刻换主题 → 快照淡出」，见 ui/theme_fader.dart。
+            themeAnimationDuration: Duration.zero,
+            builder: (context, child) =>
+                ThemeFader(child: child ?? const SizedBox.shrink()),
+            home: const HomeShell(),
         );
       },
     );
