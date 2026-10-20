@@ -57,6 +57,19 @@ class TodosPageState extends State<TodosPage> {
   Map<String, (int, int)> _progress = {};
   bool _loading = true;
 
+  // ---- P1 性能：页签派生数据缓存 ----
+  // 以前 build 里为 10 个页签各跑一次 _childrenMap/_visibleRows，
+  // 「全部」页签还每次重排 _allTasksSorted、徽标 getter 被取 10 次（每次 O(N)）。
+  // 现在数据只在 reload 后算一次；勾选/多选/切换页签不再重算。
+  /// 各页签计数徽标（下标 = _tabLabels 下标）。
+  List<int> _tabBadges = const [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+  /// 页签 → 子任务分组（与折叠状态无关）。
+  final Map<int, Map<String, List<Task>>> _tabByParent = {};
+
+  /// 页签 → 展开/折叠后的可见行（折叠变化时只失效这一层）。
+  final Map<int, List<Task>> _tabRows = {};
+
   /// 截断提示只提示一次/会话（P3-8）
   bool _limitHintShown = false;
 
@@ -166,17 +179,67 @@ class TodosPageState extends State<TodosPage> {
         }
         _detailTask = fresh;
       }
+      // P1：派生数据随数据一起刷新，build 里不再逐页签重算。
+      _rebuildTabCache();
     });
   }
 
-  /// 各页签计数徽标（设计 §3，v2.3）。
-  List<int> get _tabBadges => [
-        for (final s in _scaleTabs) _byScale[s]!.length,
-        _untimed.length,
-        _done.length,
-        _archived.length,
-        _allTasks.length,
-      ];
+  /// P1：一次性重建各页签派生数据（任务排序 + 子任务分组 + 可见行 + 徽标）。
+  /// 只在 reload 后调用；勾选完成、多选、切换页签都直接复用。
+  /// 页签 → 原始任务列表（不随折叠变化）。
+  List<Task> _tabTasks(int tab) {
+    switch (tab) {
+      case 7:
+        return _done;
+      case 8:
+        return _archived;
+      case 9:
+        return _allTasksSorted; // 排序只在 reload 后做一次
+      case 6:
+        return _untimed;
+      default:
+        return _byScale[_scaleTabs[tab]] ?? const <Task>[];
+    }
+  }
+
+  void _rebuildTabCache() {
+    _tabByParent.clear();
+    _tabRows.clear();
+    for (final tab in _tabOrder) {
+      final tasks = _tabTasks(tab);
+      final byParent = _childrenMap(tasks);
+      _tabByParent[tab] = byParent;
+      _tabRows[tab] = _visibleRows(tasks, byParent);
+    }
+    _tabBadges = [
+      for (final s in _scaleTabs) _byScale[s]!.length,
+      _untimed.length,
+      _done.length,
+      _archived.length,
+      _allTasks.length,
+    ];
+  }
+
+  /// 折叠状态变化：只有「可见行」依赖折叠，分组继续复用，这里只失效可见行。
+  void _invalidateRows() => _tabRows.clear();
+
+  /// 取某页签的可见行；被 [_invalidateRows] 清掉时按需补算。
+  ///
+  /// 2026-10-20 Lead 复核修复：原实现清空后 build 里只读缓存、拿不到就返回空列表，
+  /// 表现为「一折叠父任务整页列表变空」，直到下次 reload 才恢复。
+  List<Task> _rowsFor(int tab) {
+    final cached = _tabRows[tab];
+    if (cached != null) return cached;
+    final byParent = _tabByParent[tab];
+    if (byParent == null) {
+      // 连分组都没有（首帧/异常）：整体重建一次
+      _rebuildTabCache();
+      return _tabRows[tab] ?? const <Task>[];
+    }
+    final rows = _visibleRows(_tabTasks(tab), byParent);
+    _tabRows[tab] = rows;
+    return rows;
+  }
 
   void _showUndoSnack(String label) {
     showUndoSnackBar(context, label, onUndone: () async => reload());
@@ -446,6 +509,7 @@ class TodosPageState extends State<TodosPage> {
       _selectedTaskId = t.id;
       _detailTask = null;
       if (t.parentId != null) _collapsedParents.remove(t.parentId);
+      _invalidateRows();
     });
     _pageController.jumpToPage(tab);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -631,17 +695,18 @@ class TodosPageState extends State<TodosPage> {
   }
 
   Widget _buildTabBody(int tab) {
+    // P1：可见行与子任务分组来自 reload 时的缓存（折叠变化时才重算）。
+    final rows = _rowsFor(tab);
+    final byParent = _tabByParent[tab] ?? const <String, List<Task>>{};
     switch (tab) {
       case 7:
-        return _taskListView(_done, done: true);
+        return _taskListView(rows, byParent, done: true);
       case 8:
-        return _taskListView(_archived, archived: true);
+        return _taskListView(rows, byParent, archived: true);
       case 9:
-        return _taskListView(_allTasksSorted, mixed: true);
-      case 6:
-        return _taskListView(_untimed);
+        return _taskListView(rows, byParent, mixed: true);
       default:
-        return _taskListView(_byScale[_scaleTabs[tab]] ?? const []);
+        return _taskListView(rows, byParent);
     }
   }
 
@@ -704,6 +769,7 @@ class TodosPageState extends State<TodosPage> {
         if (!_collapsedParents.remove(task.id)) {
           _collapsedParents.add(task.id);
         }
+        _invalidateRows(); // 折叠只影响可见行
       }),
       progress: (progress != null && progress.$2 > 0) ? progress : null,
       selected: task.id == _selectedTaskId,
@@ -732,9 +798,9 @@ class TodosPageState extends State<TodosPage> {
     );
   }
 
-  Widget _taskListView(List<Task> tasks,
+  Widget _taskListView(List<Task> rows, Map<String, List<Task>> byParent,
       {bool done = false, bool archived = false, bool mixed = false}) {
-    if (tasks.isEmpty) {
+    if (rows.isEmpty) {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: const [
@@ -743,8 +809,6 @@ class TodosPageState extends State<TodosPage> {
         ],
       );
     }
-    final byParent = _childrenMap(tasks);
-    final rows = _visibleRows(tasks, byParent);
     return ListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
       itemCount: rows.length + 1,

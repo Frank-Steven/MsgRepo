@@ -741,6 +741,77 @@ class _YearlyLayout {
     );
   }
 
+  /// P1：paint 真正消费的字段是否全部相同（相同就跳过重绘）。
+  /// 命中区域 / spans 只服务手势，不影响画面，故不参与比较。
+  bool samePaintContent(_YearlyLayout o) {
+    if (identical(this, o)) return true;
+    return viewW == o.viewW &&
+        viewH == o.viewH &&
+        ppy == o.ppy &&
+        scrollYf == o.scrollYf &&
+        epochYear == o.epochYear &&
+        namesH == o.namesH &&
+        majorTickYears == o.majorTickYears &&
+        minorTickYears == o.minorTickYears &&
+        labelStride == o.labelStride &&
+        scheme == o.scheme &&
+        nowYear == o.nowYear &&
+        selectedTaskId == o.selectedTaskId &&
+        pulseYear == o.pulseYear &&
+        _sameItems(items, o.items) &&
+        _sameGroups(groups, o.groups) &&
+        _sameSlots(groupSlots, o.groupSlots);
+  }
+
+  static bool _sameItems(List<_YearlyItem> a, List<_YearlyItem> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.task.id != y.task.id ||
+          x.task.status != y.task.status ||
+          x.x1 != y.x1 ||
+          x.x2 != y.x2 ||
+          x.y != y.y ||
+          x.color != y.color ||
+          x.isPoint != y.isPoint ||
+          x.isSubtask != y.isSubtask) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool _sameGroups(List<LabelGroup> a, List<LabelGroup> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.id != y.id || x.title != y.title) return false;
+      if (x.taskIds.length != y.taskIds.length) return false;
+      for (var j = 0; j < x.taskIds.length; j++) {
+        if (x.taskIds[j] != y.taskIds[j]) return false;
+      }
+    }
+    return true;
+  }
+
+  static bool _sameSlots(
+      Map<String, DayNameSlot> a, Map<String, DayNameSlot> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      final y = b[e.key];
+      if (y == null) return false;
+      final x = e.value;
+      if (x.centerMinutes != y.centerMinutes ||
+          x.textWidth != y.textWidth ||
+          x.visible != y.visible) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   _HitRegion? hitTest(Offset p) {
     for (final r in hitRegions) {
       if (r.rect.contains(p)) return r;
@@ -805,6 +876,7 @@ class _YearlyPainter extends CustomPainter {
     // 任务：节点 / 带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）。无泳道底纹（v2.3 §13-8）。
       // U11：时间几乎重合的点会叠在一起，只画一个代表点（否则「一个点 + 多个标题」）。
+      // P1：本次 paint 只算一次（O(组 × 点)，以前点层与名称层各算一遍）。
       final info = _groupInfo();
       for (final it in layout.items) {
         if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
@@ -843,8 +915,8 @@ class _YearlyPainter extends CustomPainter {
         final dashPaint = Paint()
           ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
           ..strokeWidth = 1;
-          final info = _groupInfo();
-          for (final g in layout.groups) {
+        // P1：组信息在本次 paint 开头已算过一次（以前这里又算一遍）
+        for (final g in layout.groups) {
             final slot = layout.groupSlots[g.id];
             if (slot == null || !slot.visible) continue; // 放不下就不画（合作者建议）
             final anchorX = _xOf(slot.centerMinutes);
@@ -1002,5 +1074,6 @@ class _YearlyPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_YearlyPainter oldDelegate) => true;
+  bool shouldRepaint(_YearlyPainter oldDelegate) =>
+      !oldDelegate.layout.samePaintContent(layout);
 }

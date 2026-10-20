@@ -8,6 +8,17 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
+/// P1：任务列表内容是否未变（Task 不可变，逐项 identity 比较即足够）。
+bool _sameTasks(List<Task> a, List<Task> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!identical(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+
 /// 年视图（设计 §2.2，v2.3 修订）：纵向**无限滚动**——年份网格
 /// （4 行季度 × 3 块月）按年无缝上下衔接（ListView 大初始偏移法）。
 /// 月块为格线风格（v2.3 §13-8：不填充底色，只画淡分隔线；当前月描边高亮），
@@ -259,12 +270,50 @@ class _YearGridItemState extends State<_YearGridItem> {
   int _origEndMonth = 1;
   double _grabOffset = 0;
 
+  /// P1：名称/月份 TextPainter 缓存（挂在 State 上跨帧复用）。
+  final _YearTextCache _texts = _YearTextCache();
+
+  /// P1：非拖拽时的展示任务列表缓存（只取决于 widget.tasks 内容）。
+  List<Task>? _displayCache;
+  List<Task> _displayCacheSrc = const <Task>[];
+
+  /// P1：originals 映射缓存（与拖拽预览无关，只取决于 widget.tasks 内容）。
+  Map<String, Task>? _originalsCache;
+  List<Task> _originalsCacheSrc = const <Task>[];
+
   (int, int) get _yearRange => (
         DateTime(widget.year).millisecondsSinceEpoch,
         DateTime(widget.year + 1).millisecondsSinceEpoch,
       );
 
   List<Task> _displayTasks() {
+    // P1：拖拽中随预览变化必须重算；否则按任务列表实例缓存。
+    if (_dragOriginal == null) {
+      final cached = _displayCache;
+      if (cached != null && _sameTasks(_displayCacheSrc, widget.tasks)) {
+        return cached;
+      }
+      final list = _computeDisplayTasks();
+      _displayCache = list;
+      _displayCacheSrc = widget.tasks;
+      return list;
+    }
+    return _computeDisplayTasks();
+  }
+
+  /// P1：originals 映射只取决于任务列表实例，拖拽预览不改它。
+  Map<String, Task> _originals() {
+    final cached = _originalsCache;
+    if (cached != null && _sameTasks(_originalsCacheSrc, widget.tasks)) {
+      return cached;
+    }
+    final map = {for (final t in widget.tasks) t.id: t};
+    _originalsCache = map;
+    _originalsCacheSrc = widget.tasks;
+    return map;
+  }
+
+  List<Task> _computeDisplayTasks() {
     final (startMs, endMs) = _yearRange;
     final list = <Task>[];
     for (final t in widget.tasks) {
@@ -390,13 +439,15 @@ class _YearGridItemState extends State<_YearGridItem> {
 
   @override
   Widget build(BuildContext context) {
+    _texts.syncScheme(widget.scheme); // 主题变化时清掉旧的文本缓存
     final display = _displayTasks();
     final layout = _YearLayout.build(
       width: MediaQuery.of(context).size.width,
       maxHeight: widget.gridHeight,
       year: widget.year,
       tasks: display,
-      originals: {for (final t in widget.tasks) t.id: t},
+      originals: _originals(),
+      textCache: _texts,
       scheme: widget.scheme,
       now: DateTime.now(),
       selectedTaskId: widget.selectedTaskId,
@@ -431,7 +482,7 @@ class _YearGridItemState extends State<_YearGridItem> {
           onPanCancel: _onPanEnd,
           child: CustomPaint(
             size: Size(MediaQuery.of(context).size.width, widget.gridHeight),
-            painter: _YearPainter(layout),
+            painter: _YearPainter(layout, _texts),
           ),
         ),
       ],
@@ -528,6 +579,7 @@ class _YearLayout {
     required int year,
     required List<Task> tasks,
     required Map<String, Task> originals,
+    required _YearTextCache textCache,
     required ColorScheme scheme,
     required DateTime now,
     String? selectedTaskId,
@@ -643,14 +695,11 @@ class _YearLayout {
         final avail = rightBound - nameX - 2;
         final done = task.status == TaskStatus.done;
         // 子任务（与父同槽叠加）不画名称
+        // P1：名称排版按 title + 是否完成缓存（以前每条任务都新建 TextPainter）
         final tp = li.isSubtask
             ? null
-            : (TextPainter(
-                text: TextSpan(
-                    text: task.title, style: done ? doneNameStyle : nameStyle),
-                textDirection: TextDirection.ltr,
-                maxLines: 1,
-              )..layout());
+            : textCache.name(
+                task.title, done ? doneNameStyle : nameStyle, done: done);
         items.add(_YearItem(
           task: task,
           lane: li,
@@ -712,6 +761,56 @@ class _YearLayout {
     );
   }
 
+  /// P1：paint 真正消费的字段是否全部相同（相同就跳过重绘）。
+  /// 命中区域 / spans 只服务手势，不影响画面，故不参与比较。
+  bool samePaintContent(_YearLayout o) {
+    if (identical(this, o)) return true;
+    return width == o.width &&
+        height == o.height &&
+        blockW == o.blockW &&
+        blockH == o.blockH &&
+        slotH == o.slotH &&
+        year == o.year &&
+        scheme == o.scheme &&
+        currentMonth == o.currentMonth &&
+        selectedTaskId == o.selectedTaskId &&
+        pulseMonth == o.pulseMonth &&
+        _sameMonthBlocks(monthBlocks, o.monthBlocks) &&
+        _sameItems(items, o.items);
+  }
+
+  static bool _sameMonthBlocks(List<Rect> a, List<Rect> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static bool _sameItems(List<_YearItem> a, List<_YearItem> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.task.id != y.task.id ||
+          x.task.status != y.task.status ||
+          x.x1 != y.x1 ||
+          x.x2 != y.x2 ||
+          x.y != y.y ||
+          x.color != y.color ||
+          x.nameX != y.nameX ||
+          !identical(x.name, y.name) ||
+          x.lane.startMonth != y.lane.startMonth ||
+          x.lane.endMonth != y.lane.endMonth ||
+          x.lane.extendsBefore != y.lane.extendsBefore ||
+          x.lane.extendsAfter != y.lane.extendsAfter ||
+          x.lane.isSubtask != y.lane.isSubtask) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   _YearItem? itemById(String taskId) {
     for (final it in items) {
       if (it.task.id == taskId) return it;
@@ -745,10 +844,58 @@ class _YearLayout {
   }
 }
 
+/// P1：名称/月份 TextPainter 缓存（挂在 State 上，跨帧复用）。
+/// 主题（ColorScheme）变化时整体清空；名称键含 title + 是否完成，
+/// 条目数设上限，任务标题频繁变化时不至于无限增长。
+class _YearTextCache {
+  static const _cap = 512;
+
+  final Map<String, TextPainter> _painters = <String, TextPainter>{};
+  ColorScheme? _scheme;
+
+  /// 每帧 build 调用一次：主题变化则清空缓存。
+  void syncScheme(ColorScheme scheme) {
+    if (_scheme == scheme) return;
+    _scheme = scheme;
+    _painters.clear();
+  }
+
+  TextPainter get(String key, String text, TextStyle style,
+      {int? maxLines}) {
+    final cached = _painters[key];
+    if (cached != null) return cached;
+    if (_painters.length >= _cap) _painters.clear();
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+      maxLines: maxLines,
+    )..layout();
+    return _painters[key] = tp;
+  }
+
+  /// 任务名称（年视图泳道内，单行）。
+  TextPainter name(String title, TextStyle style, {required bool done}) =>
+      get('n${done ? 1 : 0}:$title', title, style, maxLines: 1);
+
+  /// 月块标签（1-12 月，当前月样式不同）。
+  TextPainter monthLabel(int month, ColorScheme scheme,
+          {required bool isCurrent}) =>
+      get(
+        'm$month-${isCurrent ? 1 : 0}',
+        '$month月',
+        TextStyle(
+          fontSize: 11,
+          fontWeight: isCurrent ? FontWeight.w600 : FontWeight.normal,
+          color: isCurrent ? scheme.primary : scheme.onSurfaceVariant,
+        ),
+      );
+}
+
 class _YearPainter extends CustomPainter {
   final _YearLayout layout;
+  final _YearTextCache texts;
 
-  _YearPainter(this.layout);
+  _YearPainter(this.layout, this.texts);
 
   static const _nodeR = 4.5;
 
@@ -781,17 +928,8 @@ class _YearPainter extends CustomPainter {
             ..color = scheme.primary,
         );
       }
-      final tp = TextPainter(
-        text: TextSpan(
-          text: '$m月',
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: isCurrent ? FontWeight.w600 : FontWeight.normal,
-            color: isCurrent ? scheme.primary : scheme.onSurfaceVariant,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+      // P1：月块标签 TextPainter 缓存（以前每帧新建 12 个）
+      final tp = texts.monthLabel(m, scheme, isCurrent: isCurrent);
       tp.paint(canvas, Offset(rect.left + 6, rect.top + 3));
     }
 
@@ -862,5 +1000,6 @@ class _YearPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_YearPainter oldDelegate) => true;
+  bool shouldRepaint(_YearPainter oldDelegate) =>
+      !oldDelegate.layout.samePaintContent(layout);
 }

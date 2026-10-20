@@ -974,16 +974,58 @@ class _DayPainter extends CustomPainter {
   bool shouldRepaint(_DayPainter oldDelegate) {
     final a = oldDelegate.layout;
     final b = layout;
-    // 2026-10-20：原来恒 true，任何 rebuild 都强制重绘整幅画布。
-    return a.scrollMin != b.scrollMin ||
-        a.ppm != b.ppm ||
-        a.viewW != b.viewW ||
+    if (!identical(a.scheme, b.scheme)) return true;
+    if (a.viewW != b.viewW ||
         a.viewH != b.viewH ||
+        a.ppm != b.ppm ||
+        a.scrollMin != b.scrollMin ||
+        a.epochMs != b.epochMs ||
         a.namesH != b.namesH ||
+        a.majorTickMin != b.majorTickMin ||
+        a.minorTickMin != b.minorTickMin ||
+        a.labelStride != b.labelStride ||
         a.selectedTaskId != b.selectedTaskId ||
         a.pulseMin != b.pulseMin ||
-        a.nowMin != b.nowMin ||
-        !identical(a.items, b.items) ||
-        !identical(a.groups, b.groups);
+        a.nowMin != b.nowMin) {
+      return true;
+    }
+    // 布局每帧都会重建（items/groups 都是新 List），所以不能比 identical，
+    // 要比内容 —— 否则等于恒 true，等于没优化（code-writer 2026-10-20 指出）。
+    if (!_sameItems(a.items, b.items)) return true;
+    if (!_sameGroups(a.groups, b.groups)) return true;
+    return false;
   }
-}
+
+  static bool _sameItems(List<_DayItem> a, List<_DayItem> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.task.id != y.task.id ||
+          x.x1 != y.x1 ||
+          x.x2 != y.x2 ||
+          x.y != y.y ||
+          x.color != y.color ||
+          x.isPoint != y.isPoint ||
+          x.isSubtask != y.isSubtask) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool _sameGroups(List<LabelGroup> a, List<LabelGroup> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.id != y.id ||
+          x.title != y.title ||
+          x.startAxis != y.startAxis ||
+          x.endAxis != y.endAxis ||
+          x.taskIds.length != y.taskIds.length) {
+        return false;
+      }
+    }
+    return true;
+  }}

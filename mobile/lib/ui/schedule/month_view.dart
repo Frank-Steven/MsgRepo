@@ -8,6 +8,17 @@ import 'schedule_shared.dart';
 
 enum _DragMode { move, resizeStart, resizeEnd }
 
+/// P1：任务列表内容是否未变（Task 不可变，逐项 identity 比较即足够）。
+bool _sameTasks(List<Task> a, List<Task> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!identical(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+
 /// 月视图（v2.3：纵向无限滚动，按月分段；v2.4：每月网格行数 = 当月实际
 /// 所需周数 4~6 行，不画整行上/次月灰格；v2.5：**item 高度恢复恒定**
 /// （label + 表头 + 6 行上限，行数不足 6 的月份下方留白）——v2.4 的可变
@@ -246,6 +257,17 @@ class _MonthItemState extends State<_MonthItem> {
 
   late final DateTime _gridStart;
 
+  /// P1：绘制期 TextPainter 缓存（挂在 State 上跨帧复用）。
+  final _MonthTextCache _texts = _MonthTextCache();
+
+  /// P1：非拖拽时的展示任务列表缓存（只取决于 widget.tasks 内容）。
+  List<Task>? _displayCache;
+  List<Task> _displayCacheSrc = const <Task>[];
+
+  /// P1：originals 映射缓存（与拖拽预览无关，只取决于 widget.tasks 内容）。
+  Map<String, Task>? _originalsCache;
+  List<Task> _originalsCacheSrc = const <Task>[];
+
   @override
   void initState() {
     super.initState();
@@ -261,6 +283,33 @@ class _MonthItemState extends State<_MonthItem> {
   }
 
   List<Task> _displayTasks() {
+    // P1：拖拽中列表随预览变化必须重算；否则按任务列表实例缓存。
+    if (_dragOriginal == null) {
+      final cached = _displayCache;
+      if (cached != null && _sameTasks(_displayCacheSrc, widget.tasks)) {
+        return cached;
+      }
+      final list = _computeDisplayTasks();
+      _displayCache = list;
+      _displayCacheSrc = widget.tasks;
+      return list;
+    }
+    return _computeDisplayTasks();
+  }
+
+  /// P1：originals 映射只取决于任务列表实例，拖拽预览不改它。
+  Map<String, Task> _originals() {
+    final cached = _originalsCache;
+    if (cached != null && _sameTasks(_originalsCacheSrc, widget.tasks)) {
+      return cached;
+    }
+    final map = {for (final t in widget.tasks) t.id: t};
+    _originalsCache = map;
+    _originalsCacheSrc = widget.tasks;
+    return map;
+  }
+
+  List<Task> _computeDisplayTasks() {
     final (startMs, endMs) = _gridRange;
     final list = <Task>[];
     for (final t in widget.tasks) {
@@ -377,6 +426,7 @@ class _MonthItemState extends State<_MonthItem> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    _texts.syncScheme(scheme); // 主题变化时清掉旧的文本缓存
     final gridH = _MonthLayout.headerH + widget.rows * widget.cellH;
     final display = _displayTasks();
     final layout = _MonthLayout.build(
@@ -387,7 +437,7 @@ class _MonthItemState extends State<_MonthItem> {
       gridStart: _gridStart,
       rows: widget.rows,
       tasks: display,
-      originals: {for (final t in widget.tasks) t.id: t},
+      originals: _originals(),
       scheme: scheme,
       now: DateTime.now(),
       selectedTaskId: widget.selectedTaskId,
@@ -420,7 +470,7 @@ class _MonthItemState extends State<_MonthItem> {
         onPanCancel: _onPanEnd,
         child: CustomPaint(
           size: Size(widget.width, gridH),
-          painter: _MonthPainter(layout),
+          painter: _MonthPainter(layout, _texts),
         ),
       ),
     ]);
@@ -534,6 +584,15 @@ class _MonthLayout {
     final cellH = (height - headerH) / rows;
     final cellCount = rows * 7;
 
+    // P1：日格边界只预算一次（以前每条任务 × 每格都重造两个 DateTime）。
+    const dayMs = Duration.millisecondsPerDay;
+    final cellStarts = List<int>.generate(
+      cellCount,
+      (i) => DateTime(gridStart.year, gridStart.month, gridStart.day + i)
+          .millisecondsSinceEpoch,
+      growable: false,
+    );
+
     Rect cellRect(int i) => Rect.fromLTWH(
         (i % 7) * cellW, headerH + (i ~/ 7) * cellH, cellW, cellH);
 
@@ -558,13 +617,15 @@ class _MonthLayout {
               ? _priorities.indexOf(parent.priority)
               : 1);
       final color = priorityColor(scheme, t.priority);
+      // P1：日内比例每条任务只算一次（以前每格算两次）。
+      final sFrac = _fracOfDay(s);
+      final eFrac = e == null ? 0.0 : _fracOfDay(e);
       var firstCell = -1;
       var lastCell = -1;
+      var lastMarkIdx = -1;
       for (var i = 0; i < cellCount; i++) {
-        final cellStart = DateTime(gridStart.year, gridStart.month,
-                gridStart.day + i)
-            .millisecondsSinceEpoch;
-        final cellEnd = cellStart + Duration.millisecondsPerDay;
+        final cellStart = cellStarts[i];
+        final cellEnd = cellStart + dayMs;
         final isPoint = e == null;
         final hit = isPoint
             ? (s >= cellStart && s < cellEnd)
@@ -575,13 +636,14 @@ class _MonthLayout {
         final rect = cellRect(i);
         final y = rect.top + _marksTop + parentLaneIdx * _laneDy + 3;
         final x1 = isPoint || s >= cellStart
-            ? rect.left + 6 + (rect.width - 12) * _fracOfDay(s)
+            ? rect.left + 6 + (rect.width - 12) * sFrac
             : rect.left;
         final x2 = isPoint
             ? x1
             : (e < cellEnd
-                ? rect.left + 6 + (rect.width - 12) * _fracOfDay(e)
+                ? rect.left + 6 + (rect.width - 12) * eFrac
                 : rect.right);
+        lastMarkIdx = marks.length;
         marks.add(_CellMark(
           task: t,
           cellIndex: i,
@@ -597,23 +659,21 @@ class _MonthLayout {
       }
       if (firstCell >= 0) {
         spans[t.id] = (firstCell, lastCell);
-        // 修正末格标记
-        for (var i = 0; i < marks.length; i++) {
-          if (marks[i].task.id == t.id && marks[i].cellIndex == lastCell) {
-            marks[i] = _CellMark(
-              task: marks[i].task,
-              cellIndex: marks[i].cellIndex,
-              x1: marks[i].x1,
-              x2: marks[i].x2,
-              y: marks[i].y,
-              color: marks[i].color,
-              isPoint: marks[i].isPoint,
-              isStartCell: marks[i].isStartCell,
-              isEndCell: true,
-              isSubtask: marks[i].isSubtask,
-            );
-          }
-        }
+        // P1：末格标记就是刚追加的那条（本任务的标记按 i 升序追加），O(1) 修正；
+        // 以前这里要重扫整份 marks（O(任务 × 标记)）。
+        final m = marks[lastMarkIdx];
+        marks[lastMarkIdx] = _CellMark(
+          task: m.task,
+          cellIndex: m.cellIndex,
+          x1: m.x1,
+          x2: m.x2,
+          y: m.y,
+          color: m.color,
+          isPoint: m.isPoint,
+          isStartCell: m.isStartCell,
+          isEndCell: true,
+          isSubtask: m.isSubtask,
+        );
       }
     }
 
@@ -667,6 +727,49 @@ class _MonthLayout {
     );
   }
 
+  /// P1：paint 真正消费的字段是否全部相同（相同就跳过重绘）。
+  /// 命中区域 / spans 只服务手势，不影响画面，故不参与比较。
+  bool samePaintContent(_MonthLayout o) {
+    if (identical(this, o)) return true;
+    return width == o.width &&
+        height == o.height &&
+        rows == o.rows &&
+        year == o.year &&
+        month == o.month &&
+        gridStart == o.gridStart &&
+        selectedTaskId == o.selectedTaskId &&
+        pulseDay == o.pulseDay &&
+        scheme == o.scheme &&
+        _sameDay(now, o.now) &&
+        _sameMarks(marks, o.marks);
+  }
+
+  /// 「今天」只按日期参与绘制，不比较时分秒（每次 build 的 now 都不同）。
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  static bool _sameMarks(List<_CellMark> a, List<_CellMark> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.task.id != y.task.id ||
+          x.task.status != y.task.status ||
+          x.cellIndex != y.cellIndex ||
+          x.x1 != y.x1 ||
+          x.x2 != y.x2 ||
+          x.y != y.y ||
+          x.color != y.color ||
+          x.isPoint != y.isPoint ||
+          x.isStartCell != y.isStartCell ||
+          x.isEndCell != y.isEndCell ||
+          x.isSubtask != y.isSubtask) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   (int, int)? spanOf(String taskId) => spans[taskId];
 
   _HitRegion? hitTest(Offset p) {
@@ -695,10 +798,36 @@ class _MonthLayout {
   }
 }
 
+/// P1：绘制期 TextPainter 缓存（挂在 State 上，跨帧 / 跨月块复用）。
+/// 主题（ColorScheme）变化时整体清空，避免沿用旧颜色的排版结果；
+/// 文本内容与样式都由调用方的 key 保证一致，因此只按键命中。
+class _MonthTextCache {
+  final Map<String, TextPainter> _painters = <String, TextPainter>{};
+  ColorScheme? _scheme;
+
+  /// 每帧 build 调用一次：主题变化则清空缓存。
+  void syncScheme(ColorScheme scheme) {
+    if (_scheme == scheme) return;
+    _scheme = scheme;
+    _painters.clear();
+  }
+
+  TextPainter get(String key, String text, TextStyle style) {
+    final cached = _painters[key];
+    if (cached != null) return cached;
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return _painters[key] = tp;
+  }
+}
+
 class _MonthPainter extends CustomPainter {
   final _MonthLayout layout;
+  final _MonthTextCache texts;
 
-  _MonthPainter(this.layout);
+  _MonthPainter(this.layout, this.texts);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -707,10 +836,8 @@ class _MonthPainter extends CustomPainter {
     final headerStyle =
         TextStyle(fontSize: 11, color: scheme.onSurfaceVariant);
     for (var i = 0; i < 7; i++) {
-      final tp = TextPainter(
-        text: TextSpan(text: weekdays[i], style: headerStyle),
-        textDirection: TextDirection.ltr,
-      )..layout();
+      // P1：星期标签 TextPainter 缓存（以前每帧新建 7 个）
+      final tp = texts.get('w$i', weekdays[i], headerStyle);
       tp.paint(
           canvas, Offset((i + 0.5) * layout.cellW - tp.width / 2, 4));
     }
@@ -755,17 +882,16 @@ class _MonthPainter extends CustomPainter {
               ..strokeWidth = 1.2
               ..color = scheme.primary.withValues(alpha: 0.7));
       }
-      final tp = TextPainter(
-        text: TextSpan(
-          text: '${day.day}',
-          style: (day.month == layout.month ? dateStyle : outsideStyle)
-              .copyWith(
-            color: isToday ? scheme.primary : null,
-            fontWeight: isToday ? FontWeight.w700 : null,
-          ),
+      // P1：日期文本 TextPainter 缓存（键含日号/是否次月/是否今天）
+      final outside = day.month != layout.month;
+      final tp = texts.get(
+        'd${day.day}-${outside ? 1 : 0}-${isToday ? 1 : 0}',
+        '${day.day}',
+        (outside ? outsideStyle : dateStyle).copyWith(
+          color: isToday ? scheme.primary : null,
+          fontWeight: isToday ? FontWeight.w700 : null,
         ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+      );
       tp.paint(canvas, Offset(rect.left + 4, rect.top + 2));
     }
 
@@ -815,5 +941,6 @@ class _MonthPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_MonthPainter oldDelegate) => true;
+  bool shouldRepaint(_MonthPainter oldDelegate) =>
+      !oldDelegate.layout.samePaintContent(layout);
 }
