@@ -71,6 +71,18 @@ class SchedulePageState extends State<SchedulePage> {
   int? _cacheEnd;
   bool _loading = true;
 
+  // ---- P1 性能：_cache 派生列表缓存 ----
+  /// _cache 内容版本：任何写入（清空/合并）都递增，用于失效派生列表。
+  int _cacheRevision = 0;
+
+  /// 甘特区任务列表缓存（键 = _cache 版本 + 当前粒度）。
+  ///
+  /// 注意：读取端 [_ganttTasks] 必须 lazy memo —— 未命中就**现算并回填**，
+  /// 绝不能返回默认空列表，否则会静默降级成「图表整块没任务」。
+  List<Task>? _ganttCache;
+  int _ganttCacheRevision = -1;
+  int _ganttCacheGranularity = -1;
+
   final _yearlyKey = GlobalKey<YearlyViewState>();
   final _yearKey = GlobalKey<YearViewState>();
   final _monthKey = GlobalKey<MonthViewState>();
@@ -82,9 +94,13 @@ class SchedulePageState extends State<SchedulePage> {
     reload();
   }
 
+  /// _cache 内容变了：递增版本，派生列表（[_ganttTasks]）下次读到时按需重算。
+  void _markCacheDirty() => _cacheRevision++;
+
   /// 初始/全量刷新：清空缓存，加载可视中心 ±2 年。
   Future<void> reload() async {
     _cache.clear();
+    _markCacheDirty();
     _cacheStart = null;
     _cacheEnd = null;
     final y = _anchor.year;
@@ -128,23 +144,39 @@ class SchedulePageState extends State<SchedulePage> {
       _cacheStart =
           _cacheStart == null ? ns : (_cacheStart! < ns ? _cacheStart! : ns);
       _cacheEnd = _cacheEnd == null ? ne : (_cacheEnd! > ne ? _cacheEnd! : ne);
+      _markCacheDirty(); // 合并进 _cache 后派生列表失效
     });
   }
 
   /// 甘特区任务：按当前粒度的尺度过滤表过滤（v2.4：不再对 is_annual
   /// 特判——该概念 UI 下线，老数据按派生尺度进各视图）。
+  ///
+  /// P1：按（_cache 版本, 粒度）lazy 缓存。原来每次 build 都会对全量 _cache
+  /// 重跑 scalesForView + 全表 filter + toList：可视窗口滚动
+  /// [_onWindowChanged] 每次 setState 都重来一遍，且下发给子视图的列表
+  /// 每帧都是新实例（子视图还得逐项比内容）。命中时直接返回同一个 List。
   List<Task> get _ganttTasks {
-    switch (_granularity) {
-      case 0:
-        return _filterByScales('yearly');
-      case 1:
-        return _filterByScales('year');
-      case 2:
-        return _filterByScales('month');
-      default:
-        return _filterByScales('day');
+    final cached = _ganttCache;
+    if (cached != null &&
+        _ganttCacheRevision == _cacheRevision &&
+        _ganttCacheGranularity == _granularity) {
+      return cached;
     }
+    // 未命中：现算并回填（禁止返回默认空列表）
+    final tasks = _filterByScales(_ganttScaleView);
+    _ganttCache = tasks;
+    _ganttCacheRevision = _cacheRevision;
+    _ganttCacheGranularity = _granularity;
+    return tasks;
   }
+
+  /// 当前粒度对应的尺度放行集合名（与 [_filterByScales] 入参同一套映射）。
+  String get _ganttScaleView => switch (_granularity) {
+        0 => 'yearly',
+        1 => 'year',
+        2 => 'month',
+        _ => 'day',
+      };
 
   List<Task> _filterByScales(String view) {
     final scales = scalesForView(view);
