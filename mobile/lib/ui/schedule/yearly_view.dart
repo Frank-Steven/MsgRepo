@@ -19,7 +19,15 @@ enum _DragMode { move, resizeStart, resizeEnd }
 /// 选中-调整（v2.3 §13-6）：点按任务出现描边选中态，仅选中任务可拖拽
 /// （移动 = 整数年平移保留月日；起止端点吸附年界；无跨度上限）；
 /// 有选中时点空白 = 取消选中，无选中时点空白 = 下钻该年的年视图。
-/// 名称层（v2.3 §13-7）：贪心放置，纯碰撞决定可见性。
+///
+/// R01 重做（2026-10-20，Frank 算法，用户拍板）：
+/// - **行分配**：不再按优先级分泳道。所有任务按**开始时间**排序，逐个从第 1 行
+///   开始试；该行已有任务与它的**投影间距 < 130px**（≈20 字标签宽）就算占用，
+///   换下一行；**行数不限**，按需向下增长（行区可纵向平移）。
+/// - **标签**：单行、**不合并不换行**、先到先得；贴在任务节点**正上方**的本行
+///   标签线上；线段任务挂在「最左侧能放下的点」正上方；放不下就不显示
+///   （不截断、不挤）。不再使用 LabelGroup/assignGroupNames 的分组与 45° 斜排。
+/// - 节点**不再合并**：每个任务独立绘制，点按节点 = 选中并显示详情。
 class YearlyView extends StatefulWidget {
   /// 已按年度视图尺度过滤的任务（yearly，覆盖可视窗口）。
   final List<Task> tasks;
@@ -69,6 +77,18 @@ class YearlyViewState extends State<YearlyView>
   double _startPpy = 0;
   double _startScrollYf = 0;
   double _startFocalX = 0;
+
+  /// R01：标签 TextPainter 缓存（跨帧复用；主题变化清空）。
+  final _YearlyTextCache _texts = _YearlyTextCache();
+
+  /// R01：行区纵向平移（行数不限，超出可视高度靠上下拖动看）。
+  /// 0 = 顶部对齐；build 内按「行总高 - 可视高」夹紧后回写。
+  double _contentY = 0;
+  double _startContentY = 0;
+  double _startFocalY = 0;
+
+  /// 待纵向定位的任务 id（scrollToTask 登记，build 里按布局换算后消费）。
+  String? _pendingRowTarget;
 
   Task? _dragOriginal;
   _DragMode? _dragMode;
@@ -160,6 +180,7 @@ class YearlyViewState extends State<YearlyView>
     final nowYf = _yearFraction(DateTime.now().millisecondsSinceEpoch);
     setState(() {
       _scrollYf = (nowYf - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      _contentY = 0; // 定位语义：回到顶部第一行
       _positioned = true;
       _pulseYear = DateTime.now().year;
     });
@@ -178,6 +199,7 @@ class YearlyViewState extends State<YearlyView>
     final yf = _yearFraction(anchor.millisecondsSinceEpoch);
     setState(() {
       _scrollYf = (yf - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      _contentY = 0; // 期移后回到顶部第一行
       _positioned = true;
     });
     _reportWindow();
@@ -194,6 +216,9 @@ class YearlyViewState extends State<YearlyView>
     setState(() {
       _scrollYf =
           ((f1 + f2) / 2 - _viewW / (2 * ppy)).clamp(_minScroll, _maxScroll);
+      // 行位置由布局决定（行数/缩放都会变），这里只登记目标，
+      // 下一帧 build 拿到布局后把该行纵向滚进视野。
+      _pendingRowTarget = t.id;
       _positioned = true;
     });
     _reportWindow();
@@ -271,8 +296,10 @@ class YearlyViewState extends State<YearlyView>
     _cancelFling();
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
+    _startFocalY = d.localFocalPoint.dy;
     _startPpy = layout.ppy;
     _startScrollYf = _scrollYf;
+    _startContentY = _contentY;
     // 仅选中任务可拖拽（v2.3 选中-调整）
     if (hit != null && hit.taskId == widget.selectedTaskId) {
       final original = layout.originals[hit.taskId];
@@ -321,6 +348,9 @@ class YearlyViewState extends State<YearlyView>
       _ppy = newPpy;
       _scrollYf = (focalYf - d.localFocalPoint.dx / newPpy)
           .clamp(_minScroll, _maxScroll);
+      // R01：纵向拖动平移行区（行数不限，超出可视高度靠它看）；
+      // 具体夹紧在 build 里按行总高做，这里只记请求值。
+      _contentY = _startContentY - (d.localFocalPoint.dy - _startFocalY);
     });
     _reportOnUnitChange(); // v2.6.1：拖动/缩放中标题实时跟随
   }
@@ -389,16 +419,7 @@ class YearlyViewState extends State<YearlyView>
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final nameStyle = TextStyle(fontSize: 11, color: scheme.onSurface);
-    final measureCache = <String, double>{};
-    double measure(String title) => measureCache.putIfAbsent(
-        title,
-        () => (TextPainter(
-              text: TextSpan(text: title, style: nameStyle),
-              textDirection: TextDirection.ltr,
-              maxLines: 30,
-            )..layout())
-            .width);
+    _texts.syncScheme(scheme); // 主题变化时清掉旧的标签排版
     final display = _displayTasks();
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -422,11 +443,30 @@ class YearlyViewState extends State<YearlyView>
           scrollYf: _scrollYf,
           epochYear: _epochYear,
           scheme: scheme,
-          measure: measure,
           now: DateTime.now(),
           selectedTaskId: widget.selectedTaskId,
           pulseYear: _pulseYear,
+          contentY: _contentY,
+          textCache: _texts,
         );
+        // R01：layout 内已按「行总高 - 可视高」夹紧，回写避免越拖越远
+        _contentY = layout.contentY;
+        // R01：跳转任务时把该任务所在行纵向滚进视野（行位置只有布局知道）
+        final pending = _pendingRowTarget;
+        if (pending != null) {
+          _pendingRowTarget = null;
+          final it = layout.itemById(pending);
+          if (it != null) {
+            final maxY = math.max(0.0, layout.contentH - constraints.maxHeight);
+            final want = (it.y + layout.contentY - _YearlyLayout.headerH - 60)
+                .clamp(0.0, maxY);
+            if ((want - layout.contentY).abs() > 0.5) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) setState(() => _contentY = want);
+              });
+            }
+          }
+        }
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onScaleStart: (d) => _onScaleStart(d, layout),
@@ -473,26 +513,86 @@ class _YearlyItem {
   });
 }
 
+/// R01：标签 TextPainter 缓存（挂在 State 上跨帧复用）。
+///
+/// 键 = 是否完成 + 标题；主题（ColorScheme）变化整体清空，避免沿用旧颜色。
+/// 读取端是 lazy memo：未命中就现排并回填，绝不返回默认值。
+/// 上限 [_cap] 防止标题频繁变化时无限增长。
+class _YearlyTextCache {
+  static const _cap = 512;
+
+  final Map<String, TextPainter> _painters = <String, TextPainter>{};
+  ColorScheme? _scheme;
+
+  void syncScheme(ColorScheme scheme) {
+    if (_scheme == scheme) return;
+    _scheme = scheme;
+    _painters.clear();
+  }
+
+  TextPainter label(String title, TextStyle style, {required bool done}) {
+    final key = '${done ? 1 : 0}:$title';
+    final cached = _painters[key];
+    if (cached != null) return cached;
+    if (_painters.length >= _cap) _painters.clear();
+    final tp = TextPainter(
+      text: TextSpan(text: title, style: style),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    return _painters[key] = tp;
+  }
+}
+
+/// R01：一个已放置的标签（单行，贴在本行任务节点正上方）。
+class _YearlyLabel {
+  final String taskId;
+  final String text;
+  final double x;
+  final double y;
+  final bool done;
+  final TextPainter painter;
+
+  const _YearlyLabel({
+    required this.taskId,
+    required this.text,
+    required this.x,
+    required this.y,
+    required this.done,
+    required this.painter,
+  });
+}
+
 class _YearlyLayout {
+  /// 刻度表头（固定不随行区纵向平移）。
   static const headerH = 44.0;
-  static const nameLayerH = 160.0;
-  static const slotH = 18.0;
+
+  /// R01 行结构：每行 = 一条标签线（标签贴节点正上方）+ 一条标记线。
+  /// 这两个值与 day_view 保持同一套（Lead 2026-10-20 要求对齐）。
+  static const labelH = 15.0;
+  static const markerH = 18.0;
+  static const rowH = labelH + markerH;
+
+  /// R01 行内占用判据：投影间距 < 130px（≈20 字标签宽）即算占用。
+  static const _rowGapPx = 130.0;
+
+  /// 同一条标签线上两个标签之间的最小间隙。
+  static const _labelGapPx = 6.0;
+  static const labelFontSize = 11.0;
 
   final double viewW;
   final double viewH;
   final double ppy;
   final double scrollYf;
   final int epochYear;
-  final double namesH;
-  final List<double> laneHeights;
+  final int rowCount;
+  final double contentH; // 行区总高（表头 + 行数 × 行高）
+  final double contentY; // 实际纵向平移（已夹紧到 [0, contentH - 可视高]）
   final int majorTickYears;
   final int? minorTickYears;
   final int labelStride;
   final List<_YearlyItem> items;
-  final Map<String, DayNameSlot> nameSlots;
-  /// R1-A：标签分组与「组 → 槽位」映射（唯一一次贪心的结果）
-  final List<LabelGroup> groups;
-  final Map<String, DayNameSlot> groupSlots;
+  final List<_YearlyLabel> labels;
   final List<_HitRegion> hitRegions;
   final Map<String, Task> originals;
   final Map<String, (int, int?)> spans; // taskId -> (startMs, endMs)
@@ -507,15 +607,14 @@ class _YearlyLayout {
     required this.ppy,
     required this.scrollYf,
     required this.epochYear,
-    required this.namesH,
-    required this.laneHeights,
+    required this.rowCount,
+    required this.contentH,
+    required this.contentY,
     required this.majorTickYears,
     required this.minorTickYears,
     required this.labelStride,
     required this.items,
-    required this.nameSlots,
-    required this.groups,
-    required this.groupSlots,
+    required this.labels,
     required this.hitRegions,
     required this.originals,
     required this.spans,
@@ -525,17 +624,33 @@ class _YearlyLayout {
     required this.pulseYear,
   });
 
-  static const _priorities = [
-    TaskPriority.important,
-    TaskPriority.normal,
-    TaskPriority.minor,
-  ];
-
   static double _yearFraction(int ms, int epochYear) {
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     final y0 = DateTime(d.year).millisecondsSinceEpoch;
     final y1 = DateTime(d.year + 1).millisecondsSinceEpoch;
     return d.year - epochYear + (ms - y0) / (y1 - y0);
+  }
+
+  /// R01：本行标签线上 [fromX, toX] 内「最左侧放得下宽 [width] 标签」的锚点。
+  ///
+  /// 点任务传入 fromX == toX（只能挂节点正上方）；线段任务传入 [x1, x2]
+  /// （挂最左侧符合条件的点正上方）。整条线上都不够就返回 null（不显示）。
+  static double? _firstFreeAnchor(
+      double fromX, double toX, double width, List<(double, double)> line) {
+    var x = fromX;
+    while (x <= toX) {
+      var blocked = false;
+      var nextX = x;
+      for (final iv in line) {
+        if (x < iv.$2 && iv.$1 < x + width) {
+          blocked = true;
+          if (iv.$2 > nextX) nextX = iv.$2;
+        }
+      }
+      if (!blocked) return x;
+      x = nextX + 0.5;
+    }
+    return null;
   }
 
   static _YearlyLayout build({
@@ -547,131 +662,109 @@ class _YearlyLayout {
     required double scrollYf,
     required int epochYear,
     required ColorScheme scheme,
-    required double Function(String) measure,
     required DateTime now,
     required String? selectedTaskId,
     required int? pulseYear,
+    required double contentY,
+    required _YearlyTextCache textCache,
   }) {
     final (majorTickYears, minorTickYears, labelStride) =
         yearTickInterval(ppy);
 
     double xOf(double yf) => (yf - scrollYf) * ppy;
 
-    int laneIndexOf(Task t) => _priorities.contains(t.priority)
-        ? _priorities.indexOf(t.priority)
-        : 1;
-
-    // 名称贪心放置（v2.3）：轴 = 绝对年小数，锚点按月步进
-      // R1-A：先按「开始时间相近」分组，再对**组**做唯一一次贪心放置。
-      final labelTasks = [
-        for (final t in tasks)
-          if (t.startAt != null &&
-              (t.parentId == null || !originals.containsKey(t.parentId)))
-            t,
-      ];
-      final groups = buildLabelGroups(
-        labelTasks,
-        axisOf: (t) {
-          final f1 = _yearFraction(t.startAt!, epochYear);
-          final f2 = t.endAt == null ? f1 : _yearFraction(t.endAt!, epochYear);
-          return (f1, f2);
-        },
-        axisPerPx: 1 / ppy,
-        thresholdPx: 12,
-      );
-      final groupSlots = assignGroupNames(
-        groups,
-        axisPerPx: 1 / ppy,
-        anchorStep: 1 / 12,
-        measureText: measure,
-        maxHeightPx: nameLayerH - 8,
-      );
-      // 命中区域仍按任务粒度：组内每个任务共享该组的槽位
-      final nameSlots = <String, DayNameSlot>{};
-      for (final g in groups) {
-        final s = groupSlots[g.id];
-        if (s == null) continue;
-        for (final id in g.taskIds) {
-          nameSlots[id] = DayNameSlot(
-            taskId: id,
-            centerMinutes: s.centerMinutes,
-            textWidth: s.textWidth,
-            visible: s.visible,
-          );
-        }
-      }
-      final namesH =
-          groupSlots.values.any((e) => e.visible) ? nameLayerH : 0.0;
-
-    // 按优先级分泳道，泳道内按年小数区间贪心分槽；
-    // 子任务（parent_id 非空）父在可见任务中则与父同泳道同槽（设计 §3）。
-    final laneSlots = List.generate(3, (_) => <List<(double, double)>>[]);
-    final slotOf = <String, (int, int)>{}; // taskId -> (lane, slot)
-    final regular = tasks.where((t) => t.startAt != null).toList()
-      ..sort((a, b) {
+    // ---- R01 行分配：按开始时间排序，行内「投影间距 < 130px」算占用 ----
+    final sorted = [
+      for (final t in tasks)
+        if (t.startAt != null) t,
+    ]..sort((a, b) {
         final c = a.startAt!.compareTo(b.startAt!);
         return c != 0 ? c : a.id.compareTo(b.id);
       });
-    final items = <_YearlyItem>[];
-    final spans = <String, (int, int?)>{};
-    final pending = <(Task, int, int, bool)>[]; // task, lane, slot, isSubtask
 
-    for (final t in regular) {
-      final lane = laneIndexOf(t);
-      final f1 = _yearFraction(t.startAt!, epochYear);
-      final f2 = t.endAt == null ? f1 : _yearFraction(t.endAt!, epochYear);
-      final parentId = t.parentId;
-      final parentPlace = parentId == null ? null : slotOf[parentId];
-      if (parentPlace != null) {
-        pending.add((t, parentPlace.$1, parentPlace.$2, true));
-        continue;
-      }
-      final slots = laneSlots[lane];
-      var slot = 0;
+    final rowSpans = <List<(double, double)>>[]; // 每行已占用的投影（px）
+    final placed = <(Task, int, double, double)>[]; // task, row, x1, x2
+    for (final t in sorted) {
+      final x1 = xOf(_yearFraction(t.startAt!, epochYear));
+      final e = t.endAt;
+      final x2 = e == null ? x1 : xOf(_yearFraction(e, epochYear));
+      var row = 0;
       while (true) {
-        if (slot == slots.length) slots.add([]);
-        final clash = slots[slot].any((iv) => f1 <= iv.$2 && iv.$1 <= f2);
+        if (row == rowSpans.length) rowSpans.add(<(double, double)>[]);
+        final taken = rowSpans[row];
+        var clash = false;
+        for (final iv in taken) {
+          // 投影间距 < 130px（含重叠）= 该行已被占用，换下一行
+          if (x1 < iv.$2 + _rowGapPx && iv.$1 < x2 + _rowGapPx) {
+            clash = true;
+            break;
+          }
+        }
         if (!clash) {
-          slots[slot].add((f1, f2));
+          taken.add((x1, x2));
+          placed.add((t, row, x1, x2));
           break;
         }
-        slot++;
+        row++; // 行数不限：按需向下增长（超出可视高度靠纵向拖动）
       }
-      slotOf[t.id] = (lane, slot);
-      pending.add((t, lane, slot, false));
     }
 
-    // 泳道高度：槽位数 * slotH，至少一条槽的高度
-    final laneHeights = [
-      for (var i = 0; i < 3; i++)
-        math.max(1, laneSlots[i].length) * slotH + 16,
-    ];
+    // ---- 行区几何 + 纵向平移夹紧 ----
+    final rowCount = rowSpans.length;
+    final contentH = headerH + rowCount * rowH;
+    final maxContentY = math.max(0.0, contentH - viewH);
+    final clampedY =
+        contentY.isFinite ? contentY.clamp(0.0, maxContentY) : 0.0;
+    double rowTop(int row) => headerH + row * rowH - clampedY;
 
-    double laneTop(int laneIdx) {
-      var y = namesH + headerH.toDouble();
-      for (var i = 0; i < laneIdx; i++) {
-        y += laneHeights[i];
-      }
-      return y;
-    }
-
-    double itemY(int laneIdx, int slot) =>
-        laneTop(laneIdx) + 8 + slot * slotH + slotH / 2;
-
-    for (final (t, lane, slot, isSub) in pending) {
-      final s = t.startAt!;
+    // ---- 任务 + 标签（单行、不合并不换行、先到先得） ----
+    final items = <_YearlyItem>[];
+    final labels = <_YearlyLabel>[];
+    final spans = <String, (int, int?)>{};
+    final takenLines = List.generate(rowCount, (_) => <(double, double)>[]);
+    final labelStyle = TextStyle(fontSize: labelFontSize, color: scheme.onSurface);
+    final doneLabelStyle = labelStyle.copyWith(
+      color: scheme.onSurface.withValues(alpha: doneTaskOpacity),
+      decoration: TextDecoration.lineThrough,
+    );
+    for (final (t, row, x1, x2) in placed) {
       final e = t.endAt;
-      spans[t.id] = (s, e);
-      final x1 = xOf(_yearFraction(s, epochYear));
-      final x2 = e == null ? x1 : xOf(_yearFraction(e, epochYear));
+      spans[t.id] = (t.startAt!, e);
+      final parentId = t.parentId;
+      // R01：子任务不再与父共行（同刻必然 130px 内冲突），只保留「画更小」的视觉差异
+      final isSub = parentId != null && originals.containsKey(parentId);
       items.add(_YearlyItem(
         task: t,
         x1: x1,
         x2: x2,
-        y: itemY(lane, slot),
+        y: rowTop(row) + labelH + markerH / 2,
         color: priorityColor(scheme, t.priority),
         isPoint: e == null,
         isSubtask: isSub,
+      ));
+
+      // 标签：点任务只能挂节点正上方；线段任务挂「最左侧放得下」的点正上方。
+      // 宽度上限 20 字由编辑器保证，这里不截断、不换行；放不下就不显示。
+      final done = t.status == TaskStatus.done;
+      // 标签排版结果缓存（按 完成状态 + 标题），pan/zoom 每帧重建布局时不再重排
+      final tp = textCache.label(
+        t.title,
+        done
+            ? doneLabelStyle
+            : labelStyle,
+        done: done,
+      );
+      final line = takenLines[row];
+      final anchorX = _firstFreeAnchor(x1, e == null ? x1 : x2, tp.width, line);
+      if (anchorX == null) continue; // 放不下：不显示（不截断、不挤）
+      line.add((anchorX - _labelGapPx, anchorX + tp.width + _labelGapPx));
+      labels.add(_YearlyLabel(
+        taskId: t.id,
+        text: t.title,
+        x: anchorX,
+        y: rowTop(row) + 1,
+        done: done,
+        painter: tp,
       ));
     }
 
@@ -682,6 +775,8 @@ class _YearlyLayout {
       ...items.where((i) => !i.isSubtask),
     ];
     for (final it in ordered) {
+      // 行区纵向平移后，滑到表头下 / 视口外的行不再接收点击（避免点到看不见的任务）
+      if (it.y + 12 < headerH || it.y - 12 > viewH) continue;
       if (it.isPoint) {
         hitRegions.add(_HitRegion(
             Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
@@ -702,18 +797,14 @@ class _YearlyLayout {
             _DragMode.move));
       }
     }
-    // 名称命中区域：点按名称 = 选中（设计 §13-6）
-    if (namesH > 0) {
-      for (final it in items) {
-        if (it.isSubtask) continue;
-        final slot = nameSlots[it.task.id];
-        if (slot == null || !slot.visible) continue;
-        final anchorX = xOf(slot.centerMinutes);
-        hitRegions.add(_HitRegion(
-            Rect.fromLTWH(anchorX - 2, 0, slot.textWidth * 0.7 + 8, namesH),
-            it.task.id,
-            _DragMode.move));
-      }
+    // R01：标签命中区域 —— 点按标签 = 选中该任务（不再有顶部名称层）
+    for (final lb in labels) {
+      if (lb.y + lb.painter.height < headerH || lb.y > viewH) continue;
+      hitRegions.add(_HitRegion(
+        Rect.fromLTWH(lb.x - 2, lb.y, lb.painter.width + 4, lb.painter.height),
+        lb.taskId,
+        _DragMode.move,
+      ));
     }
 
     return _YearlyLayout._(
@@ -722,15 +813,14 @@ class _YearlyLayout {
       ppy: ppy,
       scrollYf: scrollYf,
       epochYear: epochYear,
-      namesH: namesH,
-      laneHeights: laneHeights,
+      rowCount: rowCount,
+      contentH: contentH,
+      contentY: clampedY,
       majorTickYears: majorTickYears,
       minorTickYears: minorTickYears,
       labelStride: labelStride,
       items: items,
-      nameSlots: nameSlots,
-      groups: groups,
-      groupSlots: groupSlots,
+      labels: labels,
       hitRegions: hitRegions,
       originals: originals,
       spans: spans,
@@ -750,7 +840,8 @@ class _YearlyLayout {
         ppy == o.ppy &&
         scrollYf == o.scrollYf &&
         epochYear == o.epochYear &&
-        namesH == o.namesH &&
+        rowCount == o.rowCount &&
+        contentY == o.contentY &&
         majorTickYears == o.majorTickYears &&
         minorTickYears == o.minorTickYears &&
         labelStride == o.labelStride &&
@@ -759,8 +850,7 @@ class _YearlyLayout {
         selectedTaskId == o.selectedTaskId &&
         pulseYear == o.pulseYear &&
         _sameItems(items, o.items) &&
-        _sameGroups(groups, o.groups) &&
-        _sameSlots(groupSlots, o.groupSlots);
+        _sameLabels(labels, o.labels);
   }
 
   static bool _sameItems(List<_YearlyItem> a, List<_YearlyItem> b) {
@@ -782,30 +872,16 @@ class _YearlyLayout {
     return true;
   }
 
-  static bool _sameGroups(List<LabelGroup> a, List<LabelGroup> b) {
+  static bool _sameLabels(List<_YearlyLabel> a, List<_YearlyLabel> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       final x = a[i];
       final y = b[i];
-      if (x.id != y.id || x.title != y.title) return false;
-      if (x.taskIds.length != y.taskIds.length) return false;
-      for (var j = 0; j < x.taskIds.length; j++) {
-        if (x.taskIds[j] != y.taskIds[j]) return false;
-      }
-    }
-    return true;
-  }
-
-  static bool _sameSlots(
-      Map<String, DayNameSlot> a, Map<String, DayNameSlot> b) {
-    if (a.length != b.length) return false;
-    for (final e in a.entries) {
-      final y = b[e.key];
-      if (y == null) return false;
-      final x = e.value;
-      if (x.centerMinutes != y.centerMinutes ||
-          x.textWidth != y.textWidth ||
-          x.visible != y.visible) {
+      if (x.taskId != y.taskId ||
+          x.text != y.text ||
+          x.x != y.x ||
+          x.y != y.y ||
+          x.done != y.done) {
         return false;
       }
     }
@@ -818,6 +894,14 @@ class _YearlyLayout {
     }
     return null;
   }
+
+  /// R01：按任务 id 找布局项（跳转任务时纵向定位到所在行）。
+  _YearlyItem? itemById(String taskId) {
+    for (final it in items) {
+      if (it.task.id == taskId) return it;
+    }
+    return null;
+  }
 }
 
 class _YearlyPainter extends CustomPainter {
@@ -827,146 +911,64 @@ class _YearlyPainter extends CustomPainter {
 
   double _xOf(double yf) => (yf - layout.scrollYf) * layout.ppy;
 
-
-  /// R1-A：组内「代表点」与「点任务个数」，供节点放大与虚线定位使用。
-  ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})
-      _groupInfo() {
-    final rep = <String, String>{};
-    final points = <String, int>{};
-    final byTask = <String, LabelGroup>{};
-    for (final g in layout.groups) {
-      String? bestId;
-      var bestY = double.infinity;
-      var n = 0;
-      for (final it in layout.items) {
-        if (!g.taskIds.contains(it.task.id)) continue;
-        byTask[it.task.id] = g;
-        if (!it.isPoint) continue;
-        n++;
-        if (it.y < bestY) {
-          bestY = it.y;
-          bestId = it.task.id;
-        }
-      }
-      points[g.id] = n;
-      if (bestId != null) rep[g.id] = bestId;
-    }
-    return (rep: rep, points: points, byTask: byTask);
-  }
-
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
     final ppy = layout.ppy;
-    final top = layout.namesH;
-    final ganttTop = top + _YearlyLayout.headerH;
+    // R01：刻度表头固定在顶部，行区在其下方纵向平移
+    const top = _YearlyLayout.headerH;
 
-    // 当前年高亮竖带
+    // 当前年高亮竖带（表头 + 行区通高）
     final nowX = (layout.nowYear - layout.epochYear).toDouble();
     final nowX0 = _xOf(nowX);
     if (nowX0 + ppy >= 0 && nowX0 <= size.width) {
       canvas.drawRect(
-        Rect.fromLTWH(nowX0, top, ppy, size.height - top),
+        Rect.fromLTWH(nowX0, 0, ppy, size.height),
         Paint()..color = scheme.primary.withValues(alpha: 0.08),
       );
     }
 
-    _drawTicks(canvas, size, top, ganttTop);
+    _drawTicks(canvas, size, 0, top);
+
+    // 行区 clip 在表头下方：纵向平移时不会盖住刻度
+    canvas.save();
+    canvas.clipRect(
+        Rect.fromLTWH(0, top, size.width, math.max(0.0, size.height - top)));
 
     // 任务：节点 / 带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）。无泳道底纹（v2.3 §13-8）。
-      // U11：时间几乎重合的点会叠在一起，只画一个代表点（否则「一个点 + 多个标题」）。
-      // P1：本次 paint 只算一次（O(组 × 点)，以前点层与名称层各算一遍）。
-      final info = _groupInfo();
-      for (final it in layout.items) {
-        if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
-        final done = it.task.status == TaskStatus.done;
-        final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
-        if (it.isPoint) {
-          final g = info.byTask[it.task.id];
-          if (g != null && info.rep[g.id] != it.task.id) continue;
-          // U11 追加：合并了多个任务时点画大一圈，提示「此处不止一个任务」
-          final baseR = it.isSubtask ? 3.5 : 5.0;
-          final mergedDots = g != null && (info.points[g.id] ?? 1) > 1;
-          final radius = mergedDots ? baseR + 2.0 : baseR;
-          canvas.drawCircle(Offset(it.x1, it.y), radius, Paint()..color = color);
-        } else {
-          canvas.drawLine(
-            Offset(it.x1, it.y),
-            Offset(it.x2, it.y),
-            Paint()
-              ..color = color
-              ..strokeWidth = it.isSubtask ? 1.5 : 3
-              ..strokeCap = StrokeCap.round,
-          );
-          final endR = it.isSubtask ? 3.5 : 5.0;
-          _drawBreak(canvas, it.x1, it.y, color, endR);
-          _drawBreak(canvas, it.x2, it.y, color, endR);
-        }
-        if (it.task.id == layout.selectedTaskId) {
-          _drawSelection(canvas, it, scheme);
-        }
+    // R01：节点不再合并 —— 每个任务独立绘制，点按即选中（恢复「选中 + 详情」）。
+    for (final it in layout.items) {
+      if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 水平裁剪
+      final done = it.task.status == TaskStatus.done;
+      final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
+      if (it.isPoint) {
+        canvas.drawCircle(Offset(it.x1, it.y),
+            it.isSubtask ? 3.5 : 5.0, Paint()..color = color);
+      } else {
+        canvas.drawLine(
+          Offset(it.x1, it.y),
+          Offset(it.x2, it.y),
+          Paint()
+            ..color = color
+            ..strokeWidth = it.isSubtask ? 1.5 : 3
+            ..strokeCap = StrokeCap.round,
+        );
+        final endR = it.isSubtask ? 3.5 : 5.0;
+        _drawBreak(canvas, it.x1, it.y, color, endR);
+        _drawBreak(canvas, it.x2, it.y, color, endR);
       }
+      if (it.task.id == layout.selectedTaskId) {
+        _drawSelection(canvas, it, scheme);
+      }
+    }
 
-      // 名称层：45° 斜文本 + 垂直虚线。
-      // 规则（2026-10-18 收敛后）：布局算法判定「放不下」就不画 —— 宁可少画，也不把名字
-      // 砍断或挤成一团（合作者建议）。重合点的名字合并成「A；B」，折行不截断。
-      if (layout.namesH > 0) {
-        final dashPaint = Paint()
-          ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
-          ..strokeWidth = 1;
-        // P1：组信息在本次 paint 开头已算过一次（以前这里又算一遍）
-        for (final g in layout.groups) {
-            final slot = layout.groupSlots[g.id];
-            if (slot == null || !slot.visible) continue; // 放不下就不画（合作者建议）
-            final anchorX = _xOf(slot.centerMinutes);
-            if (anchorX < -120 || anchorX > size.width + 120) continue;
-            // 虚线连到该组的代表点（组内没有点任务时连到第一个成员）
-            double? targetY;
-            final repId = info.rep[g.id];
-            for (final it in layout.items) {
-              if (repId != null) {
-                if (it.task.id == repId) {
-                  targetY = it.y;
-                  break;
-                }
-              } else if (g.taskIds.contains(it.task.id)) {
-                targetY = it.y;
-                break;
-              }
-            }
-            if (targetY == null) continue;
-            var dy = layout.namesH - 6.0;
-            while (dy < targetY - 8) {
-              canvas.drawLine(
-                  Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
-              dy += 6;
-            }
-            final done = g.taskIds.length == 1 &&
-                layout.originals[g.taskIds.first]?.status == TaskStatus.done;
-            final merged = g.size > 1;
-            final tp = TextPainter(
-              text: TextSpan(
-                text: g.title,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: scheme.onSurface
-                      .withValues(alpha: done ? doneTaskOpacity : 1.0),
-                  decoration: (done && !merged)
-                      ? TextDecoration.lineThrough
-                      : null,
-                ),
-              ),
-              textDirection: TextDirection.ltr,
-              maxLines: 30,
-            )..layout();
-            canvas.save();
-            canvas.translate(anchorX, layout.namesH - 4);
-            canvas.rotate(-math.pi / 4);
-            tp.paint(canvas, Offset(3, -tp.height + 2));
-            canvas.restore();
-          }
-      }
+    // 标签：单行、贴在本行节点正上方（先到先得；放不下的布局期已丢弃）
+    for (final lb in layout.labels) {
+      if (lb.x + lb.painter.width < -40 || lb.x > size.width + 40) continue;
+      lb.painter.paint(canvas, Offset(lb.x, lb.y));
+    }
+    canvas.restore();
 
     // 「现在」脉冲高亮（1.5 秒）
     final pulseYear = layout.pulseYear;
@@ -974,7 +976,7 @@ class _YearlyPainter extends CustomPainter {
       final x = _xOf((pulseYear - layout.epochYear).toDouble());
       if (x + ppy >= 0 && x <= size.width) {
         canvas.drawRect(
-          Rect.fromLTWH(x, top, ppy, size.height - top),
+          Rect.fromLTWH(x, 0, ppy, size.height),
           Paint()..color = scheme.primary.withValues(alpha: 0.2),
         );
       }

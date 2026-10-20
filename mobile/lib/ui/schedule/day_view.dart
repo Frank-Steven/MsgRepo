@@ -441,10 +441,13 @@ class _DayItem {
   final double x2;
   final double y;
   final Color color;
+  final int rowIdx; // R01：行分配结果（0 起）
+
   final bool isPoint;
   final bool isSubtask;
 
   const _DayItem({
+    required this.rowIdx,
     required this.task,
     required this.x1,
     required this.x2,
@@ -458,8 +461,11 @@ class _DayItem {
 class _DayLayout {
   /// 刻度带高度：容纳斜 45° 向上的时间标注 + 跨日日期标注。
   static const headerH = 44.0;
-  static const laneH = 40.0;
-  static const nameLayerH = 160.0;
+  static const laneH = labelH + markerH;
+  // R01-A（2026-10-20）：不再用顶部 160px 名称层 + 45° 斜排，改成每行自带「标签行 + 标记行」。
+  static const labelH = 15.0; // 与 yearly_view 对齐
+  static const markerH = 18.0; // 与 yearly_view 对齐
+  static const labelGapPx = 6.0; // 标签之间留白（与 yearly_view 的 _labelGapPx 一致）
 
   final double viewW;
   final double viewH;
@@ -508,12 +514,6 @@ class _DayLayout {
     required this.pulseMin,
   });
 
-  static const _priorities = [
-    TaskPriority.important,
-    TaskPriority.normal,
-    TaskPriority.minor,
-  ];
-
   static _DayLayout build({
     required double viewW,
     required double viewH,
@@ -533,84 +533,136 @@ class _DayLayout {
 
     double xOf(double absMin) => (absMin - scrollMin) * ppm;
 
-    // 名称空位：贪心放置（v2.3），轴 = 绝对分钟
-      // R1-A：先按「开始时间相近」分组，再对**组**做唯一一次贪心放置。
-      // 点任务与时段任务一视同仁；子任务不参与（与父同 y 叠加，画笔也不画它的名字）。
-      final labelTasks = [
-        for (final t in tasks)
-          if (t.parentId == null || !originals.containsKey(t.parentId)) t,
-      ];
-      final groups = buildLabelGroups(
-        labelTasks,
-        axisOf: (t) {
-          final startMin = (t.startAt! - epochMs) / 60000.0;
-          final endMin = t.endAt == null
-              ? startMin
-              : math.max(startMin, (t.endAt! - epochMs) / 60000.0);
-          return (startMin, endMin);
-        },
-        axisPerPx: 1 / ppm,
-        thresholdPx: 12,
-      );
-      final groupSlots = assignGroupNames(
-        groups,
-        axisPerPx: 1 / ppm,
-        anchorStep: 5,
-        measureText: measure,
-      );
-      // 命中区域仍按任务粒度：组内每个任务共享该组的槽位
-      final nameSlots = <String, DayNameSlot>{};
-      for (final g in groups) {
-        final s = groupSlots[g.id];
-        if (s == null) continue;
-        for (final id in g.taskIds) {
-          nameSlots[id] = DayNameSlot(
-            taskId: id,
-            centerMinutes: s.centerMinutes,
-            textWidth: s.textWidth,
-            visible: s.visible,
-          );
+    // ---- R01（2026-10-20 拍板）：按开始时间排序 + 行分配 + 单行标签 ----
+    // 不再按颜色/优先级分泳道；按开始时间依次从第 1 行试：
+    // 行内已有任务与本任务「投影间距 < 130px」（≈20 字标签宽）即算占用，换下一行；行数不限。
+    const rowGapPx = 130.0;
+    final ordered = [...tasks]..sort((a, b) {
+        final c = a.startAt!.compareTo(b.startAt!);
+        return c != 0 ? c : a.id.compareTo(b.id);
+      });
+    // 每行已占用的 px 区间（只存真实区间，判定时才加 130px 光环）
+    final rowSpans = <List<(double, double)>>[];
+    int rowOf(double xa, double xb) {
+      final left = math.min(xa, xb);
+      final right = math.max(xa, xb);
+      for (var r = 0; r < rowSpans.length; r++) {
+        var clash = false;
+        for (final iv in rowSpans[r]) {
+          if (left - rowGapPx < iv.$2 && iv.$1 < right + rowGapPx) {
+            clash = true;
+            break;
+          }
+        }
+        if (!clash) {
+          rowSpans[r].add((left, right));
+          return r;
         }
       }
-      final namesH =
-          groupSlots.values.any((e) => e.visible) ? nameLayerH : 0.0;
+      rowSpans.add([(left, right)]);
+      return rowSpans.length - 1;
+    }
 
-    double laneY(int laneIdx) =>
-        namesH + headerH + laneIdx * laneH + laneH / 2;
+    // 名称带高度：有任务就预留（放不下的标签不画，但带子保留，避免行位置跳动）
+    const namesH = 0.0; // R01-A：标签贴在自己那一行，不再占用顶部名称带
 
-    final items = <_DayItem>[];
-    final hitRegions = <_HitRegion>[];
+    double laneY(int rowIdx) =>
+        headerH + rowIdx * laneH + labelH + markerH / 2;
+
+    // 先按开始时间给「非子任务」分配行；子任务跟随父任务的 y（父子同线）。
+    final rowsByTask = <String, int>{};
     final spans = <String, (double, double)>{};
-    for (final t in tasks) {
-      final s = t.startAt!;
-      final e = t.endAt;
-      var laneIdx = _priorities.contains(t.priority)
-          ? _priorities.indexOf(t.priority)
-          : 1;
-      // 子任务：父任务在本视图可见时用父的泳道 y（设计 §3）
-      final pid = t.parentId;
-      final parent = pid == null ? null : originals[pid];
-      final isSubtask = parent != null;
-      if (parent != null) {
-        laneIdx = _priorities.contains(parent.priority)
-            ? _priorities.indexOf(parent.priority)
-            : 1;
-      }
-      final startMin = (s - epochMs) / 60000.0;
-      final endMin = e == null ? startMin : (e - epochMs) / 60000.0;
+    final x1ByTask = <String, double>{};
+    final x2ByTask = <String, double>{};
+    for (final t in ordered) {
+      final startMin = (t.startAt! - epochMs) / 60000.0;
+      final endMin = t.endAt == null
+          ? startMin
+          : math.max(startMin, (t.endAt! - epochMs) / 60000.0);
       spans[t.id] = (startMin, endMin);
       final x1 = xOf(startMin);
-      final x2 = e == null ? x1 : xOf(endMin);
+      final x2 = t.endAt == null ? x1 : xOf(endMin);
+      x1ByTask[t.id] = x1;
+      x2ByTask[t.id] = x2;
+      final pid = t.parentId;
+      final parentVisible = pid != null && originals.containsKey(pid);
+      if (parentVisible) continue; // 子任务不参与行分配
+      rowsByTask[t.id] = rowOf(x1, x2);
+    }
+    for (final t in ordered) {
+      final pid = t.parentId;
+      if (pid != null && originals.containsKey(pid)) {
+        rowsByTask[t.id] = rowsByTask[pid] ?? 0;
+      }
+    }
+
+
+    // 标签：单行、不合并、不换行、先到先得（R01）。
+    // 点任务：正上方有空间才显示；线段任务：显示在「最左侧符合条件」的点上方；都不行就不显示。
+    final nameSlots = <String, DayNameSlot>{};
+    final hitRegions = <_HitRegion>[];
+    final items = <_DayItem>[];
+    for (final t in ordered) {
+      final rowIdx = rowsByTask[t.id] ?? 0;
+      final x1 = x1ByTask[t.id]!;
+      final x2 = x2ByTask[t.id]!;
+      final pid = t.parentId;
       items.add(_DayItem(
         task: t,
         x1: x1,
         x2: x2,
-        y: laneY(laneIdx),
+        y: laneY(rowIdx),
         color: priorityColor(scheme, t.priority),
-        isPoint: e == null,
-        isSubtask: isSubtask,
+        isPoint: t.endAt == null,
+        isSubtask: pid != null && originals.containsKey(pid),
+        rowIdx: rowIdx,
       ));
     }
+
+    /// 某个 x 区间在「指定行的上方」是否空着（row=0 时上方是名称带，视为空）。
+    bool freeAbove(int rowIdx, double left, double right) {
+      if (rowIdx <= 0) return true;
+      final above = rowSpans[rowIdx - 1];
+      for (final iv in above) {
+        // 与 yearly_view 口径一致：留 6px 间隙，避免标签贴着别的节点
+        if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
+      }
+      return true;
+    }
+
+    for (final it in items) {
+      if (it.isSubtask) continue;
+      final title = it.task.title.trim();
+      if (title.isEmpty) continue;
+      final w = measure(title);
+      if (w < 6) continue;
+      double? anchorX;
+      if (it.isPoint) {
+        if (freeAbove(it.rowIdx, it.x1, it.x1 + w)) anchorX = it.x1;
+      } else {
+        // 线段任务：从 x1 起按标签宽度步进，找最左侧「上方空着」的点
+        var probe = it.x1;
+        while (probe <= it.x2) {
+          if (freeAbove(it.rowIdx, probe, probe + w)) {
+            anchorX = probe;
+            break;
+          }
+          probe += math.max(24.0, w * 0.5);
+        }
+      }
+      if (anchorX == null) continue;
+      nameSlots[it.task.id] = DayNameSlot(
+        taskId: it.task.id,
+        centerMinutes: scrollMin + anchorX / ppm,
+        textWidth: w,
+        visible: true,
+      );
+    }
+
+    // R01：节点不再合并 → 不再构造 LabelGroup；保留字段以兼容绘制/比较代码
+    const groups = <LabelGroup>[];
+    const groupSlots = <String, DayNameSlot>{};
+
     // 命中区域：子任务在前（与父同 y 叠加时优先命中子任务）
     for (final it in [
       ...items.where((i) => i.isSubtask),
@@ -637,18 +689,18 @@ class _DayLayout {
       }
     }
     // 名称命中区域：点按名称 = 选中该任务（设计 §13-6）
-    if (namesH > 0) {
+      // 名称命中区域（R01-A）：标签贴在节点正上方，点在标签上等于选中该任务。
       for (final it in items) {
         if (it.isSubtask) continue;
         final slot = nameSlots[it.task.id];
         if (slot == null || !slot.visible) continue;
         final anchorX = xOf(slot.centerMinutes);
         hitRegions.add(_HitRegion(
-            Rect.fromLTWH(anchorX - 2, 0, slot.textWidth * 0.7 + 8, namesH),
+            Rect.fromLTWH(anchorX - 2, it.y - markerH / 2 - labelH,
+                slot.textWidth + 8, labelH),
             it.task.id,
             _DragMode.move));
       }
-    }
 
     return _DayLayout._(
       viewW: viewW,
@@ -694,34 +746,6 @@ class _DayPainter extends CustomPainter {
 
 
 
-  /// R1-A：组内「代表点」与「点任务个数」，供节点放大与虚线定位使用。
-  ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})?
-      _infoCache;
-
-  ({Map<String, String> rep, Map<String, int> points, Map<String, LabelGroup> byTask})
-      _groupInfo() {
-    final cached = _infoCache;
-    if (cached != null) return cached;
-    final rep = <String, String>{};
-    final points = <String, int>{};
-    final byTask = <String, LabelGroup>{};
-    for (final g in layout.groups) {
-      _DayItem? best;
-      var n = 0;
-      for (final it in layout.items) {
-        if (!g.taskIds.contains(it.task.id)) continue;
-        byTask[it.task.id] = g;
-        if (!it.isPoint) continue;
-        n++;
-        if (best == null || it.y < best.y) best = it;
-      }
-      points[g.id] = n;
-      if (best != null) rep[g.id] = best.task.id;
-    }
-    final result = (rep: rep, points: points, byTask: byTask);
-    _infoCache = result;
-    return result;
-  }
   @override
   void paint(Canvas canvas, Size size) {
     final scheme = layout.scheme;
@@ -734,18 +758,13 @@ class _DayPainter extends CustomPainter {
     // 选中任务加描边（v2.3 选中-调整）
       // 节点：点任务按「标签组」只画一个代表点（组内 y 最小者，即优先级最高），
       // 组内点任务 ≥2 时点画大一圈；时段任务照常画线段。
-      final info = _groupInfo();
       for (final it in layout.items) {
         if (it.x2 < -40 || it.x1 > size.width + 40) continue; // 裁剪
         final done = it.task.status == TaskStatus.done;
         final color = it.color.withValues(alpha: done ? doneTaskOpacity : 1.0);
         if (it.isPoint) {
-          final g = info.byTask[it.task.id];
-          if (g != null && info.rep[g.id] != it.task.id) continue;
           final baseR = it.isSubtask ? 3.5 : 5.0;
-          final mergedDots = g != null && (info.points[g.id] ?? 1) > 1;
-          canvas.drawCircle(Offset(it.x1, it.y),
-              mergedDots ? baseR + 2.0 : baseR, Paint()..color = color);
+          canvas.drawCircle(Offset(it.x1, it.y), baseR, Paint()..color = color);
         } else {
           canvas.drawLine(
             Offset(it.x1, it.y),
@@ -764,64 +783,28 @@ class _DayPainter extends CustomPainter {
         }
       }
 
-      // 名称层：45° 斜文本 + 垂直虚线。
-      // 规则（2026-10-18 收敛后）：布局算法判定「放不下」就不画 —— 宁可少画，也不把名字
-      // 砍断或挤成一团（合作者建议）。重合点的名字合并成「A；B」，折行不截断。
-      if (layout.namesH > 0) {
-        final dashPaint = Paint()
-          ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
-          ..strokeWidth = 1;
-          final info = _groupInfo();
-          for (final g in layout.groups) {
-            final slot = layout.groupSlots[g.id];
-            if (slot == null || !slot.visible) continue; // 放不下就不画（合作者建议）
-            final anchorX = _xOf(slot.centerMinutes);
-            if (anchorX < -100 || anchorX > size.width + 100) continue;
-            // 虚线连到该组的代表点（组内没有点任务时连到第一个成员）
-            double? targetY;
-            final repId = info.rep[g.id];
-            for (final it in layout.items) {
-              if (repId != null) {
-                if (it.task.id == repId) {
-                  targetY = it.y;
-                  break;
-                }
-              } else if (g.taskIds.contains(it.task.id)) {
-                targetY = it.y;
-                break;
-              }
-            }
-            if (targetY == null) continue;
-            var dy = layout.namesH - 6.0;
-            while (dy < targetY - 8) {
-              canvas.drawLine(
-                  Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
-              dy += 6;
-            }
-            final done = g.taskIds.length == 1 &&
-                layout.originals[g.taskIds.first]?.status == TaskStatus.done;
-            final merged = g.size > 1;
-            final tp = TextPainter(
-              text: TextSpan(
-                text: g.title,
-                style: layout.nameStyle.copyWith(
-                  decoration: (done && !merged)
-                      ? TextDecoration.lineThrough
-                      : null,
-                  color: (done && !merged)
-                      ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
-                      : null,
-                ),
-              ),
-              textDirection: TextDirection.ltr,
-              maxLines: 30,
-            )..layout();
-            canvas.save();
-            canvas.translate(anchorX, layout.namesH - 4);
-            canvas.rotate(-math.pi / 4);
-            tp.paint(canvas, Offset(3, -tp.height + 2));
-            canvas.restore();
-          }
+      // 标签层（R01-A）：每行自己一条标签线，水平单行贴在节点正上方；放不下就不画。
+      for (final it in layout.items) {
+        final slot = layout.nameSlots[it.task.id];
+        if (slot == null || !slot.visible) continue;
+        final anchorX = _xOf(slot.centerMinutes);
+        if (anchorX < -140 || anchorX > size.width + 140) continue;
+        final done = it.task.status == TaskStatus.done;
+        final tp = TextPainter(
+          text: TextSpan(
+            text: it.task.title,
+            style: layout.nameStyle.copyWith(
+              decoration: done ? TextDecoration.lineThrough : null,
+              color: done
+                  ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
+                  : null,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+          maxLines: 1,
+          ellipsis: '…',
+        )..layout(maxWidth: slot.textWidth + 2);
+        tp.paint(canvas, Offset(anchorX, it.y - _DayLayout.markerH / 2 - tp.height));
       }
 
     // 「现在」脉冲高亮（1.5 秒）
