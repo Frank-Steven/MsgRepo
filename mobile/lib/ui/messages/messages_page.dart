@@ -88,7 +88,17 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_aiPendingRebuild && AppUiState.instance.messagesVisible) {
+      _aiPendingRebuild = false;
+      _scheduleAiSetState();
+    }
+  }
+
+  @override
   void dispose() {
+    _aiSetStateTimer?.cancel();
     _autoTick?.cancel();
     AiProcessingService.instance.removeListener(_onAiProcessingChanged);
     _sub?.cancel();
@@ -106,16 +116,36 @@ class MessagesPageState extends State<MessagesPage> {
     }
   }
 
+  Timer? _aiSetStateTimer;
+  bool _aiPendingRebuild = false;
+
+  /// AI 事件驱动的重建。
+  ///
+  /// 2026-10-20（O09）：真机上 AI 处理进行中时，待办列表连续多次 swipe 完全无位移，
+  /// 处理结束即恢复。怀疑是「每条消息一个 revision → 本页 setState」在离屏时也
+  /// 每帧重建（IndexedStack 会构建全部子页），叠加大列表重建把输入事件挤掉。
+  /// 处置：① 合并到 200ms 一次；② 消息页不可见时**不重建**，等切回来再补。
   void _onAiProcessingChanged() {
     final rev = AiProcessingService.instance.revision;
     if (!mounted || rev == _aiRevision) return;
     _aiRevision = rev;
-    setState(() {});
-    // 自动确认会把消息置 processed 却没有 reload —— 角标要跟着刷新
-    // （子代理审查：否则后台跑完后角标长期停在旧值）。
     final s = AiProcessingService.instance.session;
     final drained = s == null || (!s.running && s.outcomes.isEmpty);
     if (drained) unawaited(_updateBadge());
+    if (!AppUiState.instance.messagesVisible) {
+      _aiPendingRebuild = true; // 离屏：攒着，切回来时再重建
+      return;
+    }
+    _scheduleAiSetState();
+  }
+
+  void _scheduleAiSetState() {
+    if (_aiSetStateTimer != null) return;
+    _aiSetStateTimer = Timer(const Duration(milliseconds: 200), () {
+      _aiSetStateTimer = null;
+      if (!mounted) return;
+      setState(() {});
+    });
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
