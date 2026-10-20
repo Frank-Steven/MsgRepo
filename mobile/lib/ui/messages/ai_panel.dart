@@ -14,6 +14,7 @@ import 'message_widgets.dart';
 Future<void> showAiProcessPanel(
   BuildContext context, {
   VoidCallback? onChanged,
+
   /// true = 由「未处理达到阈值」自动触发（面板标题会标出来，便于区分）。
   bool auto = false,
 }) {
@@ -159,12 +160,14 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         const SizedBox(height: 8),
         // 每条消息一张状态卡片（v2.4）：等待/处理中/完成/失败图标 + 标题；
         // 处理中卡片内滚动显示该条的流式输出（等宽字体），完成后折叠为摘要。
+        // O02：上千条时 ListView(children:) 会在一帧里建出全部卡片 → ANR。
+        // （2026-10-20 复核：40cd25a 只改了跟随滚动，没改这里；历史上从未出现 builder）
         Expanded(
-          child: ListView(
+          child: ListView.builder(
             controller: _scroll,
-            children: [
-              for (final o in session.outcomes) _buildProcessingCard(session, o)
-            ],
+            itemCount: session.outcomes.length,
+            itemBuilder: (context, i) =>
+                _buildProcessingCard(session, session.outcomes[i]),
           ),
         ),
       ],
@@ -189,7 +192,9 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
           Icon(Icons.check_circle, size: 20, color: Colors.green.shade600);
     } else if (isCurrent) {
       statusIcon = const SizedBox(
-          width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2));
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2));
     } else {
       statusIcon = Icon(Icons.schedule, size: 20, color: cs.outline);
     }
@@ -210,8 +215,8 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                 statusIcon,
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(title,
-                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  child:
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
                 ),
                 if (o.result != null) ...[
                   Container(
@@ -298,8 +303,8 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         leading: SizedBox(
             width: 18,
             height: 18,
-            child: CircularProgressIndicator(
-                strokeWidth: 2, color: cs.outline)),
+            child:
+                CircularProgressIndicator(strokeWidth: 2, color: cs.outline)),
         title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: const Text('未完成'),
       );
@@ -318,8 +323,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Checkbox(
                 value: o.checked,
                 visualDensity: VisualDensity.compact,
-                onChanged: (v) =>
-                    setState(() => o.checked = v ?? false),
+                onChanged: (v) => setState(() => o.checked = v ?? false),
               ),
             ),
             const SizedBox(width: 6),
@@ -385,15 +389,15 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         Row(
           children: [
             Expanded(
-              child: Text('处理结果',
-                  style: Theme.of(context).textTheme.titleMedium),
+              child:
+                  Text('处理结果', style: Theme.of(context).textTheme.titleMedium),
             ),
             if (pendingCount > 0)
               TextButton(
                 onPressed: () {
                   // 全选 / 全不选切换（只作用于有结果的待确认条目）
-                  final anyUnchecked = outcomes
-                      .any((o) => o.result != null && !o.checked);
+                  final anyUnchecked =
+                      outcomes.any((o) => o.result != null && !o.checked);
                   setState(() {
                     for (final o in outcomes) {
                       if (o.result != null) {
@@ -402,9 +406,7 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                     }
                   });
                 },
-                child: Text(checkedCount < pendingCount
-                    ? '全选'
-                    : '全不选'),
+                child: Text(checkedCount < pendingCount ? '全选' : '全不选'),
               ),
             FilledButton(
               onPressed: checkedCount == 0
@@ -413,15 +415,12 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                         for (final o in outcomes)
                           if (o.result != null && o.checked) o,
                       ]),
-              child: Text(checkedCount == 0
-                  ? '确认选中'
-                  : '确认选中（$checkedCount）'),
+              child: Text(checkedCount == 0 ? '确认选中' : '确认选中（$checkedCount）'),
             ),
             const SizedBox(width: 8),
             TextButton(
               onPressed: _close,
-              child: Text(
-                  pendingCount > 0 ? '稍后确认' : '关闭'),
+              child: Text(pendingCount > 0 ? '稍后确认' : '关闭'),
             ),
           ],
         ),
@@ -429,9 +428,11 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
         Text(parts.join(' / '),
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
         const Divider(height: 16),
+        // O02：同上，汇总页也惰性渲染。
         Expanded(
-          child: ListView(
-            children: [for (final o in outcomes) _buildOutcomeTile(o)],
+          child: ListView.builder(
+            itemCount: outcomes.length,
+            itemBuilder: (context, i) => _buildOutcomeTile(outcomes[i]),
           ),
         ),
       ],

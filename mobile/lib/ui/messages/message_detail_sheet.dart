@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/message.dart';
 import '../../services/attachment_store.dart';
+import '../../services/fold_markers.dart';
 
 /// 消息详情面板（P3-2）：正文 + 附件预览。
 ///
@@ -37,7 +38,8 @@ class _MessageDetail extends StatelessWidget {
     final time = DateTime.fromMillisecondsSinceEpoch(message.postedAt);
     final meta = [
       message.appName ?? message.packageName,
-      if (message.conversationTitle?.isNotEmpty == true) message.conversationTitle!,
+      if (message.conversationTitle?.isNotEmpty == true)
+        message.conversationTitle!,
       if (message.sender?.isNotEmpty == true) message.sender!,
       '${time.month}-${time.day} ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
     ].join(' · ');
@@ -46,10 +48,13 @@ class _MessageDetail extends StatelessWidget {
       controller: scroll,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
       children: [
-        Text(message.title, style: tt.titleMedium),
+        // D02：折叠后缀「(N条新消息)」对所有来源都剥（用户 2026-10-20 定）。
+        Text(
+          message.title.isEmpty ? '(无标题)' : stripFoldMarkers(message.title),
+          style: tt.titleMedium,
+        ),
         const SizedBox(height: 4),
-        Text(meta,
-            style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+        Text(meta, style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
         const SizedBox(height: 12),
         SelectableText(
           message.body.isEmpty ? '（无正文）' : message.body,
@@ -84,17 +89,16 @@ class _MessageDetail extends StatelessWidget {
               file,
               height: 180,
               // 只为 180px 缩略图，别整幅原图解码（手机照片可达数十 MB）
-              cacheHeight: (180 * MediaQuery.devicePixelRatioOf(context)).round(),
+              cacheHeight:
+                  (180 * MediaQuery.devicePixelRatioOf(context)).round(),
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  _attachmentRow(cs, tt, a, '图片无法解码'),
+              errorBuilder: (_, __, ___) => _attachmentRow(cs, tt, a, '图片无法解码'),
             ),
           ),
         ),
       );
     }
-    return _attachmentRow(
-        cs, tt, a, isImage ? '图片文件已不可用' : _describe(a));
+    return _attachmentRow(cs, tt, a, isImage ? '图片文件已不可用' : _describe(a));
   }
 
   Widget _attachmentRow(
@@ -111,7 +115,8 @@ class _MessageDetail extends StatelessWidget {
               children: [
                 Text(a.label ?? a.kind,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
-                Text(detail,
+                // F09（最小版）：附件里的链接/文件名要能长按选中复制。
+                SelectableText(detail,
                     style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
               ],
             ),
