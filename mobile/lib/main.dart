@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -33,8 +34,23 @@ String themeModeToString(ThemeMode mode) => switch (mode) {
       _ => 'system',
     };
 
+/// 帧耗时埋点（仅 debug，O10 用）：把 ≥32ms 的慢帧打到 logcat，
+/// 用来客观比较「切换深浅色」卡不卡（gfxinfo 对 Flutter 自绘无效）。
+void _frameWatch() {
+  if (!kDebugMode) return;
+  SchedulerBinding.instance.addTimingsCallback((timings) {
+    for (final t in timings) {
+      final ms = t.totalSpan.inMilliseconds;
+      if (ms >= 32) {
+        debugPrint('[frame] slow ${ms}ms (build ${t.buildDuration.inMilliseconds}ms raster ${t.rasterDuration.inMilliseconds}ms)');
+      }
+    }
+  });
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  _frameWatch();
 
   // 调试期错误落盘：部分设备 logcat 不可读，Flutter/异步错误写入
   // filesDir/debug_errors.log 供 adb pull 排查。
@@ -186,13 +202,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final _notesKey = GlobalKey<NotesPageState>();
   final _messagesKey = GlobalKey<MessagesPageState>();
 
-  late final _pages = [
-    SchedulePage(key: _scheduleKey),
-    TodosPage(key: _todosKey),
-    NotesPage(key: _notesKey),
-    MessagesPage(key: _messagesKey),
-    const SettingsPage(),
-  ];
+  // O10：页面懒构建。原来 5 个页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
+  // 任何主题切换都要把这 5 棵树重新 build 一遍（真机实测单帧 build 达 924ms）。
+  // 现在只构建「用户访问过」的页面，没访问过的放占位，切过去时再创建（GlobalKey 保状态）。
+  final Set<int> _builtTabs = {0};
+
+  Widget _pageAt(int i) {
+    if (!_builtTabs.contains(i)) return const SizedBox.shrink();
+    return switch (i) {
+      0 => SchedulePage(key: _scheduleKey),
+      1 => TodosPage(key: _todosKey),
+      2 => NotesPage(key: _notesKey),
+      3 => MessagesPage(key: _messagesKey),
+      _ => const SettingsPage(),
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -207,7 +231,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           // 主题过渡时不必带着整屏一起重绘。
           Expanded(
             child: RepaintBoundary(
-              child: IndexedStack(index: _index, children: _pages),
+                child: IndexedStack(
+                  index: _index,
+                  children: [for (var i = 0; i < 5; i++) _pageAt(i)],
+                ),
             ),
           ),
         ],
@@ -284,7 +311,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
       selectedIndex: _index,
       onDestinationSelected: (i) {
-        setState(() => _index = i);
+        setState(() {
+          _index = i;
+          _builtTabs.add(i); // 首次访问时才真正创建该页
+        });
         AppUiState.instance.setTab(i);
         switch (i) {
           case 0:

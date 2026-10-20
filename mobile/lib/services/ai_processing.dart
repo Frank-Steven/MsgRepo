@@ -499,6 +499,8 @@ class AiProcessingService extends ChangeNotifier {
     // 典型场景：群里把同一条通知发了两遍 → 两条消息各自产出同名同时间的草稿，
     // 以前会建出两条一模一样的任务（真机数据里已出现过）。
     final activeTasks = await db.getActiveTasks();
+    // 旧关联一次取全（原来是每条消息一次 SQL，上千条 = 上千次往返）
+    final oldLinks = await db.messageTaskLinks();
     final undoItems = <({
       String messageId,
       String oldPriority,
@@ -523,7 +525,8 @@ class AiProcessingService extends ChangeNotifier {
       final drafts = r.taskDrafts.isNotEmpty
           ? r.taskDrafts
           : (r.taskDraft != null ? [r.taskDraft!] : const <AiTaskDraft>[]);
-      final oldTaskIds = await db.taskIdsForMessage(m.id);
+      final oldTaskIds = oldLinks[m.id] ?? const <String>[];
+      final newTasks = <Task>[];
       final createdIds = <String>[];
       final reusedIds = <String>[];
       for (final draft in drafts) {
@@ -552,17 +555,17 @@ class AiProcessingService extends ChangeNotifier {
           createdAt: now,
           updatedAt: now,
         );
-        await db.insertTask(task);
+        newTasks.add(task); // 攒起来，最后一次性事务提交
         createdIds.add(task.id);
         activeTasks.add(task); // 同批内的后续草稿也能命中这条
       }
-      await db.updateMessagePriority([m.id], r.priority);
-      await db.updateMessageStatus([m.id], MessageStatus.processed);
-      // 关联语义与旧版一致：用本次草稿替换旧绑定（无草稿则清空）。
-      await db.unlinkAllForMessage(m.id);
-      for (final id in [...createdIds, ...reusedIds]) {
-        await db.linkMessageTask(m.id, id);
-      }
+      // 攒成一条 batch 记录，循环结束后一次性单事务提交
+      batchItems.add((
+        messageId: m.id,
+        priority: r.priority,
+        newTasks: newTasks,
+        linkIds: [...createdIds, ...reusedIds],
+      ));
       undoItems.add((
         messageId: m.id,
         oldPriority: m.priority,
