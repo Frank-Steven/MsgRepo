@@ -461,11 +461,10 @@ class _DayItem {
 class _DayLayout {
   /// 刻度带高度：容纳斜 45° 向上的时间标注 + 跨日日期标注。
   static const headerH = 44.0;
-  static const laneH = labelH + markerH;
-  // R01-A（2026-10-20）：不再用顶部 160px 名称层 + 45° 斜排，改成每行自带「标签行 + 标记行」。
-  static const labelH = 15.0; // 与 yearly_view 对齐
-  static const markerH = 18.0; // 与 yearly_view 对齐
-  static const labelGapPx = 6.0; // 标签之间留白（与 yearly_view 的 _labelGapPx 一致）
+  static const laneH = 34.0; // 行高（顶部名称带另算）
+  // 标签恢复原设计（2026-10-20 用户要求）：顶部 160px 名称带 + 45° 斜排 + 竖虚线连到节点。
+  static const nameLayerH = 160.0;
+  static const labelGapPx = 6.0; // 标签之间留白
 
   final double viewW;
   final double viewH;
@@ -567,10 +566,10 @@ class _DayLayout {
     }
 
     // 名称带高度：有任务就预留（放不下的标签不画，但带子保留，避免行位置跳动）
-    const namesH = 0.0; // R01-A：标签贴在自己那一行，不再占用顶部名称带
+    final namesH = tasks.isEmpty ? 0.0 : nameLayerH; // 45° 标签需要顶部名称带
 
     double laneY(int rowIdx) =>
-        headerH + rowIdx * laneH + labelH + markerH / 2;
+        namesH + headerH + rowIdx * laneH + laneH / 2;
 
     // 先按开始时间给「非子任务」分配行；子任务跟随父任务的 y（父子同线）。
     final rowsByTask = <String, int>{};
@@ -622,26 +621,23 @@ class _DayLayout {
       ));
     }
 
-    /// 某个 x 区间在「指定行的上方」是否空着（row=0 时上方是名称带，视为空）。
-    bool freeAbove(int rowIdx, double left, double right) {
-      if (rowIdx <= 0) return true;
-      for (final iv in rowSpans[rowIdx - 1]) {
-        if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
+    // 标签在顶部名称带、45° 斜排，用竖虚线连到节点（起始点）。
+    // 因此可见性判据 = 从节点往上直到名称带的**整条垂直通道**都没有别的节点（否则引线会穿过它们）。
+    bool corridorFree(int rowIdx, double left, double right) {
+      for (var r = 0; r < rowIdx; r++) {
+        for (final iv in rowSpans[r]) {
+          if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
+        }
       }
       return true;
     }
 
-    // 标签占位（按行记录已画标签的 x 区间）—— 修 bug：同一行上两个任务的标签会叠在一起。
-    final labelSpans = <int, List<(double, double)>>{};
-    bool labelFree(int rowIdx, double left, double right) {
-      for (final iv in labelSpans[rowIdx] ?? const <(double, double)>[]) {
+    final labelSpans = <(double, double)>[];
+    bool labelFree(double left, double right) {
+      for (final iv in labelSpans) {
         if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
       }
       return true;
-    }
-
-    void takeLabelSpan(int rowIdx, double left, double right) {
-      (labelSpans[rowIdx] ??= <(double, double)>[]).add((left, right));
     }
 
     for (final it in items) {
@@ -652,17 +648,14 @@ class _DayLayout {
       if (w < 6) continue;
       double? anchorX;
       if (it.isPoint) {
-        // 点任务：只能挂在自己正上方；上方没空间或与同行标签撞了就不显示（先到先得）
-        if (freeAbove(it.rowIdx, it.x1, it.x1 + w) &&
-            labelFree(it.rowIdx, it.x1, it.x1 + w)) {
-          anchorX = it.x1;
+        if (corridorFree(it.rowIdx, it.x1, it.x1 + w) && labelFree(it.x1, it.x1 + w)) {
+          anchorX = it.x1; // 点任务：连在自己的点上
         }
       } else {
-        // 线段任务：从 x1 起步进，找最左侧「上方空着且不与同行标签撞」的点
+        // 线段任务：挂在「最左侧符合条件」的点上方（Frank 原文）
         var probe = it.x1;
         while (probe <= it.x2) {
-          if (freeAbove(it.rowIdx, probe, probe + w) &&
-              labelFree(it.rowIdx, probe, probe + w)) {
+          if (corridorFree(it.rowIdx, probe, probe + w) && labelFree(probe, probe + w)) {
             anchorX = probe;
             break;
           }
@@ -670,7 +663,7 @@ class _DayLayout {
         }
       }
       if (anchorX == null) continue;
-      takeLabelSpan(it.rowIdx, anchorX, anchorX + w);
+      labelSpans.add((anchorX, anchorX + w));
       nameSlots[it.task.id] = DayNameSlot(
         taskId: it.task.id,
         centerMinutes: scrollMin + anchorX / ppm,
@@ -709,15 +702,14 @@ class _DayLayout {
       }
     }
     // 名称命中区域：点按名称 = 选中该任务（设计 §13-6）
-      // 名称命中区域（R01-A）：标签贴在节点正上方，点在标签上等于选中该任务。
+      // 名称命中区域：标签画在顶部名称带，点它 = 选中该任务。
       for (final it in items) {
         if (it.isSubtask) continue;
         final slot = nameSlots[it.task.id];
         if (slot == null || !slot.visible) continue;
         final anchorX = xOf(slot.centerMinutes);
         hitRegions.add(_HitRegion(
-            Rect.fromLTWH(anchorX - 2, it.y - markerH / 2 - labelH,
-                slot.textWidth + 8, labelH),
+            Rect.fromLTWH(anchorX - 2, namesH - 6, slot.textWidth * 0.75 + 8, namesH),
             it.task.id,
             _DragMode.move));
       }
@@ -803,28 +795,43 @@ class _DayPainter extends CustomPainter {
         }
       }
 
-      // 标签层（R01-A）：每行自己一条标签线，水平单行贴在节点正上方；放不下就不画。
-      for (final it in layout.items) {
-        final slot = layout.nameSlots[it.task.id];
-        if (slot == null || !slot.visible) continue;
-        final anchorX = _xOf(slot.centerMinutes);
-        if (anchorX < -140 || anchorX > size.width + 140) continue;
-        final done = it.task.status == TaskStatus.done;
-        final tp = TextPainter(
-          text: TextSpan(
-            text: it.task.title,
-            style: layout.nameStyle.copyWith(
-              decoration: done ? TextDecoration.lineThrough : null,
-              color: done
-                  ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
-                  : null,
+      // 标签（恢复原设计）：顶部名称带内 45° 斜排，竖虚线连到任务起点。
+      if (layout.namesH > 0) {
+        final dashPaint = Paint()
+          ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
+          ..strokeWidth = 1;
+        for (final it in layout.items) {
+          final slot = layout.nameSlots[it.task.id];
+          if (slot == null || !slot.visible) continue;
+          final anchorX = _xOf(slot.centerMinutes);
+          if (anchorX < -140 || anchorX > size.width + 140) continue;
+          // 竖虚线：名称带底 → 节点（起点）
+          var dy = layout.namesH - 6.0;
+          while (dy < it.y - 8) {
+            canvas.drawLine(
+                Offset(anchorX, dy), Offset(anchorX, dy + 3), dashPaint);
+            dy += 6;
+          }
+          final done = it.task.status == TaskStatus.done;
+          final tp = TextPainter(
+            text: TextSpan(
+              text: it.task.title,
+              style: layout.nameStyle.copyWith(
+                decoration: done ? TextDecoration.lineThrough : null,
+                color: done
+                    ? scheme.onSurface.withValues(alpha: doneTaskOpacity)
+                    : null,
+              ),
             ),
-          ),
-          textDirection: TextDirection.ltr,
-          maxLines: 1,
-          ellipsis: '…',
-        )..layout(maxWidth: slot.textWidth + 2);
-        tp.paint(canvas, Offset(anchorX, it.y - _DayLayout.markerH / 2 - tp.height));
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+          )..layout();
+          canvas.save();
+          canvas.translate(anchorX, layout.namesH - 4);
+          canvas.rotate(-math.pi / 4);
+          tp.paint(canvas, Offset(3, -tp.height + 2));
+          canvas.restore();
+        }
       }
 
     // 「现在」脉冲高亮（1.5 秒）
