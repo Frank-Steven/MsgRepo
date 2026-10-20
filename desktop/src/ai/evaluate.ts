@@ -30,8 +30,8 @@ export function buildEvalSystemPrompt(
       `判断重要与垃圾是首要职责。结合来源应用与会话语境判断（如银行/支付类通知多重要、` +
       `应用商店的推广多为垃圾）。\n` +
       `taskDraft 规则：\n` +
-      `- 消息包含明确可执行事项时给出，否则为 null；值得留存备查但无需执行的内容` +
-      `（笔记类，如账号信息、地址、灵感）也给 taskDraft，priority=minor。\n` +
+      `- 消息包含明确可执行事项时给出，否则为 null；「值得留存备查」不构成建任务的理由` +
+      `（笔记类草稿已于 2026-10-20 取消，见 mobile 提示词注释）。\n` +
       `- title 不超过 20 个字符（中文按 2 字符计），超长的细节放入 description。\n` +
       `- kind=point 时点任务只需 startAt；kind=range 时段任务需要 startAt 和 endAt；` +
       `没有明确时间的可执行事项省略 startAt/endAt（不定时任务）。\n` +
@@ -170,7 +170,7 @@ export function buildEvalBatchSystemPrompt(
         `应用商店的推广多为垃圾）。\n` +
         `taskDrafts 规则（数组，最多 3 个；没有可执行事项给空数组 []）：\n` +
         `- 一条消息里有多件互不相关的事，每件给一个草稿；同一件事的多个步骤仍只给一个草稿。\n` +
-        `- 值得留存备查但无需执行的内容（笔记类，如账号信息、地址、灵感）也给一个草稿，priority=minor。\n` +
+        `- 「值得留存备查」不构成建任务的理由；没有可执行动作就给空数组。\n` +
         `- title 不超过 20 个字符（中文按 2 字符计），超长的细节放入 description。\n` +
         `- kind=point 时点任务只需 startAt；kind=range 时段任务需要 startAt 和 endAt；` +
         `没有明确时间的可执行事项省略 startAt/endAt（不定时任务）。\n` +
