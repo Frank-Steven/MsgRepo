@@ -80,6 +80,7 @@ class DayViewState extends State<DayView>
   double _startScrollMin = 0;
   double _startFocalX = 0;
 
+  int? _dragFrozenRow;
   Task? _dragOriginal;
   _DragMode? _dragMode;
   double _deltaMin = 0; // 预览位移（分钟，已按 5 分钟吸附）
@@ -273,6 +274,11 @@ class DayViewState extends State<DayView>
       final span = layout.spans[hit.taskId];
       if (original != null && span != null) {
         setState(() {
+      // A：记住拖动开始时该任务所在行，拖动过程中冻结
+      _dragFrozenRow = layout.items
+          .firstWhere((it) => it.task.id == original.id,
+              orElse: () => throw StateError('no item'))
+          .rowIdx;
           _dragOriginal = original;
           _dragMode = hit.mode;
           _deltaMin = 0;
@@ -329,7 +335,8 @@ class DayViewState extends State<DayView>
     }
     final wasDragging = _dragOriginal != null;
     setState(() {
-      _dragOriginal = null;
+  _dragOriginal = null;
+  _dragFrozenRow = null;
       _dragMode = null;
       _deltaMin = 0;
     });
@@ -407,6 +414,8 @@ class DayViewState extends State<DayView>
           nowMin: _nowMin,
           selectedTaskId: widget.selectedTaskId,
           pulseMin: _pulseMin,
+      frozenTaskId: _dragOriginal?.id,
+      frozenRow: _dragFrozenRow,
         );
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -515,6 +524,10 @@ class _DayLayout {
   });
 
   static _DayLayout build({
+    // A（2026-10-20）：拖动中的任务冻结在原来的行 —— 否则拖动时行分配每帧重算，
+    // 节点会随着横向移动突然上下跳行（用户录屏里看到的「抽一下」）。
+    String? frozenTaskId,
+    int? frozenRow,
     required double viewW,
     required double viewH,
     required List<Task> tasks,
@@ -535,7 +548,9 @@ class _DayLayout {
 
     // ---- R01（2026-10-20 拍板）：按开始时间排序 + 行分配 + 单行标签 ----
     // 不再按颜色/优先级分泳道；按开始时间依次从第 1 行试：
-    // 行内已有任务与本任务「投影间距 < 130px」（≈20 字标签宽）即算占用，换下一行；行数不限。
+    // 行内已有任务与本任务「投影间距 < 130px」即算占用，换下一行；行数不限。
+    // 行占用判据（用户 2026-10-20 拍板）：投影间距 < 130px（≈20 字标签宽）即算占用。
+    // 备选方案 B（改成 18px 标记不重叠）暂不启用 —— 用户要求「先只试 A」。
     const rowGapPx = 130.0;
     final ordered = [...tasks]..sort((a, b) {
         final c = a.startAt!.compareTo(b.startAt!);
@@ -587,7 +602,17 @@ class _DayLayout {
       final pid = t.parentId;
       final parentVisible = pid != null && originals.containsKey(pid);
       if (parentVisible) continue; // 子任务不参与行分配
-      rowsByTask[t.id] = rowOf(x1, x2);
+      if (frozenTaskId != null && t.id == frozenTaskId) {
+        // 冻结行：沿用拖动开始时的行，并把当前区间登记进那一行（保持占用判据一致）
+        final fr = frozenRow ?? 0;
+        while (rowSpans.length <= fr) {
+          rowSpans.add(<(double, double)>[]);
+        }
+        rowSpans[fr].add((math.min(x1, x2), math.max(x1, x2)));
+        rowsByTask[t.id] = fr;
+      } else {
+        rowsByTask[t.id] = rowOf(x1, x2);
+      }
     }
     for (final t in ordered) {
       final pid = t.parentId;
