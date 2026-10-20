@@ -66,7 +66,8 @@ Future<void> main() async {
 
   try {
     final prefs = await SharedPreferences.getInstance();
-    themeModeNotifier.value = themeModeFromString(prefs.getString('theme_mode'));
+    themeModeNotifier.value =
+        themeModeFromString(prefs.getString('theme_mode'));
   } catch (e) {
     debugPrint('主题设置读取失败: $e');
   }
@@ -74,7 +75,8 @@ Future<void> main() async {
   runApp(const MsgRepoApp());
 }
 
-Future<void> _appendDebugError(String kind, String message, StackTrace? stack) async {
+Future<void> _appendDebugError(
+    String kind, String message, StackTrace? stack) async {
   try {
     final dir = await getApplicationDocumentsDirectory();
     final f = File('${dir.path}/debug_errors.log');
@@ -82,7 +84,9 @@ Future<void> _appendDebugError(String kind, String message, StackTrace? stack) a
       '\n=== ${DateTime.now().toIso8601String()} [$kind] ===\n$message\n$stack\n',
       mode: FileMode.append,
     );
-  } catch (e, st) { AppLog.instance.warn('main.log-file', e, st); }
+  } catch (e, st) {
+    AppLog.instance.warn('main.log-file', e, st);
+  }
 }
 
 /// SnackBar 主题（v2.6）：深色模式不再用 M3 默认的浅反色底——
@@ -98,6 +102,22 @@ SnackBarThemeData snackBarThemeFor(ColorScheme cs) {
   );
 }
 
+// 主题只算一次（O10）：`ColorScheme.fromSeed` 每次构建都跑一遍 HCT 换算，
+// 切换深浅色时它被重复执行两遍，是主题切换卡顿的固定开销之一。
+final ColorScheme _lightScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
+final ColorScheme _darkScheme =
+    ColorScheme.fromSeed(seedColor: Colors.indigo, brightness: Brightness.dark);
+final ThemeData _lightTheme = ThemeData(
+  useMaterial3: true,
+  colorScheme: _lightScheme,
+  snackBarTheme: snackBarThemeFor(_lightScheme),
+);
+final ThemeData _darkTheme = ThemeData(
+  useMaterial3: true,
+  colorScheme: _darkScheme,
+  snackBarTheme: snackBarThemeFor(_darkScheme),
+);
+
 class MsgRepoApp extends StatelessWidget {
   const MsgRepoApp({super.key});
 
@@ -106,23 +126,16 @@ class MsgRepoApp extends StatelessWidget {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: themeModeNotifier,
       builder: (context, mode, _) {
-        final lightScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
-        final darkScheme = ColorScheme.fromSeed(
-            seedColor: Colors.indigo, brightness: Brightness.dark);
         return MaterialApp(
           title: 'MsgRepo',
           debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            useMaterial3: true,
-            colorScheme: lightScheme,
-            snackBarTheme: snackBarThemeFor(lightScheme),
-          ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            colorScheme: darkScheme,
-            snackBarTheme: snackBarThemeFor(darkScheme),
-          ),
+          theme: _lightTheme,
+          darkTheme: _darkTheme,
           themeMode: mode,
+          // O10：过渡时长从默认 200ms 收到 160ms。主题切换期间整棵树逐帧重建，
+          // 缩短时长能减少「卡一下」的总帧数，观感靠曲线保住平滑。
+          themeAnimationDuration: const Duration(milliseconds: 160),
+          themeAnimationCurve: Curves.easeInOut,
           home: const HomeShell(),
         );
       },
@@ -145,7 +158,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     AppUiState.instance.setTab(_index);
     // 冷启动时可能已在后台（如被通知拉起），用真实生命周期初始化
     final lc = WidgetsBinding.instance.lifecycleState;
-    AppUiState.instance.setForeground(lc == null || lc == AppLifecycleState.resumed);
+    AppUiState.instance
+        .setForeground(lc == null || lc == AppLifecycleState.resumed);
   }
 
   @override
@@ -163,6 +177,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         state == AppLifecycleState.detached;
     AppUiState.instance.setForeground(!background);
   }
+
   int _index = 0;
 
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
@@ -188,7 +203,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             animation: AiProcessingService.instance,
             builder: (context, _) => _buildAiBanner(),
           ),
-          Expanded(child: IndexedStack(index: _index, children: _pages)),
+          // O10：RepaintBoundary 把页面栈的重绘与横幅/导航栏隔开，
+          // 主题过渡时不必带着整屏一起重绘。
+          Expanded(
+            child: RepaintBoundary(
+              child: IndexedStack(index: _index, children: _pages),
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: AnimatedBuilder(
@@ -244,10 +265,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(text,
-                    style: TextStyle(fontSize: 12, color: cs.onPrimaryContainer)),
+                    style:
+                        TextStyle(fontSize: 12, color: cs.onPrimaryContainer)),
               ),
-              Icon(Icons.chevron_right,
-                  size: 16, color: cs.onPrimaryContainer),
+              Icon(Icons.chevron_right, size: 16, color: cs.onPrimaryContainer),
             ],
           ),
         ),
