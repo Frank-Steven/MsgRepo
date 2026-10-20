@@ -574,7 +574,8 @@ class _YearlyLayout {
   static const rowH = labelH + markerH;
 
   /// R01 行内占用判据：投影间距 < 130px（≈20 字标签宽）即算占用。
-  static const _rowGapPx = 130.0;
+  /// 方案 B：行占用按「标记不重叠」判定（原 130px ≈ 20 字标签宽，最小缩放下相当于数小时）。
+static const _rowGapPx = 18.0;
 
   /// 同一条标签线上两个标签之间的最小间隙。
   static const _labelGapPx = 6.0;
