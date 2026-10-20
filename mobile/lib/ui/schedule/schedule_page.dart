@@ -375,6 +375,36 @@ class SchedulePageState extends State<SchedulePage> {
     _ensureRange(startMs, endMs);
   }
 
+  /// 兜底窗口（B01，2026-10-20）：各视图的可视范围是首帧 post-frame 才上报的，
+  /// 在那之前 `_visStartMs/_visEndMs` 为 null，`_bottomTasks` 直接返回空数组 ——
+  /// 表现就是「刚进年度视图，底部显示任务 0，图上明明有任务」。
+  /// 这里按当前粒度与锚点推算一个合理的默认窗口，视图上报后再被真实值覆盖。
+  String _windowSeedKey = '';
+
+  void _maybeSeedWindow() {
+    final key = '$_granularity|${_anchor.year}-${_anchor.month}-${_anchor.day}';
+    if (_visStartMs != null && _windowSeedKey == key) return;
+    _windowSeedKey = key;
+    final a = _anchor;
+    late DateTime s, e;
+    switch (_granularity) {
+      case 0: // 年度视图：±20 年（与标题区间一致）
+        s = DateTime(a.year - 20);
+        e = DateTime(a.year + 21);
+      case 1: // 年视图
+        s = DateTime(a.year);
+        e = DateTime(a.year + 1);
+      case 2: // 月视图
+        s = DateTime(a.year, a.month);
+        e = DateTime(a.year, a.month + 1);
+      default: // 日视图
+        s = DateTime(a.year, a.month, a.day);
+        e = DateTime(a.year, a.month, a.day + 1);
+    }
+    _visStartMs = s.millisecondsSinceEpoch;
+    _visEndMs = e.millisecondsSinceEpoch;
+  }
+
   /// 标题栏箭头平移：年度 ±20 年、年 ±1 年、月 ±1 月、日 ±1 天。
   void _shiftPeriod(int delta) {
     final target = switch (_granularity) {
@@ -632,6 +662,9 @@ class SchedulePageState extends State<SchedulePage> {
 
   @override
   Widget build(BuildContext context) {
+    // B01：视图还没上报可视窗口时，先用推算窗口，避免底部「任务 0」闪一下
+    _maybeSeedWindow();
+
     return Scaffold(
       appBar: AppBar(
         title: Row(children: [
