@@ -44,6 +44,15 @@ class DayView extends StatefulWidget {
   /// 手势交给它，避免快速拖动时被图表的平移/缩放手势抢走。
   final double panExcludeTop;
 
+  /// F13②-方案1：顶部抓手带的 y 起点与高度（逻辑像素）。
+  ///
+  /// 这一带 [handleBandTop, handleBandTop + handleBandHeight) 会从图表的手势区
+  /// **整体切出去**（手势层只覆盖带以下），带内只保留点击语义 —— 这样叠在上面的
+  /// 外层抓手能拿到指针，不会被 [ScaleGestureRecognizer] 抢走。
+  /// handleBandHeight <= 0 时退回「整块画布一个手势区」的旧行为。
+  final double handleBandTop;
+  final double handleBandHeight;
+
   /// 可视时间窗变化（父级按窗口加载任务）。
   final void Function(int startMs, int endMs) onVisibleWindowChanged;
 
@@ -62,6 +71,8 @@ class DayView extends StatefulWidget {
     this.onNameBandHeight,
     this.handleSlotH = 0,
     this.panExcludeTop = 0,
+    this.handleBandTop = 0,
+    this.handleBandHeight = 0,
   });
 
   @override
@@ -287,15 +298,17 @@ class DayViewState extends State<DayView>
     return list;
   }
 
-  void _onScaleStart(ScaleStartDetails d, _DayLayout layout) {
+  /// [localFocal] 是**画布本地坐标**（不是手势层本地坐标）：
+  /// F13②-方案1 里手势层被下移到抓手带以下，事件坐标已在调用处换算回画布。
+  void _onScaleStart(Offset localFocal, _DayLayout layout) {
     // 落在顶部拖动条那一带 → 本次手势不处理平移（交给外层拖动条）
     _ignorePan = widget.panExcludeTop > 0 &&
-        d.localFocalPoint.dy <= widget.panExcludeTop;
+        localFocal.dy <= widget.panExcludeTop;
     if (_ignorePan) return;
     _cancelFling();
-    final hit = layout.hitTest(d.localFocalPoint);
-    _startFocalX = d.localFocalPoint.dx;
-    _startFocalY = d.localFocalPoint.dy;
+    final hit = layout.hitTest(localFocal);
+    _startFocalX = localFocal.dx;
+    _startFocalY = localFocal.dy;
     _startPpm = layout.ppm;
     _startScrollMin = _scrollMin;
     _startContentY = _contentY;
@@ -315,10 +328,12 @@ class DayViewState extends State<DayView>
     }
   }
 
-  void _onScaleUpdate(ScaleUpdateDetails d, _DayLayout layout) {
+  /// [localFocal]/[scale] 由调用处从手势详情换算来（见 [_onScaleStart] 的说明）。
+  void _onScaleUpdate(
+      Offset localFocal, double scale, _DayLayout layout) {
     if (_ignorePan) return;
     if (_dragOriginal != null) {
-      final raw = (d.localFocalPoint.dx - _startFocalX) / layout.ppm;
+      final raw = (localFocal.dx - _startFocalX) / layout.ppm;
       // U15：最小刻度 1 分钟（原先 5 分钟，小幅拖动会「不动」而显得卡顿）
       final snapped = snapToMinutes(raw);
       setState(() {
@@ -337,16 +352,16 @@ class DayViewState extends State<DayView>
     }
     // 平移 + 无级缩放，以双指焦点对应的时间点为锚（焦点下时间不动）
     final minPpm = layout.viewW / 1440;
-    final newPpm = (_startPpm * d.scale).clamp(minPpm, _maxPpm);
+    final newPpm = (_startPpm * scale).clamp(minPpm, _maxPpm);
     final focalMin = _startScrollMin + _startFocalX / _startPpm;
     setState(() {
       _ppm = newPpm;
       _scrollMin =
-          (focalMin - d.localFocalPoint.dx / newPpm).clamp(0.0, _maxMin);
+          (focalMin - localFocal.dx / newPpm).clamp(0.0, _maxMin);
       // F13②：纵向拖动平移行区（行数超出可视高度时可看后面的行）；
       // 具体夹紧在 _DayLayout.build 里按行总高做，这里只记请求值。
       // 无纵向惯性（松手即停），横向 fling 不受影响。
-      _contentY = _startContentY - (d.localFocalPoint.dy - _startFocalY);
+      _contentY = _startContentY - (localFocal.dy - _startFocalY);
     });
     _reportOnUnitChange(); // v2.6.1：拖动/缩放中标题实时跟随
   }
@@ -382,8 +397,8 @@ class DayViewState extends State<DayView>
     }
   }
 
-  void _onTapUp(TapUpDetails d, _DayLayout layout) {
-    final hit = layout.hitTest(d.localPosition);
+  void _onTapUp(Offset local, _DayLayout layout) {
+    final hit = layout.hitTest(local);
     if (hit != null) {
       final original = layout.originals[hit.taskId];
       if (original != null) widget.onTaskSelected(original);
@@ -392,10 +407,10 @@ class DayViewState extends State<DayView>
     }
   }
 
-  void _onLongPress(LongPressStartDetails d, _DayLayout layout) {
-    if (layout.hitTest(d.localPosition) != null) return;
+  void _onLongPress(Offset local, _DayLayout layout) {
+    if (layout.hitTest(local) != null) return;
     // U15：长按空白处新建任务也按 1 分钟量化
-    final min = snapToMinutes(_scrollMin + d.localPosition.dx / layout.ppm);
+    final min = snapToMinutes(_scrollMin + local.dx / layout.ppm);
     widget.onBlankLongPress((_epochMs + min * 60000).round());
   }
 
@@ -446,25 +461,22 @@ class DayViewState extends State<DayView>
           selectedTaskId: widget.selectedTaskId,
           pulseMin: _pulseMin,
           contentY: _contentY,
-        handleSlotH: widget.handleSlotH,
+          handleSlotH: widget.handleSlotH,
         );
         // F13②：layout 内已按「行总高 - 可视行高」夹紧，回写避免越拖越远
         _contentY = layout.contentY;
-          // 名称带上报（只在值变化时回调，避免每帧都打）
-          if (_lastNameBandH != layout.namesH) {
-            _lastNameBandH = layout.namesH;
-            final cb = widget.onNameBandHeight;
-            if (cb != null) {
-              WidgetsBinding.instance.addPostFrameCallback((_) => cb(layout.namesH));
-            }
+        // 名称带上报（只在值变化时回调，避免每帧都打）
+        if (_lastNameBandH != layout.namesH) {
+          _lastNameBandH = layout.namesH;
+          final cb = widget.onNameBandHeight;
+          if (cb != null) {
+            WidgetsBinding.instance
+                .addPostFrameCallback((_) => cb(layout.namesH));
           }
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onScaleStart: (d) => _onScaleStart(d, layout),
-          onScaleUpdate: (d) => _onScaleUpdate(d, layout),
-          onScaleEnd: _onScaleEnd,
-          onTapUp: (d) => _onTapUp(d, layout),
-          onLongPressStart: (d) => _onLongPress(d, layout),
+        }
+
+        // 画布只画不接手势（F13②-方案1）
+        final canvas = IgnorePointer(
           child: ClipRect(
             child: CustomPaint(
               size: Size(constraints.maxWidth, constraints.maxHeight),
@@ -472,6 +484,78 @@ class DayViewState extends State<DayView>
             ),
           ),
         );
+
+        final bandH =
+            widget.handleBandHeight.isFinite ? widget.handleBandHeight : 0.0;
+        final bandTop =
+            (widget.handleBandTop.isFinite && widget.handleBandTop > 0)
+                ? widget.handleBandTop
+                : 0.0;
+        final bandBottom = math.min(bandTop + bandH, constraints.maxHeight);
+
+        // 没有抓手带（或带高顶到画布底）：整块画布一个手势区，保持旧行为
+        if (bandH <= 0 || bandBottom >= constraints.maxHeight) {
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onScaleStart: (d) => _onScaleStart(d.localFocalPoint, layout),
+            onScaleUpdate: (d) =>
+                _onScaleUpdate(d.localFocalPoint, d.scale, layout),
+            onScaleEnd: _onScaleEnd,
+            onTapUp: (d) => _onTapUp(d.localPosition, layout),
+            onLongPressStart: (d) => _onLongPress(d.localPosition, layout),
+            child: canvas,
+          );
+        }
+
+        // F13②-方案1：手势层拆成「带上 / 带下」两段，中间抓手带只留点击。
+        // 带宽内没有 ScaleGestureRecognizer，叠在上面的外层抓手（Listener 吃原始
+        // 指针）才拖得动；两段共用同一套回调，各自把自己层的本地坐标加回画布偏移
+        // （上段 +0，下段 +bandBottom，抓手带 +bandTop），命中/锚点才不会偏。
+        Offset shift(Offset local, double dy) => Offset(local.dx, local.dy + dy);
+        Widget gestures(double dyShift) => GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onScaleStart: (d) =>
+                  _onScaleStart(shift(d.localFocalPoint, dyShift), layout),
+              onScaleUpdate: (d) => _onScaleUpdate(
+                  shift(d.localFocalPoint, dyShift), d.scale, layout),
+              onScaleEnd: _onScaleEnd,
+              onTapUp: (d) =>
+                  _onTapUp(shift(d.localPosition, dyShift), layout),
+              onLongPressStart: (d) =>
+                  _onLongPress(shift(d.localPosition, dyShift), layout),
+            );
+        return Stack(children: [
+          Positioned.fill(child: canvas),
+          // 上段：45° 名称带 —— 保留完整手势（平移/缩放/长按/点选）
+          if (bandTop > 0)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: bandTop,
+              child: gestures(0),
+            ),
+          // 下段：日期带 + 行区 —— 同一套手势
+          Positioned(
+            top: bandBottom,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: gestures(bandBottom),
+          ),
+          // 中间抓手带：只有点击（选中/取消选中/点标签），拖动让给外层抓手。
+          // translucent 不吞同层兄弟的命中。
+          Positioned(
+            top: bandTop,
+            left: 0,
+            right: 0,
+            height: bandBottom - bandTop,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTapUp: (d) => _onTapUp(shift(d.localPosition, bandTop), layout),
+            ),
+          ),
+        ]);
       },
     );
   }

@@ -96,7 +96,7 @@ class SchedulePageState extends State<SchedulePage> {
   //  · 顶部手柄只改 `_chartH`；底部手柄只改 `_barH`；
   //  · 两者之和超出可视高度 → 整页纵向滚动；放得下时下方留白（不自动拉伸，避免耦合）。
   static const _barPrefsKey = 'schedule_bar_height';
-  static const _chartMinH = 200.0;
+  static const _chartMinH = 310.0; // 图表最小高度：标签带160+空槽32+刻度44+2行(68)≈304，取 310，避免被压到看不见行
   static const _barMinH = 120.0;
 
   /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
@@ -110,6 +110,7 @@ class SchedulePageState extends State<SchedulePage> {
   /// 两条手柄各自的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
   /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
   double? _dragLastYBar;
+  double? _dragLastYChart; // 顶部抓手（贴在名称带下沿）的按下指针 y
   double? _barDragStart; // 按下瞬间的任务栏高度（绝对映射用）
 
   @override
@@ -216,10 +217,34 @@ class SchedulePageState extends State<SchedulePage> {
         if (next != (_barH ?? barH)) setState(() => _barH = next);
       }
 
+      // F13②-方案1：顶部抓手贴在 DayView 预留的「名称带下沿」空槽里；
+      // DayView 已把这一带从图表手势区整体切出去，所以这里能拿到指针。
+      // 只有日视图有 45° 名称带，其它粒度不显示这条抓手。
+      final showChartHandle = _granularity == 3 && _nameBandH > 0;
+
       return Column(children: [
         SizedBox(
           height: chartH,
-            child: _ganttView(),
+          child: Stack(children: [
+            Positioned.fill(child: _ganttView()),
+            if (showChartHandle)
+              Positioned(
+                top: _nameBandH,
+                left: 0,
+                right: 0,
+                height: _handleH,
+                child: _handle(
+                  id: 'chart',
+                  startYRead: () => _dragLastYChart,
+                  startYWrite: (v) => _dragLastYChart = v,
+                  onDrag: dragBoundary,
+                  onEnd: () {
+                    _barDragStart = null;
+                    _saveHeights();
+                  },
+                ),
+              ),
+          ]),
         ),
         _handle(
           id: 'bar',
@@ -637,26 +662,31 @@ class SchedulePageState extends State<SchedulePage> {
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 3:
-          return DayView(
-            key: _dayKey,
-            tasks: tasks,
-            selectedTaskId: _selectedTask?.id,
-            onTaskSelected: _onTaskSelected,
-            onTaskMoved: _moveTask,
-            onBlankLongPress: (ms) => _createTask(
-              seedStartAt: ms,
-              seedKind: TaskKind.point,
-            ),
-            onVisibleWindowChanged: _onWindowChanged,
-            onCenterChanged: (c) => setState(() => _anchor = c),
-            onNameBandHeight: (h) {
-              if (!mounted) return;
-              if ((h - _nameBandH).abs() < 0.5) return;
-              setState(() => _nameBandH = h);
-            },
-            // 顶部拖动条那一带不参与图表平移（快速拖动也不会被平移手势抢走）
-            panExcludeTop: _nameBandH, // 顶部空槽仍不参与图表平移
-          );
+        return DayView(
+          key: _dayKey,
+          tasks: tasks,
+          selectedTaskId: _selectedTask?.id,
+          onTaskSelected: _onTaskSelected,
+          onTaskMoved: _moveTask,
+          onBlankLongPress: (ms) => _createTask(
+            seedStartAt: ms,
+            seedKind: TaskKind.point,
+          ),
+          onVisibleWindowChanged: _onWindowChanged,
+          onCenterChanged: (c) => setState(() => _anchor = c),
+          onNameBandHeight: (h) {
+            if (!mounted) return;
+            if ((h - _nameBandH).abs() < 0.5) return;
+            setState(() => _nameBandH = h);
+          },
+          // F13②-方案1：名称带与日期带之间为顶部抓手预留空槽，
+          // 并把这一带从图表手势区切出去（否则拖动被 ScaleGestureRecognizer 抢走）。
+          handleSlotH: _handleH,
+          handleBandTop: _nameBandH,
+          handleBandHeight: _handleH,
+          // 不传 panExcludeTop：名称带现在要能拖动/捏合，
+          // 抓手带的指针隔离由 handleBandTop/Height 那套结构保证。
+        );
       default:
         return YearView(
           key: _yearKey,
