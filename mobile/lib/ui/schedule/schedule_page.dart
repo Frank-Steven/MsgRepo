@@ -100,10 +100,10 @@ class SchedulePageState extends State<SchedulePage> {
   static const _splitRatioMax = 0.85;
 
   /// 分割线手柄高度（含细分隔线 + 中间短横条）。
-  static const _splitHandleH = 14.0;
+  static const _splitHandleH = 22.0; // 拖动条高度（加大热区，2026-10-21 用户反馈难点中）
 
   /// 顶部拖动区高度：图表最上方的日期/刻度带（用户 2026-10-21 说的「黄色区域」）。
-  static const _topDragBandH = 56.0;
+  static const _topDragBandH = 26.0; // 顶部可见拖动条高度
 
   double _splitRatio = 0.6;
 
@@ -141,6 +141,37 @@ class SchedulePageState extends State<SchedulePage> {
   /// 拖动这条线 = 调整上方图表 / 下方任务列表的高度）。
   /// 上下拖动改 [_splitRatio]；只吃竖直手势，与图表区内部的横向
   /// 平移/缩放不冲突。
+  /// 顶部可见拖动条：向下拖 = 日程表变高（调整的是日程表，不是任务栏）。
+  /// 2026-10-21 用户反馈「不知道按哪里才能拖」，所以做成有底色、有图标、有文案的显式手柄。
+  Widget _topGrip(double avail) {
+    final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (d) {
+        if (avail <= 0) return;
+        final next = (_splitRatio + d.delta.dy / avail)
+            .clamp(_splitRatioMin, _splitRatioMax);
+        if (next != _splitRatio) setState(() => _splitRatio = next.toDouble());
+      },
+      onVerticalDragEnd: (_) => _saveSplitRatio(),
+      onVerticalDragCancel: _saveSplitRatio,
+      child: Container(
+        height: _topDragBandH,
+        width: double.infinity,
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.drag_handle, size: 14, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 4),
+            Text('拖动这里调整日程表高度',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _splitHandle(double avail) {
     final scheme = Theme.of(context).colorScheme;
     return GestureDetector(
@@ -178,6 +209,12 @@ class SchedulePageState extends State<SchedulePage> {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
+              // 底色让「这里可以拖」更明显（用户 2026-10-21）
+              Positioned.fill(
+                child: ColoredBox(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+                ),
+              ),
           ],
         ),
       ),
@@ -203,29 +240,12 @@ class SchedulePageState extends State<SchedulePage> {
       final ganttH = avail * _splitRatio;
       final bottomH = avail - ganttH;
       return Column(children: [
-          // 图表区：顶部 56px 的日期/刻度带也是拖动手柄（向下拖 = 日程表变高，用户 2026-10-21 选 B）。
+          // 图表区：顶部一条**可见的拖动条**（用户 2026-10-21：拖它调整日程表高度，且要有 UI 提示）。
           SizedBox(
             height: ganttH,
-            child: Stack(children: [
-              Positioned.fill(child: _ganttView()),
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: _topDragBandH,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onVerticalDragUpdate: (d) {
-                    if (avail <= 0) return;
-                    setState(() {
-                      _splitRatio = (_splitRatio + d.delta.dy / avail)
-                          .clamp(_splitRatioMin, _splitRatioMax);
-                    });
-                  },
-                  onVerticalDragEnd: (_) => _saveSplitRatio(),
-                  onVerticalDragCancel: _saveSplitRatio,
-                ),
-              ),
+            child: Column(children: [
+              _topGrip(avail),
+              Expanded(child: _ganttView()),
             ]),
           ),
           _splitHandle(avail),
