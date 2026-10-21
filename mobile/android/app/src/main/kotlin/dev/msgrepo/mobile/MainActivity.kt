@@ -19,6 +19,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
 
 class MainActivity : FlutterActivity() {
 
@@ -63,7 +66,23 @@ class MainActivity : FlutterActivity() {
                     }
 
                     // Dart 侧用 dart:io 直接读写该目录（同一应用沙箱）
-                    "getQueueDir" ->
+                    // F09：用系统浏览器/其它应用打开链接（不引入 url_launcher 依赖）
+          "openUrl" -> {
+            val url = call.argument<String>("url")
+            result.success(openUrl(url))
+          }
+          // F10：把附件导出到系统「下载」目录（MediaStore，无需 FileProvider），返回可见路径
+          "exportToDownloads" -> {
+            val path = call.argument<String>("path")
+            val name = call.argument<String>("name") ?: "attachment"
+            val mime = call.argument<String>("mime") ?: "application/octet-stream"
+            try {
+              result.success(exportToDownloads(path, name, mime))
+            } catch (e: Exception) {
+              result.error("export_failed", e.message, null)
+            }
+          }
+          "getQueueDir" ->
                         result.success(File(filesDir, "queue").absolutePath)
 
                     // 已见应用列表（NotificationCaptureService 维护），返回文件内容
@@ -207,7 +226,41 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    private fun installedAppsJson(): String {
+    /// F09：打开链接。成功返回 true；没有可用应用返回 false（不抛异常给 Dart）。
+  private fun openUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    return try {
+      val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      startActivity(intent)
+      true
+    } catch (e: Exception) {
+      false
+    }
+  }
+
+  /// F10：把应用私有目录里的附件导出到系统「下载」目录。
+  /// 走 MediaStore（Android 10+ 不需要存储权限），返回「下载/<name>」这样的可见描述。
+  private fun exportToDownloads(path: String?, displayName: String, mime: String): String {
+    if (path.isNullOrBlank()) throw IllegalArgumentException("path 为空")
+    val src = java.io.File(path)
+    if (!src.exists()) throw IllegalStateException("文件不存在")
+    val values = ContentValues().apply {
+      put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+      put(MediaStore.Downloads.MIME_TYPE, mime)
+      put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+    }
+    val resolver = contentResolver
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+      ?: throw IllegalStateException("无法创建下载条目")
+    resolver.openOutputStream(uri)?.use { out ->
+      src.inputStream().use { input -> input.copyTo(out) }
+    } ?: throw IllegalStateException("无法写入下载目录")
+    return "下载/$displayName"
+  }
+
+  private fun installedAppsJson(): String {
         val pm = packageManager
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val seen = HashSet<String>()

@@ -93,7 +93,7 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 6,
+      version: 7,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -119,6 +119,10 @@ class AppDatabase {
       // N1：消息 ↔ 任务从 1:1 升级为多对多（一条消息可产多个任务，多条消息可指向同一任务）
       await createMessageTaskLinksTable(db);
       await migrateLinksToV6(db);
+    }
+    if (oldVersion < 7) {
+      // v7（2026-10-21，F07）：记录用户手动编辑正文/附件的时间，NULL = 采集原文。
+      await db.execute('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
     }
   }
 
@@ -223,6 +227,7 @@ class AppDatabase {
         status TEXT NOT NULL DEFAULT 'pending',
         priority TEXT NOT NULL DEFAULT 'none',
         linked_task_id TEXT,
+        edited_at INTEGER,
         created_at INTEGER NOT NULL
       )
     ''');
@@ -542,6 +547,45 @@ class AppDatabase {
     final placeholders = List.filled(ids.length, '?').join(',');
     await db.update('messages', {'priority': priority},
         where: 'id IN ($placeholders)', whereArgs: ids);
+  }
+
+  /// 用户手动编辑消息正文（F07）：同时打上 edited_at，便于区分采集原文。
+  Future<void> updateMessageBody(String id, String body) async {
+    final db = await database;
+    await db.update(
+      'messages',
+      {'body': body, 'edited_at': DateTime.now().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// 用户增删消息附件（F07）：整份 attachments JSON 覆盖写，同样打 edited_at。
+  Future<void> updateMessageAttachments(
+      String id, List<Map<String, dynamic>> attachments) async {
+    final db = await database;
+    await db.update(
+      'messages',
+      {
+        'attachments': jsonEncode(attachments),
+        'edited_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// 某条消息关联的任务（F08）：走 links 表，未定时的排在后面。
+  Future<List<Task>> tasksForMessage(String messageId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT t.* FROM tasks t '
+      'INNER JOIN message_task_links l ON l.task_id = t.id '
+      'WHERE l.message_id = ? '
+      'ORDER BY t.start_at IS NULL, t.start_at ASC',
+      [messageId],
+    );
+    return rows.map(Task.fromRow).toList();
   }
 
   Future<void> setMessageLinkedTask(String messageId, String? taskId) async {
