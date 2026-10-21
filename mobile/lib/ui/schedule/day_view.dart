@@ -660,17 +660,13 @@ class _DayLayout {
       ));
     }
 
-    // 标签在顶部名称带、45° 斜排，用竖虚线连到节点（起始点）。
-    // 因此可见性判据 = 从节点往上直到名称带的**整条垂直通道**都没有别的节点（否则引线会穿过它们）。
-    bool corridorFree(int rowIdx, double left, double right) {
-      for (var r = 0; r < rowIdx; r++) {
-        for (final iv in rowSpans[r]) {
-          if (left - labelGapPx < iv.$2 && iv.$1 < right + labelGapPx) return false;
-        }
-      }
-      return true;
-    }
-
+    // 标签画在顶部名称带、45° 斜排，用竖虚线连到节点（起始点）。
+    //
+    // 2026-10-21 用户反馈修正：原先除「同行标签互不重叠」外，还要求**节点上方整条通道**没有别的
+    // 节点才显示标签。加了纵向平移（F13②）后这条规则失效 —— 第 2 行及以下的通道里总有第 1 行的节点，
+    // 于是它们永远没有标签；而第 1 行被滚出视口后，屏幕上就一条标签都不剩。
+    // 现在改为：**只要该任务的节点当前在可视区内**，就给它画标签（横向仍先到先得、互不重叠）。
+    // 这样上下滚动时，标签跟着「哪些行在屏幕上」自然出现/消失。
     final labelSpans = <(double, double)>[];
     bool labelFree(double left, double right) {
       for (final iv in labelSpans) {
@@ -685,16 +681,16 @@ class _DayLayout {
       if (title.isEmpty) continue;
       final w = measure(title);
       if (w < 6) continue;
+      // 节点不在可视区 → 不画标签（滚动出屏幕的行不该在顶部留名字）
+      if (!visibleRow(it.y)) continue;
       double? anchorX;
       if (it.isPoint) {
-        if (corridorFree(it.rowIdx, it.x1, it.x1 + w) && labelFree(it.x1, it.x1 + w)) {
-          anchorX = it.x1; // 点任务：连在自己的点上
-        }
+        if (labelFree(it.x1, it.x1 + w)) anchorX = it.x1; // 点任务：连在自己的点上
       } else {
-        // 线段任务：挂在「最左侧符合条件」的点上方（Frank 原文）
+        // 线段任务：挂在「最左侧放得下」的点上方（Frank 原文）
         var probe = it.x1;
         while (probe <= it.x2) {
-          if (corridorFree(it.rowIdx, probe, probe + w) && labelFree(probe, probe + w)) {
+          if (labelFree(probe, probe + w)) {
             anchorX = probe;
             break;
           }
