@@ -8,15 +8,23 @@
 ///
 /// 2026-10-20 性能：正则提成顶层常量。原实现每次调用都现编译，
 /// 消息列表滚动时每行标题 + 来源行各编译一次。
-final RegExp _foldMarkerRe = RegExp(r'[（(]\s*\d+\s*条新消息\s*[）)]\s*$');
+final RegExp _foldMarkerRe = RegExp(
+  r'[（(]\s*\d{1,4}\s*\+?\s*条(?:以上)?\s*(?:新消息|未读消息|未读)\s*[）)]\s*$',
+);
 
 String stripFoldMarkers(String title) {
-  final trimmed = title.trim();
-  if (trimmed.isEmpty) return trimmed;
-  if (!_foldMarkerRe.hasMatch(trimmed)) return trimmed;
-  final out = trimmed.replaceFirst(_foldMarkerRe, '').trim();
-  // 整条标题就只有这个标记时保留原文，避免展示成空
-  return out.isEmpty ? trimmed : out;
+  var v = title.trim();
+  if (v.isEmpty) return v;
+  // 2026-10-21 D02：QQ 常见「(100条以上新消息)」「(99+条新消息)」，旧正则只认「N条新消息」，
+  // 导致群名一直带着计数；这里放宽写法并连续剥离（最多 3 层）。
+  for (var i = 0; i < 3; i++) {
+    if (!_foldMarkerRe.hasMatch(v)) break;
+    final out = v.replaceFirst(_foldMarkerRe, '').trim();
+    // 整条标题就只有这个标记时保留原文，避免展示成空
+    if (out.isEmpty) return title.trim();
+    v = out;
+  }
+  return v;
 }
 
 /// 是否「聊天类」来源：只有聊天类才按会话（群名/联系人）做二级分组，
