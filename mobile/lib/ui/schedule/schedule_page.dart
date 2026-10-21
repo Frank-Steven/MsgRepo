@@ -104,14 +104,15 @@ class SchedulePageState extends State<SchedulePage> {
 
   double? _barH; // 任务栏高度；null = 用默认比例
 
-  /// DayView 上报的 45° 标签带高度：顶部手柄贴在它下沿。
-  double _nameBandH = 0;
-
-  /// 两条手柄各自的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
+  /// 底部手柄的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
   /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
+  /// 顶部抓手的起始 y 现在由 day_view 自己持有（方案 1b：图表自绘自收手势）。
   double? _dragLastYBar;
-  double? _dragLastYChart; // 顶部抓手（贴在名称带下沿）的按下指针 y
   double? _barDragStart; // 按下瞬间的任务栏高度（绝对映射用）
+
+  /// 分栏区域的视口高度（_splitBody 布局时记录）：抓手拖动回调靠它换算边界，
+  /// 这样顶部抓手（在 day_view 内部）也能共用同一套逻辑，不必互传坐标。
+  double _splitVp = 0;
 
   @override
   void initState() {
@@ -188,6 +189,30 @@ class SchedulePageState extends State<SchedulePage> {
     );
   }
 
+  /// 视口高度 → 任务栏允许的最大高度（图表至少保留 _chartMinH）。
+  double _barMaxAt(double vp) {
+    final avail = vp - _handleH;
+    return (avail - _chartMinH).clamp(_barMinH, avail);
+  }
+
+  /// 视口高度 → 当前任务栏高度（未拖过时按 40% 默认比例）。
+  double _barHAt(double vp) {
+    final avail = vp - _handleH;
+    return (_barH ?? avail * 0.40).clamp(_barMinH, _barMaxAt(vp));
+  }
+
+  /// 抓手拖动（顶部/底部共用）：绝对映射 —— 按下瞬间记起始高度，
+  /// 之后一律用「当前指针 y − 按下指针 y」的累计位移换算，跟手不滞后。
+  void _dragBoundary(double dyFromPress) {
+    final vp = _splitVp;
+    if (!vp.isFinite || vp <= 0) return;
+    final barMax = _barMaxAt(vp);
+    final barH = _barHAt(vp);
+    final start = _barDragStart ??= barH;
+    final next = (start - dyFromPress).clamp(_barMinH, barMax);
+    if (next != (_barH ?? barH)) setState(() => _barH = next);
+  }
+
   /// 布局：**永远铺满屏幕**，只有「任务栏高度」一个自由度。
   ///
   /// 2026-10-21 用户反馈：拖红色（图表）→ 蓝色（任务栏）被拖着走、拖绿色（任务栏标题）→ 整页滚动、
@@ -195,7 +220,7 @@ class SchedulePageState extends State<SchedulePage> {
   /// 设高（会溢出/留白，手势全被页面滚动吃掉）。
   ///
   /// 现在改成标准分栏：`图表 = 视口 - 手柄 - 任务栏` 自动铺满，**不再有页面滚动**；
-  /// 两个手柄（顶部那条 / 图表与任务栏之间那条）都是同一个边界的抓点：
+  /// 两个抓手（顶部那条在图表内、图表与任务栏之间那条在页面里）都是同一个边界的抓点：
   /// 往下拖 = 图表变高、任务栏变矮；往上拖反之。
   Widget _splitBody(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
@@ -207,50 +232,23 @@ class SchedulePageState extends State<SchedulePage> {
         ]);
       }
       final avail = vp - _handleH;
-      final barMax = (avail - _chartMinH).clamp(_barMinH, avail);
-      final barH = (_barH ?? avail * 0.40).clamp(_barMinH, barMax);
+      final barH = _barHAt(vp);
       final chartH = (avail - barH).clamp(_chartMinH, avail);
+      // 记录视口高度：底部抓手 + day_view 内部那条抓手都靠它换算边界
+      _splitVp = vp;
 
-      void dragBoundary(double dyFromPress) {
-        final start = _barDragStart ??= barH;
-        final next = (start - dyFromPress).clamp(_barMinH, barMax);
-        if (next != (_barH ?? barH)) setState(() => _barH = next);
-      }
-
-      // F13②-方案1：顶部抓手贴在 DayView 预留的「名称带下沿」空槽里；
-      // DayView 已把这一带从图表手势区整体切出去，所以这里能拿到指针。
-      // 只有日视图有 45° 名称带，其它粒度不显示这条抓手。
-      final showChartHandle = _granularity == 3 && _nameBandH > 0;
-
+      // F13②-方案1b：顶部抓手由 DayView 自己画、自己收指针（位置与图表几何
+      // 天然对齐），页面侧不再叠 Positioned 抓手，否则两层会抢指针。
       return Column(children: [
         SizedBox(
           height: chartH,
-          child: Stack(children: [
-            Positioned.fill(child: _ganttView()),
-            if (showChartHandle)
-              Positioned(
-                top: _nameBandH,
-                left: 0,
-                right: 0,
-                height: _handleH,
-                child: _handle(
-                  id: 'chart',
-                  startYRead: () => _dragLastYChart,
-                  startYWrite: (v) => _dragLastYChart = v,
-                  onDrag: dragBoundary,
-                  onEnd: () {
-                    _barDragStart = null;
-                    _saveHeights();
-                  },
-                ),
-              ),
-          ]),
+          child: _ganttView(),
         ),
         _handle(
           id: 'bar',
           startYRead: () => _dragLastYBar,
           startYWrite: (v) => _dragLastYBar = v,
-          onDrag: dragBoundary,
+          onDrag: _dragBoundary,
           onEnd: () {
             _barDragStart = null;
             _saveHeights();
@@ -674,18 +672,15 @@ class SchedulePageState extends State<SchedulePage> {
           ),
           onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
-          onNameBandHeight: (h) {
-            if (!mounted) return;
-            if ((h - _nameBandH).abs() < 0.5) return;
-            setState(() => _nameBandH = h);
-          },
-          // F13②-方案1：名称带与日期带之间为顶部抓手预留空槽，
-          // 并把这一带从图表手势区切出去（否则拖动被 ScaleGestureRecognizer 抢走）。
+          // F13②-方案1b：名称带与日期带之间预留抓手空槽，抓手由图表自绘自收手势；
+          // 页面只拿「累计位移」回调去改分栏高度（与底部抓手同一套 dragBoundary）。
           handleSlotH: _handleH,
-          handleBandTop: _nameBandH,
-          handleBandHeight: _handleH,
-          // 不传 panExcludeTop：名称带现在要能拖动/捏合，
-          // 抓手带的指针隔离由 handleBandTop/Height 那套结构保证。
+          showHandle: _granularity == 3,
+          onHandleDrag: _dragBoundary,
+          onHandleDragEnd: () {
+            _barDragStart = null;
+            _saveHeights();
+          },
         );
       default:
         return YearView(

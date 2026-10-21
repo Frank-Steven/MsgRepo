@@ -34,24 +34,24 @@ class DayView extends StatefulWidget {
   /// 长按空白：参数为该时刻的时间戳（5 分钟吸附）。
   final ValueChanged<int> onBlankLongPress;
 
-  /// 把「45° 标签名称带」的当前高度上报给外层（F13②：拖动条要精确夹在标签带与日期带之间）。
-  final ValueChanged<double>? onNameBandHeight;
-
   /// 标签带与日期带之间为拖动条预留的空槽高度（避免抓手压住文字/日期）。
+  ///
+  /// F13②-方案1b：这个空槽就是「抓手带」，**由图表自己绘制、自己收指针**，
+  /// 页面只拿回调 —— 抓手位置完全由 [namesH] + 本值决定，不再有页面侧坐标误差。
   final double handleSlotH;
 
-  /// 顶部这段（逻辑像素）不参与图表平移：外层在那里放了「调整日程表高度」的拖动条，
-  /// 手势交给它，避免快速拖动时被图表的平移/缩放手势抢走。
+  /// 顶部这段（逻辑像素）不参与图表平移（历史开关，现由抓手带结构保证，保留无害）。
   final double panExcludeTop;
 
-  /// F13②-方案1：顶部抓手带的 y 起点与高度（逻辑像素）。
-  ///
-  /// 这一带 [handleBandTop, handleBandTop + handleBandHeight) 会从图表的手势区
-  /// **整体切出去**（手势层只覆盖带以下），带内只保留点击语义 —— 这样叠在上面的
-  /// 外层抓手能拿到指针，不会被 [ScaleGestureRecognizer] 抢走。
-  /// handleBandHeight <= 0 时退回「整块画布一个手势区」的旧行为。
-  final double handleBandTop;
-  final double handleBandHeight;
+  /// F13②-方案1b：是否画这条顶部抓手（页面按粒度传；非日视图没有名称带）。
+  final bool showHandle;
+
+  /// 抓手拖动回调：**累计位移 dy**（从按下那一刻算起，逻辑像素，向下为正）。
+  /// 直接用原始指针相减，图表与页面之间不换算任何坐标。
+  final ValueChanged<double>? onHandleDrag;
+
+  /// 抓手松手回调（页面在这里落盘分栏高度）。
+  final VoidCallback? onHandleDragEnd;
 
   /// 可视时间窗变化（父级按窗口加载任务）。
   final void Function(int startMs, int endMs) onVisibleWindowChanged;
@@ -68,11 +68,11 @@ class DayView extends StatefulWidget {
     required this.onBlankLongPress,
     required this.onVisibleWindowChanged,
     required this.onCenterChanged,
-    this.onNameBandHeight,
     this.handleSlotH = 0,
     this.panExcludeTop = 0,
-    this.handleBandTop = 0,
-    this.handleBandHeight = 0,
+    this.showHandle = false,
+    this.onHandleDrag,
+    this.onHandleDragEnd,
   });
 
   @override
@@ -110,7 +110,11 @@ class DayViewState extends State<DayView>
   /// 参照 yearly_view 的 _contentY：表头固定、无惯性。
   /// 只改绘制/平移，不动 R01 的行分配与标签算法。
   double _contentY = 0;
-  double _lastNameBandH = -1;
+
+  /// F13②-方案1b：抓手按下的全局指针 y（必须放 State —— 拖动中会 setState 重建，
+  /// 局部变量会被重置，只剩第一帧生效，2026-10-21 踩过这个坑）。
+  double? _handleStartY;
+
   bool _ignorePan = false;
   double _startContentY = 0;
 
@@ -465,36 +469,31 @@ class DayViewState extends State<DayView>
         );
         // F13②：layout 内已按「行总高 - 可视行高」夹紧，回写避免越拖越远
         _contentY = layout.contentY;
-        // 名称带上报（只在值变化时回调，避免每帧都打）
-        if (_lastNameBandH != layout.namesH) {
-          _lastNameBandH = layout.namesH;
-          final cb = widget.onNameBandHeight;
-          if (cb != null) {
-            WidgetsBinding.instance
-                .addPostFrameCallback((_) => cb(layout.namesH));
-          }
-        }
 
-        // 画布只画不接手势（F13②-方案1）
+        // 画布只画不接手势（F13②-方案1）；抓手带的可视也由 painter 自己画。
         final canvas = IgnorePointer(
           child: ClipRect(
             child: CustomPaint(
               size: Size(constraints.maxWidth, constraints.maxHeight),
-              painter: _DayPainter(layout),
+              painter: _DayPainter(layout, widget.showHandle),
             ),
           ),
         );
 
+        // F13②-方案1b：抓手带的几何**完全由图表自己算**（名称带下沿 + 预留空槽），
+        // 页面不再传坐标 —— 从根上消除「页面侧坐标和图表对不上」的问题。
+        final bandTop = layout.namesH;
         final bandH =
-            widget.handleBandHeight.isFinite ? widget.handleBandHeight : 0.0;
-        final bandTop =
-            (widget.handleBandTop.isFinite && widget.handleBandTop > 0)
-                ? widget.handleBandTop
+            (widget.handleSlotH.isFinite && widget.handleSlotH > 0)
+                ? widget.handleSlotH
                 : 0.0;
         final bandBottom = math.min(bandTop + bandH, constraints.maxHeight);
+        final hasBand = widget.showHandle &&
+            bandH > 0 &&
+            bandBottom < constraints.maxHeight;
 
-        // 没有抓手带（或带高顶到画布底）：整块画布一个手势区，保持旧行为
-        if (bandH <= 0 || bandBottom >= constraints.maxHeight) {
+        // 没有抓手带：整块画布一个手势区（旧行为）
+        if (!hasBand) {
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
             onScaleStart: (d) => _onScaleStart(d.localFocalPoint, layout),
@@ -507,10 +506,9 @@ class DayViewState extends State<DayView>
           );
         }
 
-        // F13②-方案1：手势层拆成「带上 / 带下」两段，中间抓手带只留点击。
-        // 带宽内没有 ScaleGestureRecognizer，叠在上面的外层抓手（Listener 吃原始
-        // 指针）才拖得动；两段共用同一套回调，各自把自己层的本地坐标加回画布偏移
-        // （上段 +0，下段 +bandBottom，抓手带 +bandTop），命中/锚点才不会偏。
+        // 手势层拆成「带上 / 带下」两段（两段同一套回调，各自把本地坐标加回画布
+        // 偏移）；中间抓手带交给 Listener 收**原始指针** —— 它不进手势竞技场，
+        // 带宽内也没有任何 ScaleGestureRecognizer，所以拖动不会被抢。
         Offset shift(Offset local, double dy) => Offset(local.dx, local.dy + dy);
         Widget gestures(double dyShift) => GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -543,16 +541,28 @@ class DayViewState extends State<DayView>
             bottom: 0,
             child: gestures(bandBottom),
           ),
-          // 中间抓手带：只有点击（选中/取消选中/点标签），拖动让给外层抓手。
-          // translucent 不吞同层兄弟的命中。
+          // 抓手带：图表自己收原始指针，把「累计位移」直接回调给页面
           Positioned(
             top: bandTop,
             left: 0,
             right: 0,
-            height: bandBottom - bandTop,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTapUp: (d) => _onTapUp(shift(d.localPosition, bandTop), layout),
+            height: bandH,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (e) {
+                _handleStartY = e.position.dy;
+                widget.onHandleDrag?.call(0);
+              },
+              onPointerMove: (e) {
+                final start = _handleStartY;
+                if (start == null) return;
+                widget.onHandleDrag?.call(e.position.dy - start);
+              },
+              onPointerUp: (_) {
+                _handleStartY = null;
+                widget.onHandleDragEnd?.call();
+              },
+              onPointerCancel: (_) => _handleStartY = null,
             ),
           ),
         ]);
@@ -917,7 +927,10 @@ class _DayLayout {
 class _DayPainter extends CustomPainter {
   final _DayLayout layout;
 
-  _DayPainter(this.layout);
+  /// F13②-方案1b：是否画顶部抓手带（视觉由图表自己负责，页面不再叠一层）。
+  final bool showHandle;
+
+  _DayPainter(this.layout, this.showHandle);
 
   double _xOf(double absMin) => (absMin - layout.scrollMin) * layout.ppm;
 
@@ -1030,6 +1043,38 @@ class _DayPainter extends CustomPainter {
           ..strokeWidth = 1.5,
       );
     }
+
+    // F13②-方案1b：抓手带最后画（盖住穿过空槽的 45° 引线与当前时间竖线）
+    _drawHandleBand(canvas, size);
+  }
+
+  /// F13②-方案1b：顶部抓手带 = 名称带下沿那段预留空槽
+  /// `[namesH, namesH + handleSlotH)`：填半灰底 + 居中 56×4 圆角短横条。
+  /// 位置直接取自布局，所以和图表内容永远对齐，不存在页面侧坐标误差。
+  void _drawHandleBand(Canvas canvas, Size size) {
+    if (!showHandle) return;
+    final slotH = layout.handleSlotH;
+    if (!slotH.isFinite || slotH <= 0) return;
+    final scheme = layout.scheme;
+    final top = layout.namesH;
+    canvas.drawRect(
+      Rect.fromLTWH(0, top, size.width, slotH),
+      Paint()..color = scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+    );
+    const barW = 56.0;
+    const barH = 4.0;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          (size.width - barW) / 2,
+          top + (slotH - barH) / 2,
+          barW,
+          barH,
+        ),
+        const Radius.circular(2),
+      ),
+      Paint()..color = scheme.outlineVariant,
+    );
   }
 
   void _drawSelection(Canvas canvas, _DayItem it, ColorScheme scheme) {
@@ -1158,6 +1203,9 @@ class _DayPainter extends CustomPainter {
     final a = oldDelegate.layout;
     final b = layout;
     if (!identical(a.scheme, b.scheme)) return true;
+    // F13②-方案1b：抓手带的有无/高度也在本节内绘制
+    if (oldDelegate.showHandle != showHandle) return true;
+    if (a.handleSlotH != b.handleSlotH) return true;
     if (a.viewW != b.viewW ||
         a.viewH != b.viewH ||
         a.ppm != b.ppm ||
