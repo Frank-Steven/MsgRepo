@@ -79,6 +79,14 @@ class DayViewState extends State<DayView>
   double _startPpm = 0;
   double _startScrollMin = 0;
   double _startFocalX = 0;
+  double _startFocalY = 0;
+
+  /// F13②：行区纵向平移（行数超出可视高度时上下拖动看更多行）。
+  /// 0 = 顶部对齐；build 内按「行总高 - 可视行高」夹紧后回写，
+  /// 参照 yearly_view 的 _contentY：表头固定、无惯性。
+  /// 只改绘制/平移，不动 R01 的行分配与标签算法。
+  double _contentY = 0;
+  double _startContentY = 0;
 
   Task? _dragOriginal;
   _DragMode? _dragMode;
@@ -170,6 +178,7 @@ class DayViewState extends State<DayView>
     final ppm = _ppm ?? (_viewW > 0 ? _viewW / 1440 : 1.0);
     setState(() {
       _scrollMin = (_nowMin - _viewW / (2 * ppm)).clamp(0.0, _maxMin);
+      _contentY = 0; // 定位语义：回到第一行
       _positioned = true;
       _pulseMin = _nowMin;
     });
@@ -188,6 +197,7 @@ class DayViewState extends State<DayView>
     final min = (anchor.millisecondsSinceEpoch - _epochMs) / 60000.0;
     setState(() {
       _scrollMin = (min - _viewW / (2 * ppm)).clamp(0.0, _maxMin);
+      _contentY = 0; // 期移后回到第一行
       _positioned = true;
     });
     _reportWindow();
@@ -203,6 +213,7 @@ class DayViewState extends State<DayView>
         (t.endAt == null ? 0 : (t.endAt! - s) / 120000.0);
     setState(() {
       _scrollMin = (mid - _viewW / (2 * ppm)).clamp(0.0, _maxMin);
+      _contentY = 0; // 跳转后回到第一行（行位置随缩放变化，不做纵向精确定位）
       _positioned = true;
     });
     _reportWindow();
@@ -265,8 +276,10 @@ class DayViewState extends State<DayView>
     _cancelFling();
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
+    _startFocalY = d.localFocalPoint.dy;
     _startPpm = layout.ppm;
     _startScrollMin = _scrollMin;
+    _startContentY = _contentY;
     // 仅选中任务可拖拽（v2.3 选中-调整）
     if (hit != null && hit.taskId == widget.selectedTaskId) {
       final original = layout.originals[hit.taskId];
@@ -310,6 +323,10 @@ class DayViewState extends State<DayView>
       _ppm = newPpm;
       _scrollMin =
           (focalMin - d.localFocalPoint.dx / newPpm).clamp(0.0, _maxMin);
+      // F13②：纵向拖动平移行区（行数超出可视高度时可看后面的行）；
+      // 具体夹紧在 _DayLayout.build 里按行总高做，这里只记请求值。
+      // 无纵向惯性（松手即停），横向 fling 不受影响。
+      _contentY = _startContentY - (d.localFocalPoint.dy - _startFocalY);
     });
     _reportOnUnitChange(); // v2.6.1：拖动/缩放中标题实时跟随
   }
@@ -407,7 +424,10 @@ class DayViewState extends State<DayView>
           nowMin: _nowMin,
           selectedTaskId: widget.selectedTaskId,
           pulseMin: _pulseMin,
+          contentY: _contentY,
         );
+        // F13②：layout 内已按「行总高 - 可视行高」夹紧，回写避免越拖越远
+        _contentY = layout.contentY;
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onScaleStart: (d) => _onScaleStart(d, layout),
@@ -489,6 +509,9 @@ class _DayLayout {
   final String? selectedTaskId;
   final double? pulseMin;
 
+  /// F13②：行区实际纵向平移量（已夹紧到 [0, 行总高 - 可视行高]）。
+  final double contentY;
+
   _DayLayout._({
     required this.viewW,
     required this.viewH,
@@ -511,6 +534,7 @@ class _DayLayout {
     required this.nowMin,
     required this.selectedTaskId,
     required this.pulseMin,
+    required this.contentY,
   });
 
   static _DayLayout build({
@@ -527,6 +551,7 @@ class _DayLayout {
     required double nowMin,
     required String? selectedTaskId,
     required double? pulseMin,
+    required double contentY,
   }) {
     final (majorTickMin, minorTickMin, labelStride) = dayTickInterval(ppm);
 
@@ -568,8 +593,7 @@ class _DayLayout {
     // 名称带高度：有任务就预留（放不下的标签不画，但带子保留，避免行位置跳动）
     final namesH = tasks.isEmpty ? 0.0 : nameLayerH; // 45° 标签需要顶部名称带
 
-    double laneY(int rowIdx) =>
-        namesH + headerH + rowIdx * laneH + laneH / 2;
+    // 行区纵向几何（laneY / 夹紧）在行分配完成后再算 —— 行数决定总高。
 
     // 先按开始时间给「非子任务」分配行；子任务跟随父任务的 y（父子同线）。
     final rowsByTask = <String, int>{};
@@ -598,6 +622,21 @@ class _DayLayout {
       }
     }
 
+    // ---- F13②：行区纵向平移（参照 yearly_view 的 _contentY 夹紧法）----
+    // 表头（刻度带）与顶部名称带固定，行区按 [-contentY] 上移，
+    // 平移量夹在 [0, 行总高 - 可视行高]；行数没超出可视行区时不动。
+    final rowCount = rowSpans.length;
+    final ganttTop = namesH + headerH;
+    final rowsViewH = math.max(0.0, viewH - ganttTop);
+    final maxContentY = math.max(0.0, rowCount * laneH - rowsViewH);
+    final clampedY =
+        contentY.isFinite ? contentY.clamp(0.0, maxContentY) : 0.0;
+
+    double laneY(int rowIdx) =>
+        ganttTop + rowIdx * laneH + laneH / 2 - clampedY;
+
+    // 滚出可视行区的行：不画名称、不接收点击（否则会点到看不见的任务）。
+    bool visibleRow(double y) => y + 12 >= ganttTop && y - 12 <= viewH;
 
     // 标签：单行、不合并、不换行、先到先得（R01）。
     // 点任务：正上方有空间才显示；线段任务：显示在「最左侧符合条件」的点上方；都不行就不显示。
@@ -681,6 +720,8 @@ class _DayLayout {
       ...items.where((i) => i.isSubtask),
       ...items.where((i) => !i.isSubtask)
     ]) {
+      // F13②：纵向平移后滚出可视行区的行不接收点击
+      if (!visibleRow(it.y)) continue;
       if (it.isPoint) {
         hitRegions.add(_HitRegion(
             Rect.fromCircle(center: Offset(it.x1, it.y), radius: 14),
@@ -705,6 +746,8 @@ class _DayLayout {
       // 名称命中区域：标签画在顶部名称带，点它 = 选中该任务。
       for (final it in items) {
         if (it.isSubtask) continue;
+        // F13②：节点滚出可视行区后名称一并隐藏（否则引线会连到看不见的行）
+        if (!visibleRow(it.y)) continue;
         final slot = nameSlots[it.task.id];
         if (slot == null || !slot.visible) continue;
         final anchorX = xOf(slot.centerMinutes);
@@ -736,8 +779,15 @@ class _DayLayout {
       nowMin: nowMin,
       selectedTaskId: selectedTaskId,
       pulseMin: pulseMin,
+      contentY: clampedY,
     );
   }
+
+  /// F13②：刻度表头底边 = 行区顶部（行区纵向平移时表头固定不动）。
+  double get rowsTop => namesH + headerH;
+
+  /// 该行是否还落在可视行区内（滚出去的行不画标签、不接收点击）。
+  bool rowVisible(double y) => y + 12 >= rowsTop && y - 12 <= viewH;
 
   (double, double)? spanOf(String taskId) => spans[taskId];
 
@@ -765,6 +815,11 @@ class _DayPainter extends CustomPainter {
     final ganttTop = top + _DayLayout.headerH;
 
     _drawTicks(canvas, size, top, ganttTop);
+
+    // F13②：行区 clip 在表头下方 —— 纵向平移时行不会盖住刻度带/名称带
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(
+        0, ganttTop, size.width, math.max(0.0, size.height - ganttTop)));
 
     // 任务：时间点=节点；时间段=带端点圆点的线段；子任务画更小节点/更细线；
     // 选中任务加描边（v2.3 选中-调整）
@@ -794,13 +849,16 @@ class _DayPainter extends CustomPainter {
           _drawSelection(canvas, it, scheme);
         }
       }
+    canvas.restore();
 
       // 标签（恢复原设计）：顶部名称带内 45° 斜排，竖虚线连到任务起点。
+      // F13②：节点已滚出可视行区的行不画名称（引线不会连到看不见的行）。
       if (layout.namesH > 0) {
         final dashPaint = Paint()
           ..color = scheme.onSurfaceVariant.withValues(alpha: 0.7)
           ..strokeWidth = 1;
         for (final it in layout.items) {
+          if (!layout.rowVisible(it.y)) continue;
           final slot = layout.nameSlots[it.task.id];
           if (slot == null || !slot.visible) continue;
           final anchorX = _xOf(slot.centerMinutes);
@@ -996,6 +1054,7 @@ class _DayPainter extends CustomPainter {
         a.labelStride != b.labelStride ||
         a.selectedTaskId != b.selectedTaskId ||
         a.pulseMin != b.pulseMin ||
+        a.contentY != b.contentY ||
         a.nowMin != b.nowMin) {
       return true;
     }

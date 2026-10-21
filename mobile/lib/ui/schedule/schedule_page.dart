@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/task.dart';
 import '../../services/database.dart';
@@ -88,10 +89,122 @@ class SchedulePageState extends State<SchedulePage> {
   final _monthKey = GlobalKey<MonthViewState>();
   final _dayKey = GlobalKey<DayViewState>();
 
+  // ---- F13②：图表区 / 底部面板 可拖动分割线 ----
+
+  /// 图表区占（可用高度）的比例，默认 0.6；拖分割线改它，夹在
+  /// [_splitRatioMin]~[_splitRatioMax]，松手写 SharedPreferences。
+  static const _splitPrefsKey = 'schedule_split_ratio';
+  /// 下限 0.4（Lead 2026-10-20 拍板）：日视图顶部固定 204px（名称带 160 +
+  /// 刻度带 44），再低会让可视行区变成 0 —— 「拖到最小等于什么都看不见」。
+  static const _splitRatioMin = 0.4;
+  static const _splitRatioMax = 0.85;
+
+  /// 分割线手柄高度（含细分隔线 + 中间短横条）。
+  static const _splitHandleH = 14.0;
+
+  double _splitRatio = 0.6;
+
   @override
   void initState() {
     super.initState();
+    _loadSplitRatio();
     reload();
+  }
+
+  /// 启动时读回上次拖好的分割比例（读不到就用默认 0.6）。
+  Future<void> _loadSplitRatio() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getDouble(_splitPrefsKey);
+      if (saved == null || !mounted) return;
+      setState(() => _splitRatio =
+          saved.clamp(_splitRatioMin, _splitRatioMax).toDouble());
+    } catch (_) {
+      // 读取失败保持默认比例，不影响页面
+    }
+  }
+
+  /// 松手落库：下次进入日程页沿用这次拖出来的比例。
+  Future<void> _saveSplitRatio() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_splitPrefsKey, _splitRatio);
+    } catch (_) {
+      // 写入失败只影响记忆，不影响本次布局
+    }
+  }
+
+  /// F13②：分割手柄——**图表区与下方任务栏的分界线**（tooltip 语义：
+  /// 拖动这条线 = 调整上方图表 / 下方任务列表的高度）。
+  /// 上下拖动改 [_splitRatio]；只吃竖直手势，与图表区内部的横向
+  /// 平移/缩放不冲突。
+  Widget _splitHandle(double avail) {
+    final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (d) {
+        if (avail <= 0) return;
+        final next =
+            (_splitRatio + d.delta.dy / avail).clamp(_splitRatioMin, _splitRatioMax);
+        if (next != _splitRatio) setState(() => _splitRatio = next.toDouble());
+      },
+      onVerticalDragEnd: (_) => _saveSplitRatio(),
+      onVerticalDragCancel: _saveSplitRatio,
+      child: SizedBox(
+        height: _splitHandleH,
+        width: double.infinity,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // 细分隔线（贯穿整宽）
+            Positioned.fill(
+              child: Align(
+                alignment: Alignment.center,
+                child: Container(
+                  height: 1,
+                  color: scheme.outlineVariant.withValues(alpha: 0.7),
+                ),
+              ),
+            ),
+            // 中间短横条（拖拽热区提示）
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: scheme.outlineVariant,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// F13②：图表区 + 可拖动分割线 + 底部面板。
+  ///
+  /// 两个面板按像素高度（[_splitRatio]）分配，不再用固定 flex，
+  /// 这样拖分割线就真的能改变图表区高度（日视图行多了可以拉高）。
+  Widget _splitBody(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final total = constraints.maxHeight;
+      if (!total.isFinite || total <= 0) {
+        // 兜底：高度未知时退回原来的固定 flex 布局
+        return Column(children: [
+          Expanded(flex: 3, child: _ganttView()),
+          Expanded(flex: 2, child: _bottomSection(context)),
+        ]);
+      }
+      final avail =
+          (total - _splitHandleH).clamp(0.0, double.infinity).toDouble();
+      final ganttH = avail * _splitRatio;
+      final bottomH = avail - ganttH;
+      return Column(children: [
+        SizedBox(height: ganttH, child: _ganttView()),
+        _splitHandle(avail),
+        SizedBox(height: bottomH, child: _bottomSection(context)),
+      ]);
+    });
   }
 
   /// _cache 内容变了：递增版本，派生列表（[_ganttTasks]）下次读到时按需重算。
@@ -570,30 +683,25 @@ class SchedulePageState extends State<SchedulePage> {
   Widget _bottomSection(BuildContext context) {
     final selected = _selectedTask;
     if (_detailMode && selected != null) {
-      return Expanded(
-        flex: 2,
-        child: Column(children: [
-          const Divider(height: 1),
-          Expanded(
-            child: SingleChildScrollView(
-              child: TaskDetailPanel(
-                key: ValueKey(selected.id),
-                task: selected,
-                onClose: () => setState(() => _detailMode = false),
-                onEdit: () => _editTask(selected),
-                onOpenTask: _jumpToTask,
-              ),
+      return Column(children: [
+        const Divider(height: 1),
+        Expanded(
+          child: SingleChildScrollView(
+            child: TaskDetailPanel(
+              key: ValueKey(selected.id),
+              task: selected,
+              onClose: () => setState(() => _detailMode = false),
+              onEdit: () => _editTask(selected),
+              onOpenTask: _jumpToTask,
             ),
           ),
-        ]),
-      );
+        ),
+      ]);
     }
     final tasks = _bottomTasks;
-    return Expanded(
-      flex: 2,
-      child: Column(
-        children: [
-          const Divider(height: 1),
+    return Column(
+      children: [
+        const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
             child: Row(
@@ -636,9 +744,8 @@ class SchedulePageState extends State<SchedulePage> {
                       );
                     },
                   ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -727,11 +834,10 @@ class SchedulePageState extends State<SchedulePage> {
           ),
           if (_loading)
             const Expanded(child: Center(child: CircularProgressIndicator()))
-          else ...[
-            Expanded(flex: 3, child: _ganttView()),
-            // v2.4：底部面板所有粒度都显示（含年度）
-            _bottomSection(context),
-          ],
+          else
+            // F13②：图表区 + 可拖动分割线 + 底部面板。
+            // v2.4：底部面板所有粒度都显示（含年度）。
+            Expanded(child: _splitBody(context)),
         ],
       ),
     );
