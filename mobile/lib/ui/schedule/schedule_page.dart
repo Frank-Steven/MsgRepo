@@ -99,9 +99,10 @@ class SchedulePageState extends State<SchedulePage> {
   //  · 图表高度 = 视口 − 底部抓手 − 任务栏（永远铺满，无页面滚动）。
   static const _barPrefsKey = 'schedule_bar_height';
   static const _nameBandPrefsKey = 'schedule_name_band_h';
-  static const _chartMinH = 250.0; // 两侧下限必须相等：任务栏 ∈ [下限, avail-图表下限]、图表 = avail-任务栏 ⇒ 行程恒等
+  static const _chartMinH = 200.0; // 两侧下限必须相等：行程 = avail − (下限 × 2)，下限越小行程越大
+  // 2026-10-21：310/60 → 250/250（行程≈97，用户嫌太小）→ 200/200（行程≈197，约翻倍）
   // 2026-10-21 用户要求「任务栏可拖范围 = 日程表可拖范围」，故两者都取 250（图表固定 chrome 236 + 余量）
-  static const _barMinH = 250.0;
+  static const _barMinH = 200.0;
 
   /// 45° 标签带高度的下限 / 默认值（default 与 day_view 的 nameLayerH 保持一致）。
   static const _nameBandMin = 70.0;
