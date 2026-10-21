@@ -211,9 +211,29 @@ class AiClient {
   http.Client? _activeClient;
   bool _cancelled = false;
 
+  /// 在途 HTTP 请求数（Q11 护栏，2026-10-21 用户裁决「接受现状」）。
+  ///
+  /// 因为 client 现在全实例复用，`cancelActive()` 会中断**所有**在途请求；
+  /// 当前产品路径 `ai_processing` 串行（`_pumping`）不会并发，所以是可接受的。
+  /// 这里只做「悄悄出现并发就报警」，防止将来有人加了并发调用却查不出偶发失败。
+  int _inflight = 0;
+
+  /// 当前在途请求数（测试/诊断用）。
+  int get inflightCount => _inflight;
+
   /// 中断正在进行的处理（已产出的事件保留）。
+  ///
+  /// 注意：client 共享 → 这里会中断**全部**在途请求（见 Q11 / `_inflight` 注释）。
   void cancelActive() {
     _cancelled = true;
+    if (_inflight > 1) {
+      // 并发尚未支持：这里喊一声，别让「取消 A 顺手弄死 B」变成无迹可寻的偶发 bug。
+      AppLog.instance.warn(
+        'ai.cancel-concurrent',
+        StateError('cancelActive 时有 $_inflight 个在途请求，将全部中断（当前只支持单路 AI 请求）'),
+        StackTrace.current,
+      );
+    }
     closeClient(); // 关掉在途连接，并丢弃实例（下次请求重建）
   }
 
@@ -604,6 +624,7 @@ class AiClient {
 
     final client = _client;
     _activeClient = client;
+    _inflight++;
     try {
       var streamed = await client
           .send(buildRequest(await getDesktopToken()))
@@ -639,6 +660,7 @@ class AiClient {
     } finally {
       // O06：客户端复用，这里只解除「在途」标记；需要中断请走 cancelActive()
       if (_activeClient == client) _activeClient = null;
+      _inflight--;
     }
   }
 
@@ -703,6 +725,7 @@ class AiClient {
 
     final client = _client;
     _activeClient = client;
+    _inflight++;
     try {
       final streamed =
           await client.send(req).timeout(const Duration(seconds: 30));
@@ -750,6 +773,7 @@ class AiClient {
     } finally {
       // O06：同上，不关闭复用实例
       if (_activeClient == client) _activeClient = null;
+      _inflight--;
     }
   }
 
