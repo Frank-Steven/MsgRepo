@@ -109,7 +109,6 @@ class SchedulePageState extends State<SchedulePage> {
 
   /// 两条手柄各自的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
   /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
-  double? _dragLastYChart;
   double? _dragLastYBar;
   double? _barDragStart; // 按下瞬间的任务栏高度（绝对映射用）
 
@@ -220,26 +219,7 @@ class SchedulePageState extends State<SchedulePage> {
       return Column(children: [
         SizedBox(
           height: chartH,
-          child: Stack(children: [
-            Positioned.fill(child: _ganttView()),
-            // 顶部抓手：落在 day_view 预留的空槽里（不压标签、不压日期）
-            Positioned(
-              top: _nameBandH.clamp(0.0, (chartH - _handleH).clamp(0.0, chartH)),
-              left: 0,
-              right: 0,
-              height: _handleH,
-              child: _handle(
-                id: 'chart',
-                startYRead: () => _dragLastYChart,
-                startYWrite: (v) => _dragLastYChart = v,
-                onDrag: dragBoundary,
-                onEnd: () {
-                  _barDragStart = null;
-                  _saveHeights();
-                },
-              ),
-            ),
-          ]),
+            child: _ganttView(),
         ),
         _handle(
           id: 'bar',
@@ -675,8 +655,7 @@ class SchedulePageState extends State<SchedulePage> {
               setState(() => _nameBandH = h);
             },
             // 顶部拖动条那一带不参与图表平移（快速拖动也不会被平移手势抢走）
-            handleSlotH: _handleH,
-            panExcludeTop: _nameBandH + _handleH, // 顶部手柄那一带不参与图表平移
+            panExcludeTop: _nameBandH, // 顶部空槽仍不参与图表平移
           );
       default:
         return YearView(
