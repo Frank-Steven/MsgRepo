@@ -15,6 +15,7 @@ import 'month_view.dart';
 import 'schedule_shared.dart';
 import 'year_view.dart';
 import 'yearly_view.dart';
+import 'dart:math' as math;
 
 /// 日程页（设计 §2，v2.3/v2.4 修订）：年度/年/月/日四级视图均无限滚动。
 ///
@@ -92,12 +93,6 @@ class SchedulePageState extends State<SchedulePage> {
   // ---- F13②：图表区 / 底部面板 可拖动分割线 ----
 
   /// 图表区占（可用高度）的比例，默认 0.6；拖分割线改它，夹在
-  /// [_splitRatioMin]~[_splitRatioMax]，松手写 SharedPreferences。
-  static const _splitPrefsKey = 'schedule_split_ratio';
-  /// 下限 0.4（Lead 2026-10-20 拍板）：日视图顶部固定 204px（名称带 160 +
-  /// 刻度带 44），再低会让可视行区变成 0 —— 「拖到最小等于什么都看不见」。
-  static const _splitRatioMin = 0.4;
-  static const _splitRatioMax = 0.85;
 
   /// 分割线手柄高度（含细分隔线 + 中间短横条）。
   static const _splitHandleH = 22.0; // 拖动条高度（加大热区，2026-10-21 用户反馈难点中）
@@ -106,6 +101,18 @@ class SchedulePageState extends State<SchedulePage> {
   static const _topDragBandH = 26.0; // 顶部可见拖动条高度
 
   double _splitRatio = 0.6;
+
+  // F13②（2026-10-21 用户要求）：图表与任务栏**各自**记像素高度。
+  // 拖图表顶部那条时：图表变高、任务栏高度不变（超出可视区就整页滚动）。
+  static const _ganttPrefsKey = 'schedule_gantt_height';
+  static const _bottomPrefsKey = 'schedule_bottom_height';
+  static const _ganttMinH = 220.0;
+  static const _bottomMinH = 120.0;
+  static const _ganttOverflowAllow = 1200.0;
+  double? _ganttHeightPx;
+  double? _bottomHeightPx;
+  /// 45° 标签名称带高度（DayView 上报），拖动条夹在它下沿。
+  double _nameBandH = 0;
 
   @override
   void initState() {
@@ -118,12 +125,16 @@ class SchedulePageState extends State<SchedulePage> {
   Future<void> _loadSplitRatio() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getDouble(_splitPrefsKey);
-      if (saved == null || !mounted) return;
-      setState(() => _splitRatio =
-          saved.clamp(_splitRatioMin, _splitRatioMax).toDouble());
+      final g = prefs.getDouble(_ganttPrefsKey);
+      final bh = prefs.getDouble(_bottomPrefsKey);
+      if (!mounted) return;
+      if (g == null && bh == null) return;
+      setState(() {
+        if (g != null) _ganttHeightPx = g;
+        if (bh != null) _bottomHeightPx = bh;
+      });
     } catch (_) {
-      // 读取失败保持默认比例，不影响页面
+      // 读失败用默认布局
     }
   }
 
@@ -131,9 +142,12 @@ class SchedulePageState extends State<SchedulePage> {
   Future<void> _saveSplitRatio() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble(_splitPrefsKey, _splitRatio);
+      final g = _ganttHeightPx;
+      final bh = _bottomHeightPx;
+      if (g != null) await prefs.setDouble(_ganttPrefsKey, g);
+      if (bh != null) await prefs.setDouble(_bottomPrefsKey, bh);
     } catch (_) {
-      // 写入失败只影响记忆，不影响本次布局
+      // fire-and-forget
     }
   }
 
@@ -143,18 +157,35 @@ class SchedulePageState extends State<SchedulePage> {
   /// 平移/缩放不冲突。
   /// 顶部可见拖动条：向下拖 = 日程表变高（调整的是日程表，不是任务栏）。
   /// 2026-10-21 用户反馈「不知道按哪里才能拖」，所以做成有底色、有图标、有文案的显式手柄。
-  Widget _topGrip(double avail) {
+  /// 顶部拖动条（夹在 45° 标签带与日期/刻度带之间）：**只改图表高度，任务栏高度不变**。
+  ///
+  /// 用 `Listener` 直接吃原始指针事件（不用手势识别器）：快速拖动时不会与图表内部
+  /// 的平移/缩放手势抢竞技场，同时 DayView 侧用 `panExcludeTop` 让出这一带。
+  Widget _topGrip(double ganttH, double avail) {
     final scheme = Theme.of(context).colorScheme;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onVerticalDragUpdate: (d) {
-        if (avail <= 0) return;
-        final next = (_splitRatio + d.delta.dy / avail)
-            .clamp(_splitRatioMin, _splitRatioMax);
-        if (next != _splitRatio) setState(() => _splitRatio = next.toDouble());
+    double? lastY;
+    return Listener(
+      onPointerDown: (e) => lastY = e.position.dy,
+      onPointerMove: (e) {
+        final prev = lastY;
+        lastY = e.position.dy;
+        if (prev == null) return;
+        final dy = e.position.dy - prev;
+        if (dy == 0) return;
+        final cur = _ganttHeightPx ?? ganttH;
+        final next =
+            (cur + dy).clamp(_ganttMinH, avail + _ganttOverflowAllow);
+        if (next == _ganttHeightPx) return;
+        setState(() {
+          _ganttHeightPx = next;
+          _bottomHeightPx ??= (avail - ganttH).clamp(_bottomMinH, avail);
+        });
       },
-      onVerticalDragEnd: (_) => _saveSplitRatio(),
-      onVerticalDragCancel: _saveSplitRatio,
+      onPointerUp: (_) {
+        if (lastY != null) _saveSplitRatio();
+        lastY = null;
+      },
+      onPointerCancel: (_) => lastY = null,
       child: Container(
         height: _topDragBandH,
         width: double.infinity,
@@ -162,7 +193,7 @@ class SchedulePageState extends State<SchedulePage> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.drag_handle, size: 14, color: scheme.onSurfaceVariant),
+            Icon(Icons.drag_handle, size: 16, color: scheme.onSurfaceVariant),
             const SizedBox(width: 4),
             Text('拖动这里调整日程表高度',
                 style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
@@ -178,9 +209,11 @@ class SchedulePageState extends State<SchedulePage> {
       behavior: HitTestBehavior.opaque,
       onVerticalDragUpdate: (d) {
         if (avail <= 0) return;
-        final next =
-            (_splitRatio + d.delta.dy / avail).clamp(_splitRatioMin, _splitRatioMax);
-        if (next != _splitRatio) setState(() => _splitRatio = next.toDouble());
+        // 手柄往上拖 = 任务栏变高（图表相应变矮）；这条只管任务栏，不影响顶部拖动条的语义
+        final cur = _bottomHeightPx ?? (avail * 0.4);
+        final next = (cur - d.delta.dy).clamp(_bottomMinH, avail - _ganttMinH);
+        if (next == _bottomHeightPx) return;
+        setState(() => _bottomHeightPx = next);
       },
       onVerticalDragEnd: (_) => _saveSplitRatio(),
       onVerticalDragCancel: _saveSplitRatio,
@@ -229,28 +262,41 @@ class SchedulePageState extends State<SchedulePage> {
     return LayoutBuilder(builder: (context, constraints) {
       final total = constraints.maxHeight;
       if (!total.isFinite || total <= 0) {
-        // 兜底：高度未知时退回原来的固定 flex 布局
         return Column(children: [
           Expanded(flex: 3, child: _ganttView()),
           Expanded(flex: 2, child: _bottomSection(context)),
         ]);
       }
-      final avail =
-          (total - _splitHandleH).clamp(0.0, double.infinity).toDouble();
-      final ganttH = avail * _splitRatio;
-      final bottomH = avail - ganttH;
-      return Column(children: [
-          // 图表区：顶部一条**可见的拖动条**（用户 2026-10-21：拖它调整日程表高度，且要有 UI 提示）。
-          SizedBox(
-            height: ganttH,
-            child: Column(children: [
-              _topGrip(avail),
-              Expanded(child: _ganttView()),
-            ]),
-          ),
-          _splitHandle(avail),
+      final avail = (total - _splitHandleH).clamp(0.0, double.infinity);
+      final ganttH = (_ganttHeightPx ?? avail * _splitRatio)
+          .clamp(_ganttMinH, avail + _ganttOverflowAllow);
+      final bottomH = (_bottomHeightPx ?? (avail - ganttH))
+          .clamp(_bottomMinH, double.infinity);
+      final overflow = ganttH + bottomH + _splitHandleH > total + 0.5;
+      final content = Column(mainAxisSize: MainAxisSize.min, children: [
+        SizedBox(
+          height: ganttH,
+          child: Stack(children: [
+            Positioned.fill(child: _ganttView()),
+            // 拖动条：夹在「45° 标签带」与「日期/刻度带」之间（用户 2026-10-21 指定）
+            Positioned(
+              top: math.max(0.0, math.min(_nameBandH, ganttH - _topDragBandH)),
+              left: 0,
+              right: 0,
+              height: _topDragBandH,
+              child: _topGrip(ganttH, avail),
+            ),
+          ]),
+        ),
+        _splitHandle(avail),
         SizedBox(height: bottomH, child: _bottomSection(context)),
       ]);
+      if (!overflow) return content;
+      // 图表被拖得比可视区更高：整页纵向滚动，任务栏高度保持不变
+      return SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        child: content,
+      );
     });
   }
 
@@ -655,19 +701,26 @@ class SchedulePageState extends State<SchedulePage> {
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 3:
-        return DayView(
-          key: _dayKey,
-          tasks: tasks,
-          selectedTaskId: _selectedTask?.id,
-          onTaskSelected: _onTaskSelected,
-          onTaskMoved: _moveTask,
-          onBlankLongPress: (ms) => _createTask(
-            seedStartAt: ms,
-            seedKind: TaskKind.point,
-          ),
-          onVisibleWindowChanged: _onWindowChanged,
-          onCenterChanged: (c) => setState(() => _anchor = c),
-        );
+          return DayView(
+            key: _dayKey,
+            tasks: tasks,
+            selectedTaskId: _selectedTask?.id,
+            onTaskSelected: _onTaskSelected,
+            onTaskMoved: _moveTask,
+            onBlankLongPress: (ms) => _createTask(
+              seedStartAt: ms,
+              seedKind: TaskKind.point,
+            ),
+            onVisibleWindowChanged: _onWindowChanged,
+            onCenterChanged: (c) => setState(() => _anchor = c),
+            onNameBandHeight: (h) {
+              if (!mounted) return;
+              if ((h - _nameBandH).abs() < 0.5) return;
+              setState(() => _nameBandH = h);
+            },
+            // 顶部拖动条那一带不参与图表平移（快速拖动也不会被平移手势抢走）
+            panExcludeTop: _nameBandH + _topDragBandH,
+          );
       default:
         return YearView(
           key: _yearKey,

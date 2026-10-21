@@ -34,6 +34,13 @@ class DayView extends StatefulWidget {
   /// 长按空白：参数为该时刻的时间戳（5 分钟吸附）。
   final ValueChanged<int> onBlankLongPress;
 
+  /// 把「45° 标签名称带」的当前高度上报给外层（F13②：拖动条要精确夹在标签带与日期带之间）。
+  final ValueChanged<double>? onNameBandHeight;
+
+  /// 顶部这段（逻辑像素）不参与图表平移：外层在那里放了「调整日程表高度」的拖动条，
+  /// 手势交给它，避免快速拖动时被图表的平移/缩放手势抢走。
+  final double panExcludeTop;
+
   /// 可视时间窗变化（父级按窗口加载任务）。
   final void Function(int startMs, int endMs) onVisibleWindowChanged;
 
@@ -49,6 +56,8 @@ class DayView extends StatefulWidget {
     required this.onBlankLongPress,
     required this.onVisibleWindowChanged,
     required this.onCenterChanged,
+    this.onNameBandHeight,
+    this.panExcludeTop = 0,
   });
 
   @override
@@ -86,6 +95,8 @@ class DayViewState extends State<DayView>
   /// 参照 yearly_view 的 _contentY：表头固定、无惯性。
   /// 只改绘制/平移，不动 R01 的行分配与标签算法。
   double _contentY = 0;
+  double _lastNameBandH = -1;
+  bool _ignorePan = false;
   double _startContentY = 0;
 
   Task? _dragOriginal;
@@ -273,6 +284,10 @@ class DayViewState extends State<DayView>
   }
 
   void _onScaleStart(ScaleStartDetails d, _DayLayout layout) {
+    // 落在顶部拖动条那一带 → 本次手势不处理平移（交给外层拖动条）
+    _ignorePan = widget.panExcludeTop > 0 &&
+        d.localFocalPoint.dy <= widget.panExcludeTop;
+    if (_ignorePan) return;
     _cancelFling();
     final hit = layout.hitTest(d.localFocalPoint);
     _startFocalX = d.localFocalPoint.dx;
@@ -297,6 +312,7 @@ class DayViewState extends State<DayView>
   }
 
   void _onScaleUpdate(ScaleUpdateDetails d, _DayLayout layout) {
+    if (_ignorePan) return;
     if (_dragOriginal != null) {
       final raw = (d.localFocalPoint.dx - _startFocalX) / layout.ppm;
       // U15：最小刻度 1 分钟（原先 5 分钟，小幅拖动会「不动」而显得卡顿）
@@ -332,6 +348,7 @@ class DayViewState extends State<DayView>
   }
 
   void _onScaleEnd(ScaleEndDetails d) {
+    if (_ignorePan) { _ignorePan = false; return; }
     final original = _dragOriginal;
     final mode = _dragMode;
     if (original != null && mode != null && _deltaMin != 0) {
@@ -428,6 +445,14 @@ class DayViewState extends State<DayView>
         );
         // F13②：layout 内已按「行总高 - 可视行高」夹紧，回写避免越拖越远
         _contentY = layout.contentY;
+          // 名称带上报（只在值变化时回调，避免每帧都打）
+          if (_lastNameBandH != layout.namesH) {
+            _lastNameBandH = layout.namesH;
+            final cb = widget.onNameBandHeight;
+            if (cb != null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) => cb(layout.namesH));
+            }
+          }
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onScaleStart: (d) => _onScaleStart(d, layout),
