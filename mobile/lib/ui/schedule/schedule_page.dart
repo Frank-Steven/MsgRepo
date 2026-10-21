@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/task.dart';
 import '../../services/database.dart';
@@ -88,10 +89,171 @@ class SchedulePageState extends State<SchedulePage> {
   final _monthKey = GlobalKey<MonthViewState>();
   final _dayKey = GlobalKey<DayViewState>();
 
+  // ---- F13②：图表区 / 任务栏 两段独立高度（2026-10-21 全量重写）----
+  //
+  // 设计原则（用户要求：拖其中一条时另一部分不许跟着动）：
+  //  · `_chartH` 与 `_barH` **完全独立**，各自持久化，互不推导；
+  //  · 顶部手柄只改 `_chartH`；底部手柄只改 `_barH`；
+  //  · 两者之和超出可视高度 → 整页纵向滚动；放得下时下方留白（不自动拉伸，避免耦合）。
+  static const _barPrefsKey = 'schedule_bar_height';
+  static const _chartMinH = 200.0;
+  static const _barMinH = 120.0;
+
+  /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
+  static const _handleH = 32.0; // 拖动手柄高度：加大热区，手指更容易按住（2026-10-21）
+
+  double? _barH; // 任务栏高度；null = 用默认比例
+
+  /// DayView 上报的 45° 标签带高度：顶部手柄贴在它下沿。
+  double _nameBandH = 0;
+
+  /// 两条手柄各自的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
+  /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
+  double? _dragLastYChart;
+  double? _dragLastYBar;
+  double? _barDragStart; // 按下瞬间的任务栏高度（绝对映射用）
+
   @override
   void initState() {
     super.initState();
+    _loadHeights();
     reload();
+  }
+
+  /// 读回上次拖好的两段高度（读不到就用默认比例）。
+  Future<void> _loadHeights() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final bar = prefs.getDouble(_barPrefsKey);
+      setState(() {
+        if (bar != null) _barH = bar;
+      });
+    } catch (_) {
+      // 读失败用默认布局，不影响使用
+    }
+  }
+
+  Future<void> _saveHeights() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final bar = _barH;
+      if (bar != null) await prefs.setDouble(_barPrefsKey, bar);
+    } catch (_) {
+      // fire-and-forget：写失败只影响下次进入的默认值
+    }
+  }
+
+  /// 拖动手柄：`Listener` 直接吃原始指针（不走手势竞技场），
+  /// 并用「按下点 → 当前点」的累计位移换算新尺寸 —— 绝对映射才跟手，
+  /// 逐帧增量会因丢帧显得滞后。
+  Widget _handle({
+    required String id,
+    required double? Function() startYRead,
+    required void Function(double?) startYWrite,
+    required void Function(double dyFromPress) onDrag,
+    required VoidCallback onEnd,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Listener(
+      key: ValueKey('schedule-handle-$id'),
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (e) {
+        startYWrite(e.position.dy);
+        onDrag(0);
+      },
+      onPointerMove: (e) {
+        final s = startYRead();
+        if (s == null) return;
+        onDrag(e.position.dy - s);
+      },
+      onPointerUp: (_) {
+        startYWrite(null);
+        onEnd();
+      },
+      onPointerCancel: (_) => startYWrite(null),
+      child: Container(
+        height: _handleH,
+        width: double.infinity,
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        alignment: Alignment.center,
+        child: Container(
+          width: 56,
+          height: 4,
+          decoration: BoxDecoration(
+            color: scheme.outlineVariant,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 布局：**永远铺满屏幕**，只有「任务栏高度」一个自由度。
+  ///
+  /// 2026-10-21 用户反馈：拖红色（图表）→ 蓝色（任务栏）被拖着走、拖绿色（任务栏标题）→ 整页滚动、
+  /// 在红色里滚动 → 也变成整页滚动。根因是上一版把整页放进 `SingleChildScrollView` 并允许两段各自独立
+  /// 设高（会溢出/留白，手势全被页面滚动吃掉）。
+  ///
+  /// 现在改成标准分栏：`图表 = 视口 - 手柄 - 任务栏` 自动铺满，**不再有页面滚动**；
+  /// 两个手柄（顶部那条 / 图表与任务栏之间那条）都是同一个边界的抓点：
+  /// 往下拖 = 图表变高、任务栏变矮；往上拖反之。
+  Widget _splitBody(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final vp = constraints.maxHeight;
+      if (!vp.isFinite || vp <= 0) {
+        return Column(children: [
+          Expanded(flex: 3, child: _ganttView()),
+          Expanded(flex: 2, child: _bottomSection(context)),
+        ]);
+      }
+      final avail = vp - _handleH;
+      final barMax = (avail - _chartMinH).clamp(_barMinH, avail);
+      final barH = (_barH ?? avail * 0.40).clamp(_barMinH, barMax);
+      final chartH = (avail - barH).clamp(_chartMinH, avail);
+
+      void dragBoundary(double dyFromPress) {
+        final start = _barDragStart ??= barH;
+        final next = (start - dyFromPress).clamp(_barMinH, barMax);
+        if (next != (_barH ?? barH)) setState(() => _barH = next);
+      }
+
+      return Column(children: [
+        SizedBox(
+          height: chartH,
+          child: Stack(children: [
+            Positioned.fill(child: _ganttView()),
+            // 顶部抓手：落在 day_view 预留的空槽里（不压标签、不压日期）
+            Positioned(
+              top: _nameBandH.clamp(0.0, (chartH - _handleH).clamp(0.0, chartH)),
+              left: 0,
+              right: 0,
+              height: _handleH,
+              child: _handle(
+                id: 'chart',
+                startYRead: () => _dragLastYChart,
+                startYWrite: (v) => _dragLastYChart = v,
+                onDrag: dragBoundary,
+                onEnd: () {
+                  _barDragStart = null;
+                  _saveHeights();
+                },
+              ),
+            ),
+          ]),
+        ),
+        _handle(
+          id: 'bar',
+          startYRead: () => _dragLastYBar,
+          startYWrite: (v) => _dragLastYBar = v,
+          onDrag: dragBoundary,
+          onEnd: () {
+            _barDragStart = null;
+            _saveHeights();
+          },
+        ),
+        SizedBox(height: barH, child: _bottomSection(context)),
+      ]);
+    });
   }
 
   /// _cache 内容变了：递增版本，派生列表（[_ganttTasks]）下次读到时按需重算。
@@ -495,19 +657,27 @@ class SchedulePageState extends State<SchedulePage> {
           onCenterChanged: (c) => setState(() => _anchor = c),
         );
       case 3:
-        return DayView(
-          key: _dayKey,
-          tasks: tasks,
-          selectedTaskId: _selectedTask?.id,
-          onTaskSelected: _onTaskSelected,
-          onTaskMoved: _moveTask,
-          onBlankLongPress: (ms) => _createTask(
-            seedStartAt: ms,
-            seedKind: TaskKind.point,
-          ),
-          onVisibleWindowChanged: _onWindowChanged,
-          onCenterChanged: (c) => setState(() => _anchor = c),
-        );
+          return DayView(
+            key: _dayKey,
+            tasks: tasks,
+            selectedTaskId: _selectedTask?.id,
+            onTaskSelected: _onTaskSelected,
+            onTaskMoved: _moveTask,
+            onBlankLongPress: (ms) => _createTask(
+              seedStartAt: ms,
+              seedKind: TaskKind.point,
+            ),
+            onVisibleWindowChanged: _onWindowChanged,
+            onCenterChanged: (c) => setState(() => _anchor = c),
+            onNameBandHeight: (h) {
+              if (!mounted) return;
+              if ((h - _nameBandH).abs() < 0.5) return;
+              setState(() => _nameBandH = h);
+            },
+            // 顶部拖动条那一带不参与图表平移（快速拖动也不会被平移手势抢走）
+            handleSlotH: _handleH,
+            panExcludeTop: _nameBandH + _handleH, // 顶部手柄那一带不参与图表平移
+          );
       default:
         return YearView(
           key: _yearKey,
@@ -570,30 +740,25 @@ class SchedulePageState extends State<SchedulePage> {
   Widget _bottomSection(BuildContext context) {
     final selected = _selectedTask;
     if (_detailMode && selected != null) {
-      return Expanded(
-        flex: 2,
-        child: Column(children: [
-          const Divider(height: 1),
-          Expanded(
-            child: SingleChildScrollView(
-              child: TaskDetailPanel(
-                key: ValueKey(selected.id),
-                task: selected,
-                onClose: () => setState(() => _detailMode = false),
-                onEdit: () => _editTask(selected),
-                onOpenTask: _jumpToTask,
-              ),
+      return Column(children: [
+        const Divider(height: 1),
+        Expanded(
+          child: SingleChildScrollView(
+            child: TaskDetailPanel(
+              key: ValueKey(selected.id),
+              task: selected,
+              onClose: () => setState(() => _detailMode = false),
+              onEdit: () => _editTask(selected),
+              onOpenTask: _jumpToTask,
             ),
           ),
-        ]),
-      );
+        ),
+      ]);
     }
     final tasks = _bottomTasks;
-    return Expanded(
-      flex: 2,
-      child: Column(
-        children: [
-          const Divider(height: 1),
+    return Column(
+      children: [
+        const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
             child: Row(
@@ -636,9 +801,8 @@ class SchedulePageState extends State<SchedulePage> {
                       );
                     },
                   ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -727,11 +891,10 @@ class SchedulePageState extends State<SchedulePage> {
           ),
           if (_loading)
             const Expanded(child: Center(child: CircularProgressIndicator()))
-          else ...[
-            Expanded(flex: 3, child: _ganttView()),
-            // v2.4：底部面板所有粒度都显示（含年度）
-            _bottomSection(context),
-          ],
+          else
+            // F13②：图表区 + 可拖动分割线 + 底部面板。
+            // v2.4：底部面板所有粒度都显示（含年度）。
+            Expanded(child: _splitBody(context)),
         ],
       ),
     );
