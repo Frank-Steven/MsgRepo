@@ -76,6 +76,62 @@ Future<void> setSingleMessageTaskLink(
   }
 }
 
+/// 批量入库的分块大小：SQLite 的绑定变量上限（老版本 999），留足余量。
+const int kMessageHashLookupChunk = 400;
+
+/// 「按 contentHash 去重后批量插入」的事务内实现（O03，2026-10-21）。
+///
+/// 语义与**逐条**调用 [AppDatabase.insertMessageIfNew] 等价：
+/// - 批内同一个 contentHash 只留**第一条**（先到先得，与逐条 check-then-insert 一致）；
+/// - 库里已存在的 hash 跳过（不覆盖、不更新）；
+/// - 插入顺序 = 入参顺序（rowid 递增，保证与队列文件读取顺序一致）。
+///
+/// 拆成顶层函数（而不是直接写在 AppDatabase 里）是为了能用 sqflite_common_ffi
+/// 直接单测，不依赖 AppDatabase 单例与迁移链。调用方负责提供事务——
+/// [AppDatabase.insertMessagesIfNew] 就是 `db.transaction(...)` 包一层。
+///
+/// 返回实际新增条数（被跳过的不计）。
+Future<int> insertMessagesIfNewInto(
+    DatabaseExecutor txn, List<Message> messages) async {
+  if (messages.isEmpty) return 0;
+
+  // 1) 批内去重：同 hash 只留第一条，避免同一批里的重复通知被插两次
+  final seenHashes = <String>{};
+  final candidates = <Message>[];
+  for (final m in messages) {
+    if (seenHashes.add(m.contentHash)) candidates.add(m);
+  }
+
+  // 2) 一次查出库中已存在的 hash（分块，避免超出 SQLite 绑定变量上限）
+  final existing = <String>{};
+  for (var i = 0; i < candidates.length; i += kMessageHashLookupChunk) {
+    final end = i + kMessageHashLookupChunk <= candidates.length
+        ? i + kMessageHashLookupChunk
+        : candidates.length;
+    final part = <String>[
+      for (var j = i; j < end; j++) candidates[j].contentHash,
+    ];
+    final rows = await txn.query('messages',
+        columns: ['content_hash'],
+        where: 'content_hash IN (${List.filled(part.length, '?').join(',')})',
+        whereArgs: part);
+    for (final r in rows) {
+      existing.add(r['content_hash'] as String);
+    }
+  }
+
+  // 3) 只插新的（batch = 事务内的多条 insert，一次性提交）
+  final batch = txn.batch();
+  var inserted = 0;
+  for (final m in candidates) {
+    if (existing.contains(m.contentHash)) continue;
+    batch.insert('messages', m.toRow());
+    inserted++;
+  }
+  if (inserted > 0) await batch.commit(noResult: true);
+  return inserted;
+}
+
 class AppDatabase {
   AppDatabase._();
 
@@ -440,6 +496,18 @@ class AppDatabase {
     if (rows.isNotEmpty) return false;
     await db.insert('messages', message.toRow());
     return true;
+  }
+
+  /// 批量「去重后插入」，**整批一个事务**（O03，2026-10-21）：通知队列一次拉取
+  /// 往往有几十上百个文件，原来每个文件一次 `insertMessageIfNew`（一次查重 +
+  /// 一次插入，各自隐式事务）= N 次 SQL 往返；现在变成 1 次事务（内含分块的
+  /// IN 查重 + 一次 batch insert）。返回实际新增条数。
+  ///
+  /// 去重/顺序语义见 [insertMessagesIfNewInto]。
+  Future<int> insertMessagesIfNew(List<Message> messages) async {
+    if (messages.isEmpty) return 0;
+    final db = await database;
+    return db.transaction((txn) => insertMessagesIfNewInto(txn, messages));
   }
 
   /// 全部消息的 content_hash 集（批量导入一次性查重用，v2.6）。

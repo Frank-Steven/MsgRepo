@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:uuid/uuid.dart';
 
@@ -84,6 +85,25 @@ class ImportReport {
 /// 转码（无第三方依赖），解码失败抛 FormatException 由 UI 提示转换编码。
 String decodeImportText(List<int> bytes) =>
     utf8.decode(bytes, allowMalformed: false);
+
+/// 按来源选择解析器（同步纯函数：QQ / 微信各自一条，其它按微信格式兜底）。
+ImportParseResult parseExportBySource(String source, String text) =>
+    source == ImportSource.qq ? parseQqExport(text) : parseWechatExport(text);
+
+/// O05：把「导出文本解析」搬到后台 isolate，主 isolate 只做入库。
+///
+/// 原来 [parseQqExport]/[parseWechatExport] 直接在 UI isolate 里跑，几万行
+/// 的导出文件会掉帧。解析函数本身是纯 Dart（不碰 platform channel /
+/// BuildContext），返回结构只含 String/int，可安全跨 isolate 传递；
+/// [Isolate.run] 结束后 isolate 自动回收，不需要手动 dispose。
+///
+/// UI 侧用法：
+/// ```dart
+/// final parsed = await parseExportInIsolate(source, text);
+/// ```
+Future<ImportParseResult> parseExportInIsolate(String source, String text) {
+  return Isolate.run(() => parseExportBySource(source, text));
+}
 
 /// QQ PC 端「消息管理器 → 导出聊天记录」文本格式：
 /// ```

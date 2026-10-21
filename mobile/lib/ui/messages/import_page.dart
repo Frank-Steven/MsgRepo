@@ -49,9 +49,8 @@ class _ImportPageState extends State<ImportPage> {
           '（QQ 老版本导出的 GBK 文件可用记事本另存为 UTF-8）');
       return;
     }
-    final parsed = widget.source == ImportSource.qq
-        ? parseQqExport(text)
-        : parseWechatExport(text);
+    // O05（2026-10-21）：解析整段搬到 isolate，UI isolate 只做入库，避免大文件导入掉帧。
+    final parsed = await parseExportInIsolate(widget.source, text);
     setState(() {
       _pickedName = file.name;
       _parsed = parsed;

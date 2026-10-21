@@ -194,22 +194,42 @@ class NotificationBridge {
       final root = Directory(await _getQueueDir());
       if (!await root.exists()) return 0;
 
-      var imported = 0;
+      // O03（2026-10-21）：先把本轮所有队列文件解析成 Message，再**一次事务
+      // 批量入库**。原来每个文件一次 insertMessageIfNew（查重 + 插入，各自隐式
+      // 事务），通知密集时是 N 次 SQL 往返 + N 次事务提交。
+      // 注意：文件读取顺序即插入顺序（与改动前一致），每条消息的 postedTime
+      // 由它自己的文件携带，不会因为合并而丢失或错乱。
+      final pending = <Message>[];
+      final sources = <File>[]; // 与 pending 一一对应的源文件
       await for (final entity in root.list(recursive: true)) {
         if (entity is! File || !entity.path.endsWith('.json')) continue;
         try {
           final map =
               jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
-          if (await AppDatabase.instance
-              .insertMessageIfNew(_fromQueueEntry(map))) {
-            imported++;
-          }
+          pending.add(_fromQueueEntry(map));
+          sources.add(entity);
         } catch (e, st) {
           AppLog.instance.warn('bridge.parse-file', e, st);
-          // 单个文件损坏不阻塞其他文件，文件照删避免反复失败
-        } finally {
+          // 单个文件损坏不阻塞其他文件，文件照删避免反复失败（与改动前一致）
           try {
             await entity.delete();
+          } catch (e, st) { AppLog.instance.warn('bridge.delete-file', e, st); }
+        }
+      }
+
+      var imported = 0;
+      if (pending.isNotEmpty) {
+        try {
+          imported = await AppDatabase.instance.insertMessagesIfNew(pending);
+        } catch (e, st) {
+          // 入库失败：**保留**队列文件留给下一轮重试。
+          // （改动前是 finally 里无条件删文件，写库失败就等于丢消息）
+          AppLog.instance.warn('bridge.insert-batch', e, st);
+          sources.clear();
+        }
+        for (final f in sources) {
+          try {
+            await f.delete();
           } catch (e, st) { AppLog.instance.warn('bridge.delete-file', e, st); }
         }
       }

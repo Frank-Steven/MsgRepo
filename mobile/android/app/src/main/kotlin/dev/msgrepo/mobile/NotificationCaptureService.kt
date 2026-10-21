@@ -51,6 +51,12 @@ class NotificationCaptureService : NotificationListenerService() {
         private const val PERSIST_DEDUP_KEYS = 128
         private const val PREF_DEDUP_KEY = "recent_keys"
 
+        /** O04（2026-10-21）：seen_apps 内存态最多每 2 秒落盘一次。 */
+        private const val SEEN_APPS_FLUSH_DELAY_MS = 2000L
+
+        /** O03（2026-10-21）：queueAvailable 桥调用合并窗口。 */
+        private const val QUEUE_NOTIFY_DELAY_MS = 200L
+
         /** 折叠正文前缀：[5条] */
         private val FOLD_PREFIX = Regex("^\\[\\d+条\\]\\s*")
 
@@ -69,7 +75,48 @@ class NotificationCaptureService : NotificationListenerService() {
         loadDedupKeys()
     }
 
+    override fun onDestroy() {
+        // O04：服务销毁（停止采集/系统回收）前把 seen_apps 内存态强制落盘，
+        // 不吃 2 秒节流窗口的亏；顺带撤销还没触发的合并回调，避免空转。
+        try {
+            seenAppsHandler.removeCallbacks(seenAppsFlushRunnable)
+            flushSeenApps()
+        } catch (t: Throwable) {
+            // 落盘失败不影响销毁流程
+        }
+        try {
+            queueNotifyHandler.removeCallbacks(queueNotifyRunnable)
+            synchronized(queueNotifyLock) { queueNotifyPending = false }
+        } catch (t: Throwable) {
+            // 忽略
+        }
+        super.onDestroy()
+    }
+
+    /** O04：seen_apps 的锁 + 内存态 + 落盘节流状态，见 [recordSeenApp]。 */
     private val seenAppsLock = Any()
+    private val seenApps = LinkedHashMap<String, JSONObject>()
+    private var seenAppsLoaded = false
+
+    /** 内存态版本号：每次更新 +1；[seenAppsPersistedVersion] 追上即表示已落盘。 */
+    private var seenAppsVersion = 0L
+    private var seenAppsPersistedVersion = 0L
+    private var seenAppsFlushPending = false
+    private val seenAppsHandler = Handler(Looper.getMainLooper())
+    private val seenAppsFlushRunnable = Runnable { flushSeenApps() }
+
+    /** O03：queueAvailable 的合并状态（200ms 窗口内只调一次 channel）。 */
+    private val queueNotifyLock = Any()
+    private var queueNotifyPending = false
+    private val queueNotifyHandler = Handler(Looper.getMainLooper())
+    private val queueNotifyRunnable = Runnable {
+        synchronized(queueNotifyLock) { queueNotifyPending = false }
+        try {
+            MainActivity.bridgeChannel?.invokeMethod("queueAvailable", null)
+        } catch (t: Throwable) {
+            // 应用进程已退出时没有 channel，属正常情况
+        }
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         try {
@@ -244,30 +291,103 @@ class NotificationCaptureService : NotificationListenerService() {
         }
     }
 
+    /**
+     * O04（2026-10-21）：记录"已见应用"。
+     *
+     * 原来每条通知都要 readText(整个 seen_apps.json) → JSONObject → 改写 → writeText，
+     * 而且跑在通知回调（主线程）里；群聊刷屏 / 应用更新广播这类密集场景下是持续的
+     * 主线程文件 IO。现在改成：首次使用时读一次到内存，之后只改内存，
+     * **最多每 2 秒**整份落盘一次；[onDestroy] 时强制 flush，避免丢。
+     *
+     * 语义保持不变（供设置页列候选应用）：每个包名一条
+     * {packageName, appName, lastSeenAt}，后到的覆盖先到的，文件仍是
+     * 「packageName -> 条目」的 JSON 对象 + tmp/rename 原子替换。
+     */
     private fun recordSeenApp(packageName: String, appName: String, seenAt: Long) {
+        val schedule: Boolean
         synchronized(seenAppsLock) {
-            try {
-                val file = File(filesDir, "seen_apps.json")
-                val root = try {
-                    if (file.exists()) JSONObject(file.readText()) else JSONObject()
-                } catch (t: Throwable) {
-                    JSONObject()
-                }
-                val entry = JSONObject()
-                entry.put("packageName", packageName)
-                entry.put("appName", appName)
-                entry.put("lastSeenAt", seenAt)
-                root.put(packageName, entry)
+            loadSeenAppsLocked()
+            val entry = JSONObject()
+            entry.put("packageName", packageName)
+            entry.put("appName", appName)
+            entry.put("lastSeenAt", seenAt)
+            seenApps[packageName] = entry
+            seenAppsVersion++
+            schedule = !seenAppsFlushPending
+            if (schedule) seenAppsFlushPending = true
+        }
+        if (schedule) {
+            seenAppsHandler.postDelayed(seenAppsFlushRunnable, SEEN_APPS_FLUSH_DELAY_MS)
+        }
+    }
 
-                val tmp = File(filesDir, "seen_apps.json.tmp")
-                tmp.writeText(root.toString())
-                if (!tmp.renameTo(file)) {
-                    file.writeText(root.toString())
-                    tmp.delete()
-                }
-            } catch (t: Throwable) {
-                // 记录失败不影响采集主流程
+    /** 首次调用时把磁盘上的 seen_apps.json 读进内存（只读一次）。 */
+    private fun loadSeenAppsLocked() {
+        if (seenAppsLoaded) return
+        seenAppsLoaded = true
+        try {
+            val file = File(filesDir, "seen_apps.json")
+            if (!file.exists()) return
+            val root = JSONObject(file.readText())
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val v = root.optJSONObject(k) ?: continue
+                seenApps[k] = v
             }
+        } catch (t: Throwable) {
+            // 读失败从空表开始；下一次落盘会覆盖写（历史条目会丢，与原来解析失败同样处理）
+        }
+    }
+
+    /** 未落盘的更新是否还有；用于 onDestroy / 测试观察。 */
+    private fun seenAppsHasUnsavedChanges(): Boolean =
+        synchronized(seenAppsLock) { seenAppsPersistedVersion != seenAppsVersion }
+
+    /** 把内存态整份落盘（节流窗口到了、或服务销毁时调用）。 */
+    private fun flushSeenApps() {
+        val snapshot = synchronized(seenAppsLock) {
+            seenAppsFlushPending = false
+            if (seenAppsPersistedVersion == seenAppsVersion) return
+            val root = JSONObject()
+            for ((pkg, entry) in seenApps) root.put(pkg, entry)
+            root.toString() to seenAppsVersion
+        }
+        if (writeSeenAppsAtomically(snapshot.first)) {
+            synchronized(seenAppsLock) {
+                if (seenAppsPersistedVersion < snapshot.second) {
+                    seenAppsPersistedVersion = snapshot.second
+                }
+            }
+        } else if (seenAppsHasUnsavedChanges()) {
+            // 落盘失败：保持内存态，稍后重试（不阻塞采集、不丢内存里的记录）
+            val schedule = synchronized(seenAppsLock) {
+                if (seenAppsFlushPending) false else {
+                    seenAppsFlushPending = true
+                    true
+                }
+            }
+            if (schedule) {
+                seenAppsHandler.postDelayed(seenAppsFlushRunnable, SEEN_APPS_FLUSH_DELAY_MS)
+            }
+        }
+    }
+
+    /** 原子写（tmp + rename），失败返回 false 由调用方重试。 */
+    private fun writeSeenAppsAtomically(text: String): Boolean {
+        return try {
+            val file = File(filesDir, "seen_apps.json")
+            val tmp = File(filesDir, "seen_apps.json.tmp")
+            tmp.writeText(text)
+            if (tmp.renameTo(file)) {
+                true
+            } else {
+                file.writeText(text)
+                tmp.delete()
+                true
+            }
+        } catch (t: Throwable) {
+            false
         }
     }
 
@@ -286,14 +406,23 @@ class NotificationCaptureService : NotificationListenerService() {
         notifyQueueAvailable()
     }
 
-    /** 写入成功后在主线程通知 Dart 立即拉取（失败静默：轮询仍是兜底）。 */
+    /**
+     * 写入成功后在主线程通知 Dart 拉取队列（失败静默：20s 轮询仍是兜底）。
+     *
+     * O03（2026-10-21）：按 [QUEUE_NOTIFY_DELAY_MS] 合并。一条通知仍是一个独立
+     * 队列文件（不丢、各自带 postTime），但密集到达时原来**每个文件**都调一次
+     * channel → Dart 侧被反复唤醒、每次都要全目录扫描；现在同一窗口内只调一次，
+     * 而 Dart 的拉取本来就是「扫全目录」，合并不影响完整性。
+     */
     private fun notifyQueueAvailable() {
-        try {
-            Handler(Looper.getMainLooper()).post {
-                MainActivity.bridgeChannel?.invokeMethod("queueAvailable", null)
+        val schedule = synchronized(queueNotifyLock) {
+            if (queueNotifyPending) false else {
+                queueNotifyPending = true
+                true
             }
-        } catch (t: Throwable) {
-            // 应用进程已退出时没有 channel，属正常情况
+        }
+        if (schedule) {
+            queueNotifyHandler.postDelayed(queueNotifyRunnable, QUEUE_NOTIFY_DELAY_MS)
         }
     }
 

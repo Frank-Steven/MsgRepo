@@ -186,14 +186,35 @@ class AiClient {
 
   static String _secretKeyFor(String endpointId) => 'ai_key_$endpointId';
 
+  // ---- O06：HTTP 客户端复用 ----
+  //
+  // 原来每个请求都 `http.Client()` … `close()`：160 条消息 = 160 次 TLS 握手。
+  // 现在整个实例复用一个 client（连接池也跟着复用），取消/关闭时丢弃并重建，
+  // 保证任何路径都不会复用「已关闭」的实例。
+  /// 客户端工厂：测试可替换以注入 fake client / 统计创建次数。
+  static http.Client Function() clientFactory = () => http.Client();
+
+  http.Client? _http;
+
+  /// 复用的 HTTP 客户端（首次使用时创建）。
+  http.Client get _client => _http ??= clientFactory();
+
+  /// 关闭并丢弃复用的客户端（取消中断 / 测试收尾用）；下次请求会重新创建。
+  void closeClient() {
+    final c = _http;
+    _http = null;
+    _activeClient = null;
+    if (c != null) c.close();
+  }
+
+  /// 在途请求的标记（只用于「被 cancelActive 中断」的判定，不等于连接本身）。
   http.Client? _activeClient;
   bool _cancelled = false;
 
   /// 中断正在进行的处理（已产出的事件保留）。
   void cancelActive() {
     _cancelled = true;
-    _activeClient?.close();
-    _activeClient = null;
+    closeClient(); // 关掉在途连接，并丢弃实例（下次请求重建）
   }
 
   // ---- 接口配置 CRUD ----
@@ -336,7 +357,7 @@ class AiClient {
   /// 返回 (token, deviceName)。
   Future<(String, String)> pairDesktop({bool reset = false}) async {
     final baseUrl = await getDesktopBaseUrl();
-    final resp = await http
+    final resp = await _client
         .post(
           Uri.parse('$baseUrl/v1/pair'),
           headers: {'Content-Type': 'application/json'},
@@ -377,7 +398,7 @@ class AiClient {
     final baseUrl = await getDesktopBaseUrl();
     var ok = false;
     try {
-      final resp = await http
+      final resp = await _client
           .get(Uri.parse('$baseUrl/v1/health'))
           .timeout(const Duration(seconds: 2));
       ok = resp.statusCode == 200;
@@ -407,7 +428,7 @@ class AiClient {
     final url = joinEndpointUrl(endpoint.baseUrl, 'models');
     final http.Response resp;
     try {
-      resp = await http
+      resp = await _client
           .get(Uri.parse(url), headers: headers)
           .timeout(const Duration(seconds: 8));
     } catch (e) {
@@ -581,7 +602,7 @@ class AiClient {
       return req;
     }
 
-    final client = http.Client();
+    final client = _client;
     _activeClient = client;
     try {
       var streamed = await client
@@ -616,8 +637,8 @@ class AiClient {
       if (_activeClient == null) return; // 被 cancelActive 中断
       throw AiException('无法连接电脑端：$e');
     } finally {
+      // O06：客户端复用，这里只解除「在途」标记；需要中断请走 cancelActive()
       if (_activeClient == client) _activeClient = null;
-      client.close();
     }
   }
 
@@ -680,7 +701,7 @@ class AiClient {
       ],
     });
 
-    final client = http.Client();
+    final client = _client;
     _activeClient = client;
     try {
       final streamed =
@@ -727,8 +748,8 @@ class AiClient {
       if (_activeClient == null) return; // 被 cancelActive 中断
       throw AiException('远程接口调用失败：$e');
     } finally {
+      // O06：同上，不关闭复用实例
       if (_activeClient == client) _activeClient = null;
-      client.close();
     }
   }
 
