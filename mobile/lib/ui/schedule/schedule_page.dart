@@ -15,7 +15,6 @@ import 'month_view.dart';
 import 'schedule_shared.dart';
 import 'year_view.dart';
 import 'yearly_view.dart';
-import 'package:flutter/gestures.dart' show DragStartBehavior;
 
 /// 日程页（设计 §2，v2.3/v2.4 修订）：年度/年/月/日四级视图均无限滚动。
 ///
@@ -101,12 +100,17 @@ class SchedulePageState extends State<SchedulePage> {
   static const _barMinH = 120.0;
 
   /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
-  static const _handleH = 22.0;
+  static const _handleH = 32.0; // 拖动手柄高度：加大热区，手指更容易按住（2026-10-21）
 
   double? _barH; // 任务栏高度；null = 用默认比例
 
   /// DayView 上报的 45° 标签带高度：顶部手柄贴在它下沿。
   double _nameBandH = 0;
+
+  /// 两条手柄各自的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
+  /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
+  double? _dragLastYChart;
+  double? _dragLastYBar;
 
   @override
   void initState() {
@@ -139,15 +143,33 @@ class SchedulePageState extends State<SchedulePage> {
   }
 
   /// 拖动手柄。`onDelta` 收到的是**这一帧的位移**，由调用方决定改哪个高度。
-  Widget _handle({required String id, required ValueChanged<double> onDelta}) {
+  /// 拖动手柄。用 `Listener` 直接吃原始指针事件（不走手势竞技场）：
+  /// 之前用 `GestureDetector` 时竖向拖动会被图表的平移/缩放识别器抢走，表现为「拖不动」。
+  /// 拖动手柄：用 `Listener` 直接吃原始指针（不走手势竞技场，避免被图表平移抢走）。
+  /// `read`/`write` 把「上一次指针 y」存到 State 字段，保证跨帧连续。
+  Widget _handle({
+    required String id,
+    required ValueChanged<double> onDelta,
+    required double? Function() read,
+    required void Function(double?) write,
+  }) {
     final scheme = Theme.of(context).colorScheme;
-    return GestureDetector(
+    return Listener(
       key: ValueKey('schedule-handle-$id'),
       behavior: HitTestBehavior.opaque,
-      dragStartBehavior: DragStartBehavior.down,
-      onVerticalDragUpdate: (d) => onDelta(d.delta.dy),
-      onVerticalDragEnd: (_) => _saveHeights(),
-      onVerticalDragCancel: _saveHeights,
+      onPointerDown: (e) => write(e.position.dy),
+      onPointerMove: (e) {
+        final prev = read();
+        write(e.position.dy);
+        if (prev == null) return;
+        final dy = e.position.dy - prev;
+        if (dy != 0) onDelta(dy);
+      },
+      onPointerUp: (_) {
+        if (read() != null) _saveHeights();
+        write(null);
+      },
+      onPointerCancel: (_) => write(null),
       child: Container(
         height: _handleH,
         width: double.infinity,
@@ -210,12 +232,22 @@ class SchedulePageState extends State<SchedulePage> {
               left: 0,
               right: 0,
               height: _handleH,
-              child: _handle(id: 'chart', onDelta: dragBoundary),
+              child: _handle(
+                id: 'chart',
+                onDelta: dragBoundary,
+                read: () => _dragLastYChart,
+                write: (v) => _dragLastYChart = v,
+              ),
             ),
           ]),
         ),
         // 抓点 2：图表与任务栏之间
-        _handle(id: 'bar', onDelta: dragBoundary),
+        _handle(
+          id: 'bar',
+          onDelta: dragBoundary,
+          read: () => _dragLastYBar,
+          write: (v) => _dragLastYBar = v,
+        ),
         SizedBox(height: barH, child: _bottomSection(context)),
       ]);
     });
