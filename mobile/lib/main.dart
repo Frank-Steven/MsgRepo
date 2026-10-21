@@ -175,6 +175,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // F08：别处（消息详情「关联待办」等）通过 AppUiState.setTab 请求切页时，
+    // HomeShell 是唯一决定显示哪个页的地方 —— 订阅回来，把请求落到 _index。
+    AppUiState.instance.addListener(_syncTab);
     AppUiState.instance.setTab(_index);
     // 冷启动时可能已在后台（如被通知拉起），用真实生命周期初始化
     final lc = WidgetsBinding.instance.lifecycleState;
@@ -184,8 +187,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    AppUiState.instance.removeListener(_syncTab);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// 把 AppUiState 里的切页请求同步成真正的页面切换（F08）。
+  ///
+  /// 以前 _index 只被本地写、AppUiState 只被写不被读，于是
+  /// message_detail_sheet 的 setTab(1)（跳「待办」）没有任何效果。
+  void _syncTab() {
+    if (!mounted) return;
+    final next =
+        AppUiState.instance.tabIndex.clamp(0, AppUiState.tabCount - 1);
+    if (next == _index) return; // 本地切换已同步过，避免重复 setState/重复 reload
+    setState(() {
+      _index = next;
+      _builtTabs.add(next); // O10 懒构建：外部切页也要真正创建该页
+    });
+    _reloadTab(next);
   }
 
   @override
@@ -307,6 +327,20 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     );
   }
 
+  /// 切到某个 tab 后按需刷新该页（IndexedStack 保活，不会重跑 initState）。
+  void _reloadTab(int i) {
+    switch (i) {
+      case AppUiState.scheduleTabIndex:
+        _scheduleKey.currentState?.reload();
+      case AppUiState.todosTabIndex:
+        _todosKey.currentState?.reload();
+      case AppUiState.notesTabIndex:
+        _notesKey.currentState?.reload();
+      case AppUiState.messagesTabIndex:
+        _messagesKey.currentState?.reload();
+    }
+  }
+
   /// U19-B：底部导航；「消息」带未处理数角标（页面常驻，后台也会刷新）
   Widget _buildNavBar() {
     final pending = MessageBadges.instance.pending;
@@ -320,16 +354,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           _builtTabs.add(i); // 首次访问时才真正创建该页
         });
         AppUiState.instance.setTab(i);
-        switch (i) {
-          case 0:
-            _scheduleKey.currentState?.reload();
-          case 1:
-            _todosKey.currentState?.reload();
-          case 2:
-            _notesKey.currentState?.reload();
-          case 3:
-            _messagesKey.currentState?.reload();
-        }
+        _reloadTab(i);
       },
       destinations: [
         const NavigationDestination(

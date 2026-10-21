@@ -10,7 +10,14 @@ class AppUiState extends ChangeNotifier {
   static final AppUiState instance = AppUiState._();
 
   /// HomeShell 里页面顺序：日程 / 待办 / 笔记 / 消息 / 设置
+  static const int scheduleTabIndex = 0;
+  static const int todosTabIndex = 1;
+  static const int notesTabIndex = 2;
   static const int messagesTabIndex = 3;
+  static const int settingsTabIndex = 4;
+
+  /// 底部导航/IndexedStack 的页面总数（下标 0..count-1）。
+  static const int tabCount = 5;
 
   int _tabIndex = 0;
   bool _inForeground = true;

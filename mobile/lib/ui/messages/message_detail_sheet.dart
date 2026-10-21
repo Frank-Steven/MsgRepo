@@ -199,7 +199,7 @@ class _MessageDetailState extends State<_MessageDetail> {
 
   void _jumpToTodos() {
     Navigator.of(context).pop();
-    AppUiState.instance.setTab(1);
+    AppUiState.instance.setTab(AppUiState.todosTabIndex);
   }
 
   void _toast(String msg) {
