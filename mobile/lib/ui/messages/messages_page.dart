@@ -56,9 +56,11 @@ class MessagesPageState extends State<MessagesPage> {
   bool _selecting = false;
   final Set<String> _selected = {};
 
-  /// F02：已展开的**会话组** key（默认全部折叠；展开状态只存在本页 State，
-  /// 不持久化——用户下次进来仍按会话概览）。
-  final Set<String> _expanded = {};
+  /// F02 两级折叠的展开状态（默认全部折叠；只存本页 State，不持久化）。
+  /// 一级 = 来源应用（key = packageName）；二级 = 会话（key = packageName + NUL + 会话名，
+  /// 仅聊天类来源才有二级）。
+  final Set<String> _expandedSources = {};
+  final Set<String> _expandedConversations = {};
 
   /// 通知监听权限（v2.5：null=未知；false 时顶部显示恢复引导横幅）。
   bool? _listenerEnabled;
@@ -236,7 +238,12 @@ class MessagesPageState extends State<MessagesPage> {
   // 分组结果缓存（2026-10-20 性能）：原来每次 setState（多选一行、折叠、切 chip）
   // 都重跑「全量过滤 + 分组 List 分配」；500 条时每帧都是 O(n) 分配。
   List<Message>? _visibleCache;
-  List<_ConversationGroup>? _conversationsCache;
+  List<_SourceGroup>? _sourceCache;
+
+  /// 二级（会话）分组缓存：来源 key → 会话组。
+  /// **只有该来源被展开且是聊天类时才计算**，一级折叠时不建二级，
+  /// 展开成本是「该来源的条数」而不是全表，整体仍是 O(n) 而非 O(n²)。
+  final Map<String, List<_ConversationGroup>> _conversationCache = {};
   Object? _cacheKeyMessages;
   Object? _cacheKeyTasks;
   Set<String>? _cacheKeyFilter;
@@ -256,67 +263,115 @@ class MessagesPageState extends State<MessagesPage> {
       return _groupFilter.contains(kFilterDone) && _isLinkedDone(m);
     }).toList();
     _visibleCache = visible;
-    _conversationsCache = null;
+    _sourceCache = null;
+    _conversationCache.clear();
     _cacheKeyMessages = _messages;
     _cacheKeyTasks = _tasksById;
     _cacheKeyFilter = Set.of(_groupFilter);
     return visible;
   }
 
-  /// 会话名（F02）：优先 `conversationTitle`，并剥离「(N条新消息)」折叠后缀
-  /// （U14 清洗），否则退回应用名，最后退回包名。
-  String _conversationName(Message m) {
-    final raw = m.conversationTitle?.trim();
-    if (raw != null && raw.isNotEmpty) return stripFoldMarkers(raw);
-    final app = m.appName?.trim();
-    if (app != null && app.isNotEmpty) return app;
-    return m.packageName;
+  /// 条数 / 最新时间 / 未处理数（两级组头共用口径）。
+  /// 「未处理」与顶部 chip 同口径：messageGroupKey == pending。
+  (int, int, int) _groupStats(List<Message> msgs) {
+    var latest = 0;
+    var pending = 0;
+    for (final m in msgs) {
+      if (m.postedAt > latest) latest = m.postedAt;
+      if (messageGroupKey(m) == kGroupPending) pending++;
+    }
+    return (msgs.length, latest, pending);
   }
 
-  /// F02：按会话（群聊/私聊）折叠分组。
+  /// F02 一级分组：按**来源应用**聚合（appName 空则 packageName）。
   ///
-  /// 与筛选 chip **正交**：先由 [_visible] 过滤，再在这里按会话聚合
-  /// （未处理/已处理/垃圾的互斥状态组仍由 chip 承担，不再单独做一级分组）。
-  /// 组顺序 = 组内最新消息时间倒序：[_visible] 本身按 posted_at DESC，
-  /// 按首次出现顺序插入即天然满足。
+  /// 与筛选 chip 正交：先由 [_visible] 过滤，再在这里分组。
+  /// 组顺序 = 组内最新消息倒序（[_visible] 本身 posted_at DESC，按首次出现插入即满足）。
   ///
-  /// 缓存键与 [_visible] 同源（消息集合 identity / 任务映射 identity / 筛选集合），
-  /// 因此点击展开/折叠不会触发 O(n) 重算。
-  List<_ConversationGroup> get _conversations {
-    final cached = _conversationsCache;
+  /// 缓存键与 [_visible] 同源（消息集 identity / 任务映射 identity / 筛选集合），
+  /// 因此点击展开折叠不会触发 O(n) 重算。
+  List<_SourceGroup> get _sourceGroups {
+    final cached = _sourceCache;
+    if (cached != null && _cachesFresh()) return cached;
+    // 一级重算 → 二级全部作废
+    _conversationCache.clear();
+    final buckets = <String, List<Message>>{};
+    final appNames = <String, String>{};
+    for (final m in _visible) {
+      final pkg = m.packageName;
+      (buckets[pkg] ??= <Message>[]).add(m);
+      if (!appNames.containsKey(pkg)) {
+        final n = m.appName?.trim();
+        if (n != null && n.isNotEmpty) appNames[pkg] = n;
+      }
+    }
+    // 消息行上没带 appName 时，退回收件箱来源列表里的名字（只查一次 map）
+    final sourceApps = <String, String?>{
+      for (final s in _sources) s.packageName: s.appName,
+    };
+    final groups = <_SourceGroup>[];
+    for (final entry in buckets.entries) {
+      final pkg = entry.key;
+      final msgs = entry.value;
+      final fallback = sourceApps[pkg]?.trim();
+      final appName = appNames[pkg] ??
+          ((fallback != null && fallback.isNotEmpty) ? fallback : null);
+      final (count, latest, pending) = _groupStats(msgs);
+      groups.add(_SourceGroup(
+        key: pkg,
+        title: appName ?? pkg,
+        messages: msgs,
+        count: count,
+        latestAt: latest,
+        pendingCount: pending,
+        // 聊天类来源才建二级：音乐/天气/电商的 title 是歌名/商品名，拆会话只会制造噪音
+        chat: isChatSource(pkg, appName),
+      ));
+    }
+    _sourceCache = groups;
+    // 防御：单独命中本缓存时也要保证键是最新的（值与本轮 _visible 同源）。
+    _cacheKeyMessages = _messages;
+    _cacheKeyTasks = _tasksById;
+    _cacheKeyFilter = Set.of(_groupFilter);
+    return groups;
+  }
+
+  /// F02 二级分组：某个来源内的**会话**（群聊/联系人）。
+  /// 会话名统一走 [guessConversationName]（conversationTitle → title 剥
+  /// 「(N条新消息)」与「群名: 内容」前缀 → sender → 其它），采集端 94.8% 的
+  /// conversation_title 是空的，群名实际写在 title 里。
+  ///
+  /// 惰性 memo：只有该来源已展开时才会被调用；结果按来源缓存，
+  /// 折叠/展开其它来源不会重算它。
+  List<_ConversationGroup> _conversationGroupsOf(_SourceGroup source) {
+    final cached = _conversationCache[source.key];
     if (cached != null && _cachesFresh()) return cached;
     final buckets = <String, List<Message>>{};
     final names = <String, String>{};
-    for (final m in _visible) {
-      final name = _conversationName(m);
-      // 同名的群可能同时来自不同应用（如微信「张三」与 QQ「张三」），
-      // 故 key 带上包名，避免误并成一个会话。
-      final key = '${m.packageName}\u0000$name';
+    for (final m in source.messages) {
+      final name = guessConversationName(
+        conversationTitle: m.conversationTitle,
+        title: m.title,
+        sender: m.sender,
+      );
+      final key = '${source.key}\u0000$name';
       names[key] = name;
       (buckets[key] ??= <Message>[]).add(m);
     }
     final groups = <_ConversationGroup>[];
     for (final entry in buckets.entries) {
       final msgs = entry.value;
-      var latest = 0;
-      var pending = 0;
-      for (final m in msgs) {
-        if (m.postedAt > latest) latest = m.postedAt;
-        if (messageGroupKey(m) == kGroupPending) pending++;
-      }
+      final (count, latest, pending) = _groupStats(msgs);
       groups.add(_ConversationGroup(
         key: entry.key,
         title: names[entry.key]!,
         messages: msgs,
+        count: count,
         latestAt: latest,
         pendingCount: pending,
       ));
     }
-    _conversationsCache = groups;
-    // 防御：单独命中本缓存时也要保证键是最新的（值与本轮 _visible 同源）。
-    _cacheKeyMessages = _messages;
-    _cacheKeyTasks = _tasksById;
-    _cacheKeyFilter = Set.of(_groupFilter);
+    _conversationCache[source.key] = groups;
     return groups;
   }
 
@@ -927,9 +982,43 @@ class MessagesPageState extends State<MessagesPage> {
     );
   }
 
+  /// 单条消息行（多选 / 左滑 / 点开详情，能力与改动前一致）。
+  Widget _buildTile(Message m) {
+    // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
+    final processing = AiProcessingService.instance.isProcessing(m.id);
+    return MessageTile(
+      key: ValueKey(m.id),
+      message: m,
+      selecting: _selecting,
+      selected: _selected.contains(m.id),
+      processing: processing,
+      swipeEnabled: !processing,
+      linkedTaskDone: _isLinkedDone(m),
+      linkedTaskPriority: _linkedTaskPriority(m),
+      linkedTaskCount: _linkedTaskIds(m).length,
+      actions: _actionsFor(m),
+      onTap: () {
+        if (_selecting) {
+          _toggleSelect(m);
+        } else {
+          // P3-2：点开详情看正文与附件（图片可放大）
+          showMessageDetail(context, m);
+        }
+      },
+      onLongPress: () {
+        if (!_selecting) {
+          setState(() {
+            _selecting = true;
+            _selected.add(m.id);
+          });
+        }
+      },
+    );
+  }
+
   Widget _buildList() {
-    final groups = _conversations;
-    if (groups.isEmpty) {
+    final sources = _sourceGroups;
+    if (sources.isEmpty) {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
@@ -938,68 +1027,63 @@ class MessagesPageState extends State<MessagesPage> {
         ],
       );
     }
+    final slivers = <Widget>[];
+    for (final s in sources) {
+      final sourceExpanded = _expandedSources.contains(s.key);
+      // 一级：来源应用。不用 pinned: 多个固定吸顶头挤在视口顶部会产生非法
+      // SliverGeometry（layoutExtent > paintExtent）导致整个视口不绘制。
+      slivers.add(SliverPersistentHeader(
+        delegate: _SourceHeaderDelegate(
+          sourceKey: s.key,
+          title: s.title,
+          count: s.count,
+          pendingCount: s.pendingCount,
+          expanded: sourceExpanded,
+          onToggle: () => setState(() {
+            if (!_expandedSources.remove(s.key)) _expandedSources.add(s.key);
+          }),
+        ),
+      ));
+      // 一级折叠：二级一个都不建（chat 与否都不用算）——这是避免 O(n²) 的关键
+      if (!sourceExpanded) continue;
+      if (!s.chat) {
+        // 非聊天类来源：不建二级，消息直接列在一级下面
+        slivers.add(SliverList.builder(
+          itemCount: s.messages.length,
+          itemBuilder: (context, i) => _buildTile(s.messages[i]),
+        ));
+        continue;
+      }
+      // 二级：会话（仅聊天类来源），同样默认折叠
+      for (final c in _conversationGroupsOf(s)) {
+        final convExpanded = _expandedConversations.contains(c.key);
+        slivers.add(SliverPersistentHeader(
+          delegate: _ConversationHeaderDelegate(
+            conversationKey: c.key,
+            title: c.title,
+            count: c.count,
+            latestAt: c.latestAt,
+            pendingCount: c.pendingCount,
+            expanded: convExpanded,
+            onToggle: () => setState(() {
+              if (!_expandedConversations.remove(c.key)) {
+                _expandedConversations.add(c.key);
+              }
+            }),
+          ),
+        ));
+        if (convExpanded) {
+          slivers.add(SliverList.builder(
+            itemCount: c.messages.length,
+            itemBuilder: (context, i) => _buildTile(c.messages[i]),
+          ));
+        }
+      }
+    }
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 80)));
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        // F02：每个会话一组——组头显示 会话名 + 条数 + 最新时间 + 未处理数，
-        // 默认折叠；展开后才是消息行（多选/左滑/点开详情保持原样）。
-        for (final g in groups) ...[
-          // 不用 pinned: 多个固定吸顶头挤在视口顶部会产生非法 SliverGeometry
-          //（layoutExtent > paintExtent）导致整个视口不绘制；组头随内容滚动。
-          SliverPersistentHeader(
-            delegate: _ConversationHeaderDelegate(
-              conversationKey: g.key,
-              title: g.title,
-              count: g.messages.length,
-              latestAt: g.latestAt,
-              pendingCount: g.pendingCount,
-              expanded: _expanded.contains(g.key),
-              onToggle: () => setState(() {
-                if (!_expanded.remove(g.key)) _expanded.add(g.key);
-              }),
-            ),
-          ),
-          if (_expanded.contains(g.key))
-            SliverList.builder(
-              itemCount: g.messages.length,
-              itemBuilder: (context, i) {
-                final m = g.messages[i];
-                // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
-                final processing =
-                    AiProcessingService.instance.isProcessing(m.id);
-                return MessageTile(
-                  key: ValueKey(m.id),
-                  message: m,
-                  selecting: _selecting,
-                  selected: _selected.contains(m.id),
-                  processing: processing,
-                  swipeEnabled: !processing,
-                  linkedTaskDone: _isLinkedDone(m),
-                  linkedTaskPriority: _linkedTaskPriority(m),
-                  linkedTaskCount: _linkedTaskIds(m).length,
-                  actions: _actionsFor(m),
-                  onTap: () {
-                    if (_selecting) {
-                      _toggleSelect(m);
-                    } else {
-                      // P3-2：点开详情看正文与附件（图片可放大）
-                      showMessageDetail(context, m);
-                    }
-                  },
-                  onLongPress: () {
-                    if (!_selecting) {
-                      setState(() {
-                        _selecting = true;
-                        _selected.add(m.id);
-                      });
-                    }
-                  },
-                );
-              },
-            ),
-        ],
-        const SliverToBoxAdapter(child: SizedBox(height: 80)),
-      ],
+      slivers: slivers,
     );
   }
 
@@ -1084,16 +1168,53 @@ class MessagesPageState extends State<MessagesPage> {
   }
 }
 
-/// F02：一个「会话组」——同一群聊/私聊在当前**筛选后**的全部消息。
-class _ConversationGroup {
-  /// 会话标识：包名 + 会话名（含 NUL 分隔，避免同名不同应用被合并）。
+/// F02 一级分组：「来源应用」在当前**筛选后**的全部消息。
+class _SourceGroup {
+  /// 来源标识 = packageName。
   final String key;
 
-  /// 组头显示的会话名（已剥离「(N条新消息)」折叠后缀）。
+  /// 组头显示的应用名（appName，空则 packageName）。
   final String title;
 
   /// 组内消息，保持列表原有顺序（posted_at 倒序）。
   final List<Message> messages;
+
+  /// 条数（= messages.length，预先算好供组头 shouldRebuild 比较）。
+  final int count;
+
+  /// 组内最新一条消息的时间（毫秒）。
+  final int latestAt;
+
+  /// 组内仍属「未处理」的条数（与顶部 chip 的未处理口径一致）。
+  final int pendingCount;
+
+  /// 是否聊天类来源（只有聊天类才建二级「会话」分组）。
+  final bool chat;
+
+  const _SourceGroup({
+    required this.key,
+    required this.title,
+    required this.messages,
+    required this.count,
+    required this.latestAt,
+    required this.pendingCount,
+    required this.chat,
+  });
+}
+
+/// F02：一个「会话组」——同一群聊/私聊在当前**筛选后**的全部消息。
+class _ConversationGroup {
+  /// 会话标识：来源包名 + NUL + 会话名（避免同名会话被合并）。
+  final String key;
+
+  /// 组头显示的会话名（guessConversationName 推导 + 剥折叠后缀）。
+  final String title;
+
+  /// 组内消息，保持列表原有顺序（posted_at 倒序）。
+  final List<Message> messages;
+
+  /// 条数（= messages.length）。
+  final int count;
 
   /// 组内最新一条消息的时间（毫秒）。
   final int latestAt;
@@ -1105,13 +1226,95 @@ class _ConversationGroup {
     required this.key,
     required this.title,
     required this.messages,
+    required this.count,
     required this.latestAt,
     required this.pendingCount,
   });
 }
 
-/// F02 会话组头：会话名（主）+「条数 · 最新时间 · 未处理 N」（次），
-/// 左侧 chevron 指示展开状态，整行点击切换。
+/// F02 一级组头（来源应用）：单行「chevron + 应用名 …… N 条 · 未处理 M」，
+/// 字号比二级略大，作为层级锚点。
+class _SourceHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final String sourceKey;
+  final String title;
+  final int count;
+  final int pendingCount;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  const _SourceHeaderDelegate({
+    required this.sourceKey,
+    required this.title,
+    required this.count,
+    required this.pendingCount,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  /// 单行：8 + 24 + 8 + 余量。
+  static const double kHeight = 46;
+
+  @override
+  double get minExtent => kHeight;
+
+  @override
+  double get maxExtent => kHeight;
+
+  @override
+  bool shouldRebuild(_SourceHeaderDelegate oldDelegate) =>
+      sourceKey != oldDelegate.sourceKey ||
+      title != oldDelegate.title ||
+      count != oldDelegate.count ||
+      pendingCount != oldDelegate.pendingCount ||
+      expanded != oldDelegate.expanded;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final cs = Theme.of(context).colorScheme;
+    final meta = <String>['$count 条'];
+    if (pendingCount > 0) meta.add('未处理 $pendingCount');
+    return Material(
+      color: cs.surface,
+      child: InkWell(
+        onTap: onToggle,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Icon(
+                expanded ? Icons.expand_less : Icons.expand_more,
+                size: 22,
+                color: cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSurface),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                meta.join(' · '),
+                maxLines: 1,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// F02 二级组头（会话）：缩进 32dp 显示层级，会话名（主）+
+/// 「条数 · 最新时间 · 未处理 N」（次），整行点击切换展开/折叠。
 class _ConversationHeaderDelegate extends SliverPersistentHeaderDelegate {
   final String conversationKey;
   final String title;
@@ -1156,11 +1359,11 @@ class _ConversationHeaderDelegate extends SliverPersistentHeaderDelegate {
     final meta = <String>['$count 条', formatMessageTime(latestAt)];
     if (pendingCount > 0) meta.add('未处理 $pendingCount');
     return Material(
-      color: cs.surface,
+      color: cs.surfaceContainerLow,
       child: InkWell(
         onTap: onToggle,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.fromLTRB(32, 0, 16, 0),
           child: Row(
             children: [
               Icon(

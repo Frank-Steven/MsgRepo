@@ -18,3 +18,51 @@ String stripFoldMarkers(String title) {
   // 整条标题就只有这个标记时保留原文，避免展示成空
   return out.isEmpty ? trimmed : out;
 }
+
+/// 是否「聊天类」来源：只有聊天类才按会话（群名/联系人）做二级分组，
+/// 音乐/天气/电商这类来源的 title 是内容标题（歌名、商品名），拿来当会话名只会制造噪音。
+bool isChatSource(String? packageName, String? appName) {
+  const chatPackages = {
+    'com.tencent.mm', // 微信
+    'com.tencent.mobileqq', // QQ
+    'com.tencent.tim', // TIM
+    'com.tencent.wework', // 企业微信
+    'com.alibaba.android.rimet', // 钉钉
+    'com.ss.android.lark', // 飞书
+    'cn.wps.moffice_eng.xiaomi.lite', // 小米文档（含聊天）
+  };
+  if (packageName != null && chatPackages.contains(packageName)) return true;
+  final n = (appName ?? '').toLowerCase();
+  const chatNames = ['微信', 'qq', 'tim', '短信', '信息', '钉钉', '飞书', '企业微信', 'wechat'];
+  return chatNames.any((k) => n.contains(k));
+}
+
+/// 推导「会话名」（二级分组用）。
+///
+/// 采集端目前**基本没写 conversation_title**（6848 条里 94.8% 为空），
+/// 群名/联系名实际落在 title 里（如「爱灯天文部(5条新消息)」「南邮 梧桐 59 506」），
+/// 所以按 conversationTitle → title 的优先级回退，并统一剥掉折叠后缀与「群名: 内容」前缀。
+String guessConversationName({
+  String? conversationTitle,
+  required String title,
+  String? sender,
+}) {
+  String clean(String s) {
+    var v = stripFoldMarkers(s).trim();
+    // 「某某群: 内容」「某某: 内容」→ 取冒号前（仅当前缀不太长，避免把正文切开）
+    final m = RegExp(r'^(.{1,30}?)[:：]\s').firstMatch(v);
+    if (m != null) v = m.group(1)!.trim();
+    return v;
+  }
+
+  final ct = conversationTitle?.trim();
+  if (ct != null && ct.isNotEmpty) {
+    final v = clean(ct);
+    if (v.isNotEmpty) return v;
+  }
+  final tv = clean(title);
+  if (tv.isNotEmpty) return tv;
+  final sv = sender?.trim();
+  if (sv != null && sv.isNotEmpty) return sv;
+  return '其它';
+}
