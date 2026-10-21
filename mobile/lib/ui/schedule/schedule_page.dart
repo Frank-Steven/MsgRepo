@@ -102,6 +102,9 @@ class SchedulePageState extends State<SchedulePage> {
   /// 分割线手柄高度（含细分隔线 + 中间短横条）。
   static const _splitHandleH = 14.0;
 
+  /// 顶部拖动区高度：图表最上方的日期/刻度带（用户 2026-10-21 说的「黄色区域」）。
+  static const _topDragBandH = 56.0;
+
   double _splitRatio = 0.6;
 
   @override
@@ -200,8 +203,32 @@ class SchedulePageState extends State<SchedulePage> {
       final ganttH = avail * _splitRatio;
       final bottomH = avail - ganttH;
       return Column(children: [
-        SizedBox(height: ganttH, child: _ganttView()),
-        _splitHandle(avail),
+          // 图表区：顶部 56px 的日期/刻度带也是拖动手柄（向下拖 = 日程表变高，用户 2026-10-21 选 B）。
+          SizedBox(
+            height: ganttH,
+            child: Stack(children: [
+              Positioned.fill(child: _ganttView()),
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: _topDragBandH,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onVerticalDragUpdate: (d) {
+                    if (avail <= 0) return;
+                    setState(() {
+                      _splitRatio = (_splitRatio + d.delta.dy / avail)
+                          .clamp(_splitRatioMin, _splitRatioMax);
+                    });
+                  },
+                  onVerticalDragEnd: (_) => _saveSplitRatio(),
+                  onVerticalDragCancel: _saveSplitRatio,
+                ),
+              ),
+            ]),
+          ),
+          _splitHandle(avail),
         SizedBox(height: bottomH, child: _bottomSection(context)),
       ]);
     });

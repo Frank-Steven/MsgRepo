@@ -246,6 +246,10 @@ class MainActivity : FlutterActivity() {
     if (path.isNullOrBlank()) throw IllegalArgumentException("path 为空")
     val src = java.io.File(path)
     if (!src.exists()) throw IllegalStateException("文件不存在")
+    // 2026-10-21 验收发现：源文件读不到时会静默导出 0 字节文件。先挡掉空文件/目录。
+    if (!src.isFile) throw IllegalStateException("不是普通文件")
+    if (src.length() <= 0L) throw IllegalStateException("源文件为空（0 字节）")
+    if (!src.canRead()) throw IllegalStateException("源文件不可读")
     val values = ContentValues().apply {
       put(MediaStore.Downloads.DISPLAY_NAME, displayName)
       put(MediaStore.Downloads.MIME_TYPE, mime)
@@ -254,9 +258,14 @@ class MainActivity : FlutterActivity() {
     val resolver = contentResolver
     val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
       ?: throw IllegalStateException("无法创建下载条目")
-    resolver.openOutputStream(uri)?.use { out ->
+    val written = resolver.openOutputStream(uri)?.use { out ->
       src.inputStream().use { input -> input.copyTo(out) }
     } ?: throw IllegalStateException("无法写入下载目录")
+    if (written != src.length()) {
+      // 写出来的字节数和源文件不一致 → 删掉半截文件并如实报错
+      try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+      throw IllegalStateException("写入不完整（$written/${src.length()} 字节）")
+    }
     return "下载/$displayName"
   }
 

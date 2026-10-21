@@ -30,7 +30,14 @@ Future<void> showMessageDetail(BuildContext context, Message m) {
       minChildSize: 0.35,
       maxChildSize: 0.95,
       expand: false,
-      builder: (ctx, scroll) => _MessageDetail(message: m, scroll: scroll),
+      // F07 修复（2026-10-21 验收）：SnackBar 原先发出后被子面板挡住看不见，
+      // 给面板自己套一层 ScaffoldMessenger + 透明 Scaffold，提示就浮在面板上方。
+      builder: (ctx, scroll) => ScaffoldMessenger(
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          body: _MessageDetail(message: m, scroll: scroll),
+        ),
+      ),
     ),
   );
 }
