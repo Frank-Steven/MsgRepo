@@ -15,7 +15,7 @@ import 'month_view.dart';
 import 'schedule_shared.dart';
 import 'year_view.dart';
 import 'yearly_view.dart';
-import 'dart:math' as math;
+import 'package:flutter/gestures.dart' show DragStartBehavior;
 
 /// 日程页（设计 §2，v2.3/v2.4 修订）：年度/年/月/日四级视图均无限滚动。
 ///
@@ -90,215 +90,137 @@ class SchedulePageState extends State<SchedulePage> {
   final _monthKey = GlobalKey<MonthViewState>();
   final _dayKey = GlobalKey<DayViewState>();
 
-  // ---- F13②：图表区 / 底部面板 可拖动分割线 ----
+  // ---- F13②：图表区 / 任务栏 两段独立高度（2026-10-21 全量重写）----
+  //
+  // 设计原则（用户要求：拖其中一条时另一部分不许跟着动）：
+  //  · `_chartH` 与 `_barH` **完全独立**，各自持久化，互不推导；
+  //  · 顶部手柄只改 `_chartH`；底部手柄只改 `_barH`；
+  //  · 两者之和超出可视高度 → 整页纵向滚动；放得下时下方留白（不自动拉伸，避免耦合）。
+  static const _barPrefsKey = 'schedule_bar_height';
+  static const _chartMinH = 200.0;
+  static const _barMinH = 120.0;
 
-  /// 图表区占（可用高度）的比例，默认 0.6；拖分割线改它，夹在
+  /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
+  static const _handleH = 22.0;
 
-  /// 分割线手柄高度（含细分隔线 + 中间短横条）。
-  static const _splitHandleH = 22.0; // 拖动条高度（加大热区，2026-10-21 用户反馈难点中）
+  double? _barH; // 任务栏高度；null = 用默认比例
 
-  /// 顶部拖动区高度：图表最上方的日期/刻度带（用户 2026-10-21 说的「黄色区域」）。
-  static const _topDragBandH = 26.0; // 顶部可见拖动条高度
-
-  double _splitRatio = 0.6;
-
-  // F13②（2026-10-21 用户要求）：图表与任务栏**各自**记像素高度。
-  // 拖图表顶部那条时：图表变高、任务栏高度不变（超出可视区就整页滚动）。
-  static const _ganttPrefsKey = 'schedule_gantt_height';
-  static const _bottomPrefsKey = 'schedule_bottom_height';
-  static const _ganttMinH = 220.0;
-  static const _bottomMinH = 120.0;
-  static const _ganttOverflowAllow = 1200.0;
-  double? _ganttHeightPx;
-  double? _bottomHeightPx;
-  /// 45° 标签名称带高度（DayView 上报），拖动条夹在它下沿。
+  /// DayView 上报的 45° 标签带高度：顶部手柄贴在它下沿。
   double _nameBandH = 0;
 
   @override
   void initState() {
     super.initState();
-    _loadSplitRatio();
+    _loadHeights();
     reload();
   }
 
-  /// 启动时读回上次拖好的分割比例（读不到就用默认 0.6）。
-  Future<void> _loadSplitRatio() async {
+  /// 读回上次拖好的两段高度（读不到就用默认比例）。
+  Future<void> _loadHeights() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final g = prefs.getDouble(_ganttPrefsKey);
-      final bh = prefs.getDouble(_bottomPrefsKey);
-      if (!mounted) return;
-      if (g == null && bh == null) return;
+      final bar = prefs.getDouble(_barPrefsKey);
       setState(() {
-        if (g != null) _ganttHeightPx = g;
-        if (bh != null) _bottomHeightPx = bh;
+        if (bar != null) _barH = bar;
       });
     } catch (_) {
-      // 读失败用默认布局
+      // 读失败用默认布局，不影响使用
     }
   }
 
-  /// 松手落库：下次进入日程页沿用这次拖出来的比例。
-  Future<void> _saveSplitRatio() async {
+  Future<void> _saveHeights() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final g = _ganttHeightPx;
-      final bh = _bottomHeightPx;
-      if (g != null) await prefs.setDouble(_ganttPrefsKey, g);
-      if (bh != null) await prefs.setDouble(_bottomPrefsKey, bh);
+      final bar = _barH;
+      if (bar != null) await prefs.setDouble(_barPrefsKey, bar);
     } catch (_) {
-      // fire-and-forget
+      // fire-and-forget：写失败只影响下次进入的默认值
     }
   }
 
-  /// F13②：分割手柄——**图表区与下方任务栏的分界线**（tooltip 语义：
-  /// 拖动这条线 = 调整上方图表 / 下方任务列表的高度）。
-  /// 上下拖动改 [_splitRatio]；只吃竖直手势，与图表区内部的横向
-  /// 平移/缩放不冲突。
-  /// 顶部可见拖动条：向下拖 = 日程表变高（调整的是日程表，不是任务栏）。
-  /// 2026-10-21 用户反馈「不知道按哪里才能拖」，所以做成有底色、有图标、有文案的显式手柄。
-  /// 顶部拖动条（夹在 45° 标签带与日期/刻度带之间）：**只改图表高度，任务栏高度不变**。
-  ///
-  /// 用 `Listener` 直接吃原始指针事件（不用手势识别器）：快速拖动时不会与图表内部
-  /// 的平移/缩放手势抢竞技场，同时 DayView 侧用 `panExcludeTop` 让出这一带。
-  Widget _topGrip(double ganttH, double avail) {
-    final scheme = Theme.of(context).colorScheme;
-    double? lastY;
-    return Listener(
-      onPointerDown: (e) => lastY = e.position.dy,
-      onPointerMove: (e) {
-        final prev = lastY;
-        lastY = e.position.dy;
-        if (prev == null) return;
-        final dy = e.position.dy - prev;
-        if (dy == 0) return;
-        final cur = _ganttHeightPx ?? ganttH;
-        final next =
-            (cur + dy).clamp(_ganttMinH, avail + _ganttOverflowAllow);
-        if (next == _ganttHeightPx) return;
-        setState(() {
-          _ganttHeightPx = next;
-          _bottomHeightPx ??= (avail - ganttH).clamp(_bottomMinH, avail);
-        });
-      },
-      onPointerUp: (_) {
-        if (lastY != null) _saveSplitRatio();
-        lastY = null;
-      },
-      onPointerCancel: (_) => lastY = null,
-      child: Container(
-        height: _topDragBandH,
-        width: double.infinity,
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.drag_handle, size: 16, color: scheme.onSurfaceVariant),
-            const SizedBox(width: 4),
-            Text('拖动这里调整日程表高度',
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _splitHandle(double avail) {
+  /// 拖动手柄。`onDelta` 收到的是**这一帧的位移**，由调用方决定改哪个高度。
+  Widget _handle({required String id, required ValueChanged<double> onDelta}) {
     final scheme = Theme.of(context).colorScheme;
     return GestureDetector(
+      key: ValueKey('schedule-handle-$id'),
       behavior: HitTestBehavior.opaque,
-      onVerticalDragUpdate: (d) {
-        if (avail <= 0) return;
-        // 手柄往上拖 = 任务栏变高（图表相应变矮）；这条只管任务栏，不影响顶部拖动条的语义
-        final cur = _bottomHeightPx ?? (avail * 0.4);
-        final next = (cur - d.delta.dy).clamp(_bottomMinH, avail - _ganttMinH);
-        if (next == _bottomHeightPx) return;
-        setState(() => _bottomHeightPx = next);
-      },
-      onVerticalDragEnd: (_) => _saveSplitRatio(),
-      onVerticalDragCancel: _saveSplitRatio,
-      child: SizedBox(
-        height: _splitHandleH,
+      dragStartBehavior: DragStartBehavior.down,
+      onVerticalDragUpdate: (d) => onDelta(d.delta.dy),
+      onVerticalDragEnd: (_) => _saveHeights(),
+      onVerticalDragCancel: _saveHeights,
+      child: Container(
+        height: _handleH,
         width: double.infinity,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            // 细分隔线（贯穿整宽）
-            Positioned.fill(
-              child: Align(
-                alignment: Alignment.center,
-                child: Container(
-                  height: 1,
-                  color: scheme.outlineVariant.withValues(alpha: 0.7),
-                ),
-              ),
-            ),
-            // 中间短横条（拖拽热区提示）
-            Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: scheme.outlineVariant,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-              // 底色让「这里可以拖」更明显（用户 2026-10-21）
-              Positioned.fill(
-                child: ColoredBox(
-                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
-                ),
-              ),
-          ],
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        alignment: Alignment.center,
+        child: Container(
+          width: 44,
+          height: 4,
+          decoration: BoxDecoration(
+            color: scheme.outlineVariant,
+            borderRadius: BorderRadius.circular(2),
+          ),
         ),
       ),
     );
   }
 
-  /// F13②：图表区 + 可拖动分割线 + 底部面板。
+  /// 布局：**永远铺满屏幕**，只有「任务栏高度」一个自由度。
   ///
-  /// 两个面板按像素高度（[_splitRatio]）分配，不再用固定 flex，
-  /// 这样拖分割线就真的能改变图表区高度（日视图行多了可以拉高）。
+  /// 2026-10-21 用户反馈：拖红色（图表）→ 蓝色（任务栏）被拖着走、拖绿色（任务栏标题）→ 整页滚动、
+  /// 在红色里滚动 → 也变成整页滚动。根因是上一版把整页放进 `SingleChildScrollView` 并允许两段各自独立
+  /// 设高（会溢出/留白，手势全被页面滚动吃掉）。
+  ///
+  /// 现在改成标准分栏：`图表 = 视口 - 手柄 - 任务栏` 自动铺满，**不再有页面滚动**；
+  /// 两个手柄（顶部那条 / 图表与任务栏之间那条）都是同一个边界的抓点：
+  /// 往下拖 = 图表变高、任务栏变矮；往上拖反之。
   Widget _splitBody(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
-      final total = constraints.maxHeight;
-      if (!total.isFinite || total <= 0) {
+      final vp = constraints.maxHeight;
+      if (!vp.isFinite || vp <= 0) {
         return Column(children: [
           Expanded(flex: 3, child: _ganttView()),
           Expanded(flex: 2, child: _bottomSection(context)),
         ]);
       }
-      final avail = (total - _splitHandleH).clamp(0.0, double.infinity);
-      final ganttH = (_ganttHeightPx ?? avail * _splitRatio)
-          .clamp(_ganttMinH, avail + _ganttOverflowAllow);
-      final bottomH = (_bottomHeightPx ?? (avail - ganttH))
-          .clamp(_bottomMinH, double.infinity);
-      final overflow = ganttH + bottomH + _splitHandleH > total + 0.5;
-      final content = Column(mainAxisSize: MainAxisSize.min, children: [
+      final avail = vp - _handleH;
+      // 任务栏高度是唯一自由度；图表吃掉剩余空间（永远铺满，无留白、无页面滚动）
+      final barH = (_barH ?? avail * 0.40)
+          .clamp(_barMinH, (avail - _chartMinH).clamp(_barMinH, avail));
+      final chartH = (avail - barH).clamp(_chartMinH, avail);
+
+      // 拖动 = 移动同一条边界：dy>0（往下）→ 任务栏变矮、图表变高
+      void dragBoundary(double dy) {
+        final nextBar = (barH - dy).clamp(
+          _barMinH,
+          (avail - _chartMinH).clamp(_barMinH, avail),
+        );
+        if (nextBar != barH) setState(() => _barH = nextBar);
+      }
+
+      return Column(children: [
         SizedBox(
-          height: ganttH,
+          height: chartH,
           child: Stack(children: [
             Positioned.fill(child: _ganttView()),
-            // 拖动条：夹在「45° 标签带」与「日期/刻度带」之间（用户 2026-10-21 指定）
+            // 抓点 1：45° 标签带与日期/刻度带之间（用户指定位置）
             Positioned(
-              top: math.max(0.0, math.min(_nameBandH, ganttH - _topDragBandH)),
+              top: (_nameBandH - _handleH / 2)
+                  .clamp(0.0, (chartH - _handleH).clamp(0.0, chartH)),
               left: 0,
               right: 0,
-              height: _topDragBandH,
-              child: _topGrip(ganttH, avail),
+              height: _handleH,
+              child: _handle(id: 'chart', onDelta: dragBoundary),
             ),
           ]),
         ),
-        _splitHandle(avail),
-        SizedBox(height: bottomH, child: _bottomSection(context)),
+        // 抓点 2：图表与任务栏之间
+        _handle(id: 'bar', onDelta: dragBoundary),
+        SizedBox(height: barH, child: _bottomSection(context)),
       ]);
-      if (!overflow) return content;
-      // 图表被拖得比可视区更高：整页纵向滚动，任务栏高度保持不变
-      return SingleChildScrollView(
-        physics: const ClampingScrollPhysics(),
-        child: content,
-      );
     });
   }
+
 
   /// _cache 内容变了：递增版本，派生列表（[_ganttTasks]）下次读到时按需重算。
   void _markCacheDirty() => _cacheRevision++;
@@ -719,7 +641,7 @@ class SchedulePageState extends State<SchedulePage> {
               setState(() => _nameBandH = h);
             },
             // 顶部拖动条那一带不参与图表平移（快速拖动也不会被平移手势抢走）
-            panExcludeTop: _nameBandH + _topDragBandH,
+            panExcludeTop: _nameBandH + _handleH, // 顶部手柄那一带不参与图表平移
           );
       default:
         return YearView(
