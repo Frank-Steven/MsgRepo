@@ -99,8 +99,9 @@ class SchedulePageState extends State<SchedulePage> {
   //  · 图表高度 = 视口 − 底部抓手 − 任务栏（永远铺满，无页面滚动）。
   static const _barPrefsKey = 'schedule_bar_height';
   static const _nameBandPrefsKey = 'schedule_name_band_h';
-  static const _chartMinH = 310.0; // 图表最小高度：标签带160+空槽32+刻度44+2行(68)≈304，取 310，避免被压到看不见行
-  static const _barMinH = 120.0;
+  static const _chartMinH = 250.0; // 两侧下限必须相等：任务栏 ∈ [下限, avail-图表下限]、图表 = avail-任务栏 ⇒ 行程恒等
+  // 2026-10-21 用户要求「任务栏可拖范围 = 日程表可拖范围」，故两者都取 250（图表固定 chrome 236 + 余量）
+  static const _barMinH = 250.0;
 
   /// 45° 标签带高度的下限 / 默认值（default 与 day_view 的 nameLayerH 保持一致）。
   static const _nameBandMin = 70.0;
@@ -208,16 +209,21 @@ class SchedulePageState extends State<SchedulePage> {
     );
   }
 
+  /// 安全版 clamp：当窗口太矮导致「下限 > 上限」时**返回上限**，
+  /// 而不是抛 `Invalid argument(s)`（2026-10-21 年度视图下崩溃即此原因）。
+  double _safeClamp(double v, double lo, double hi) =>
+      lo <= hi ? v.clamp(lo, hi) : hi;
+
   /// 视口高度 → 任务栏允许的最大高度（图表至少保留 _chartMinH）。
   double _barMaxAt(double vp) {
     final avail = vp - _handleH;
-    return (avail - _chartMinH).clamp(_barMinH, avail);
+    return _safeClamp(avail - _chartMinH, _barMinH, avail);
   }
 
   /// 视口高度 → 当前任务栏高度（未拖过时按 40% 默认比例）。
   double _barHAt(double vp) {
     final avail = vp - _handleH;
-    return (_barH ?? avail * 0.40).clamp(_barMinH, _barMaxAt(vp));
+    return _safeClamp(_barH ?? avail * 0.40, _barMinH, _barMaxAt(vp));
   }
 
   /// 抓手拖动（顶部/底部共用）：绝对映射 —— 按下瞬间记起始高度，
@@ -228,7 +234,7 @@ class SchedulePageState extends State<SchedulePage> {
     final barMax = _barMaxAt(vp);
     final barH = _barHAt(vp);
     final start = _barDragStart ??= barH;
-    final next = (start - dyFromPress).clamp(_barMinH, barMax);
+    final next = _safeClamp(start - dyFromPress, _barMinH, barMax);
     if (next != (_barH ?? barH)) setState(() => _barH = next);
   }
 
@@ -238,7 +244,7 @@ class SchedulePageState extends State<SchedulePage> {
     if (!vp.isFinite || vp <= 0) return _nameBandMin;
     final avail = vp - _handleH;
     final barH = _barHAt(vp);
-    final chartH = (avail - barH).clamp(_chartMinH, avail);
+    final chartH = _safeClamp(avail - barH, _chartMinH, avail);
     final maxBand =
         chartH - _handleH - _dayHeaderH - 2 * _dayLaneH - 8;
     return maxBand < 400.0 ? maxBand : 400.0;
@@ -250,7 +256,7 @@ class SchedulePageState extends State<SchedulePage> {
     final vp = _splitVp;
     if (!vp.isFinite || vp <= 0) return;
     final start = _nameBandStart ??= _nameBandH;
-    final next = (start + dyFromPress).clamp(_nameBandMin, _nameBandMaxAt(vp));
+    final next = _safeClamp(start + dyFromPress, _nameBandMin, _nameBandMaxAt(vp));
     if (next != _nameBandH) setState(() => _nameBandH = next);
   }
 
@@ -274,11 +280,11 @@ class SchedulePageState extends State<SchedulePage> {
       }
       final avail = vp - _handleH;
       final barH = _barHAt(vp);
-      final chartH = (avail - barH).clamp(_chartMinH, avail);
+      final chartH = _safeClamp(avail - barH, _chartMinH, avail);
       // 记录视口高度：底部抓手 + day_view 内部那条抓手都靠它换算边界
       _splitVp = vp;
       // 标签带高度按当前分栏几何夹紧：任务栏被拖大后，标签带不会把行区挤没
-      _nameBandH = _nameBandH.clamp(_nameBandMin, _nameBandMaxAt(vp));
+      _nameBandH = _safeClamp(_nameBandH, _nameBandMin, _nameBandMaxAt(vp));
 
       // F13②-方案1b：顶部抓手由 DayView 自己画、自己收指针（位置与图表几何
       // 天然对齐），页面侧不再叠 Positioned 抓手，否则两层会抢指针。
