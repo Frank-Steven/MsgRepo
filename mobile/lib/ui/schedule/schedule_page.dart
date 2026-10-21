@@ -590,7 +590,7 @@ class SchedulePageState extends State<SchedulePage> {
     }
     final tasks = _bottomTasks;
     return Expanded(
-      flex: 1,
+      flex: 2,
       child: Column(
         children: [
           const Divider(height: 1),
@@ -728,8 +728,7 @@ class SchedulePageState extends State<SchedulePage> {
           if (_loading)
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else ...[
-            // 用户 2026-10-20：图表区（蓝色部分）要更高 —— 4:1，约 80%。
-            Expanded(flex: 4, child: _ganttView()),
+            Expanded(flex: 3, child: _ganttView()),
             // v2.4：底部面板所有粒度都显示（含年度）
             _bottomSection(context),
           ],
