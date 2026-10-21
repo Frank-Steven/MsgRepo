@@ -18,6 +18,7 @@ import 'import_page.dart';
 import 'message_detail_sheet.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
+import '../../services/fold_markers.dart';
 import '../../services/app_ui_state.dart';
 import '../../services/reminder_service.dart';
 import '../../services/auto_process.dart';
@@ -54,7 +55,10 @@ class MessagesPageState extends State<MessagesPage> {
 
   bool _selecting = false;
   final Set<String> _selected = {};
-  final Set<String> _collapsed = {};
+
+  /// F02：已展开的**会话组** key（默认全部折叠；展开状态只存在本页 State，
+  /// 不持久化——用户下次进来仍按会话概览）。
+  final Set<String> _expanded = {};
 
   /// 通知监听权限（v2.5：null=未知；false 时顶部显示恢复引导横幅）。
   bool? _listenerEnabled;
@@ -232,7 +236,7 @@ class MessagesPageState extends State<MessagesPage> {
   // 分组结果缓存（2026-10-20 性能）：原来每次 setState（多选一行、折叠、切 chip）
   // 都重跑「全量过滤 + 分组 List 分配」；500 条时每帧都是 O(n) 分配。
   List<Message>? _visibleCache;
-  Map<String, List<Message>>? _groupedCache;
+  List<_ConversationGroup>? _conversationsCache;
   Object? _cacheKeyMessages;
   Object? _cacheKeyTasks;
   Set<String>? _cacheKeyFilter;
@@ -252,22 +256,68 @@ class MessagesPageState extends State<MessagesPage> {
       return _groupFilter.contains(kFilterDone) && _isLinkedDone(m);
     }).toList();
     _visibleCache = visible;
-    _groupedCache = null;
+    _conversationsCache = null;
     _cacheKeyMessages = _messages;
     _cacheKeyTasks = _tasksById;
     _cacheKeyFilter = Set.of(_groupFilter);
     return visible;
   }
 
-  Map<String, List<Message>> get _grouped {
-    final cached = _groupedCache;
+  /// 会话名（F02）：优先 `conversationTitle`，并剥离「(N条新消息)」折叠后缀
+  /// （U14 清洗），否则退回应用名，最后退回包名。
+  String _conversationName(Message m) {
+    final raw = m.conversationTitle?.trim();
+    if (raw != null && raw.isNotEmpty) return stripFoldMarkers(raw);
+    final app = m.appName?.trim();
+    if (app != null && app.isNotEmpty) return app;
+    return m.packageName;
+  }
+
+  /// F02：按会话（群聊/私聊）折叠分组。
+  ///
+  /// 与筛选 chip **正交**：先由 [_visible] 过滤，再在这里按会话聚合
+  /// （未处理/已处理/垃圾的互斥状态组仍由 chip 承担，不再单独做一级分组）。
+  /// 组顺序 = 组内最新消息时间倒序：[_visible] 本身按 posted_at DESC，
+  /// 按首次出现顺序插入即天然满足。
+  ///
+  /// 缓存键与 [_visible] 同源（消息集合 identity / 任务映射 identity / 筛选集合），
+  /// 因此点击展开/折叠不会触发 O(n) 重算。
+  List<_ConversationGroup> get _conversations {
+    final cached = _conversationsCache;
     if (cached != null && _cachesFresh()) return cached;
-    final map = {for (final k in kGroupOrder) k: <Message>[]};
+    final buckets = <String, List<Message>>{};
+    final names = <String, String>{};
     for (final m in _visible) {
-      map[messageGroupKey(m)]!.add(m);
+      final name = _conversationName(m);
+      // 同名的群可能同时来自不同应用（如微信「张三」与 QQ「张三」），
+      // 故 key 带上包名，避免误并成一个会话。
+      final key = '${m.packageName}\u0000$name';
+      names[key] = name;
+      (buckets[key] ??= <Message>[]).add(m);
     }
-    _groupedCache = map;
-    return map;
+    final groups = <_ConversationGroup>[];
+    for (final entry in buckets.entries) {
+      final msgs = entry.value;
+      var latest = 0;
+      var pending = 0;
+      for (final m in msgs) {
+        if (m.postedAt > latest) latest = m.postedAt;
+        if (messageGroupKey(m) == kGroupPending) pending++;
+      }
+      groups.add(_ConversationGroup(
+        key: entry.key,
+        title: names[entry.key]!,
+        messages: msgs,
+        latestAt: latest,
+        pendingCount: pending,
+      ));
+    }
+    _conversationsCache = groups;
+    // 防御：单独命中本缓存时也要保证键是最新的（值与本轮 _visible 同源）。
+    _cacheKeyMessages = _messages;
+    _cacheKeyTasks = _tasksById;
+    _cacheKeyFilter = Set.of(_groupFilter);
+    return groups;
   }
 
   // ---- AI 处理（设计 §8：路由 + 流式面板）----
@@ -878,9 +928,8 @@ class MessagesPageState extends State<MessagesPage> {
   }
 
   Widget _buildList() {
-    final grouped = _grouped;
-    final empty = grouped.values.every((l) => l.isEmpty);
-    if (empty) {
+    final groups = _conversations;
+    if (groups.isEmpty) {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
@@ -892,59 +941,63 @@ class MessagesPageState extends State<MessagesPage> {
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
-        for (final key in kGroupOrder)
-          if (grouped[key]!.isNotEmpty) ...[
-            // 不用 pinned: 多个固定吸顶头挤在视口顶部会产生非法 SliverGeometry
-            //（layoutExtent > paintExtent）导致整个视口不绘制；分组头随内容滚动。
-            SliverPersistentHeader(
-              delegate: MessageGroupHeaderDelegate(
-                groupKey: key,
-                count: grouped[key]!.length,
-                collapsed: _collapsed.contains(key),
-                onToggle: () => setState(() {
-                  if (!_collapsed.remove(key)) _collapsed.add(key);
-                }),
-              ),
+        // F02：每个会话一组——组头显示 会话名 + 条数 + 最新时间 + 未处理数，
+        // 默认折叠；展开后才是消息行（多选/左滑/点开详情保持原样）。
+        for (final g in groups) ...[
+          // 不用 pinned: 多个固定吸顶头挤在视口顶部会产生非法 SliverGeometry
+          //（layoutExtent > paintExtent）导致整个视口不绘制；组头随内容滚动。
+          SliverPersistentHeader(
+            delegate: _ConversationHeaderDelegate(
+              conversationKey: g.key,
+              title: g.title,
+              count: g.messages.length,
+              latestAt: g.latestAt,
+              pendingCount: g.pendingCount,
+              expanded: _expanded.contains(g.key),
+              onToggle: () => setState(() {
+                if (!_expanded.remove(g.key)) _expanded.add(g.key);
+              }),
             ),
-            if (!_collapsed.contains(key))
-              SliverList.builder(
-                itemCount: grouped[key]!.length,
-                itemBuilder: (context, i) {
-                  final m = grouped[key]![i];
-                  // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
-                  final processing =
-                      AiProcessingService.instance.isProcessing(m.id);
-                  return MessageTile(
-                    key: ValueKey(m.id),
-                    message: m,
-                    selecting: _selecting,
-                    selected: _selected.contains(m.id),
-                    processing: processing,
-                    swipeEnabled: !processing,
-                    linkedTaskDone: _isLinkedDone(m),
-                    linkedTaskPriority: _linkedTaskPriority(m),
-                    linkedTaskCount: _linkedTaskIds(m).length,
-                    actions: _actionsFor(m),
-                    onTap: () {
-                      if (_selecting) {
-                        _toggleSelect(m);
-                      } else {
-                        // P3-2：点开详情看正文与附件（图片可放大）
-                        showMessageDetail(context, m);
-                      }
-                    },
-                    onLongPress: () {
-                      if (!_selecting) {
-                        setState(() {
-                          _selecting = true;
-                          _selected.add(m.id);
-                        });
-                      }
-                    },
-                  );
-                },
-              ),
-          ],
+          ),
+          if (_expanded.contains(g.key))
+            SliverList.builder(
+              itemCount: g.messages.length,
+              itemBuilder: (context, i) {
+                final m = g.messages[i];
+                // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
+                final processing =
+                    AiProcessingService.instance.isProcessing(m.id);
+                return MessageTile(
+                  key: ValueKey(m.id),
+                  message: m,
+                  selecting: _selecting,
+                  selected: _selected.contains(m.id),
+                  processing: processing,
+                  swipeEnabled: !processing,
+                  linkedTaskDone: _isLinkedDone(m),
+                  linkedTaskPriority: _linkedTaskPriority(m),
+                  linkedTaskCount: _linkedTaskIds(m).length,
+                  actions: _actionsFor(m),
+                  onTap: () {
+                    if (_selecting) {
+                      _toggleSelect(m);
+                    } else {
+                      // P3-2：点开详情看正文与附件（图片可放大）
+                      showMessageDetail(context, m);
+                    }
+                  },
+                  onLongPress: () {
+                    if (!_selecting) {
+                      setState(() {
+                        _selecting = true;
+                        _selected.add(m.id);
+                      });
+                    }
+                  },
+                );
+              },
+            ),
+        ],
         const SliverToBoxAdapter(child: SizedBox(height: 80)),
       ],
     );
@@ -1026,6 +1079,124 @@ class MessagesPageState extends State<MessagesPage> {
           ),
           if (_selecting) _buildSelectionBar(),
         ],
+      ),
+    );
+  }
+}
+
+/// F02：一个「会话组」——同一群聊/私聊在当前**筛选后**的全部消息。
+class _ConversationGroup {
+  /// 会话标识：包名 + 会话名（含 NUL 分隔，避免同名不同应用被合并）。
+  final String key;
+
+  /// 组头显示的会话名（已剥离「(N条新消息)」折叠后缀）。
+  final String title;
+
+  /// 组内消息，保持列表原有顺序（posted_at 倒序）。
+  final List<Message> messages;
+
+  /// 组内最新一条消息的时间（毫秒）。
+  final int latestAt;
+
+  /// 组内仍属「未处理」的条数（与顶部 chip 的未处理口径一致）。
+  final int pendingCount;
+
+  const _ConversationGroup({
+    required this.key,
+    required this.title,
+    required this.messages,
+    required this.latestAt,
+    required this.pendingCount,
+  });
+}
+
+/// F02 会话组头：会话名（主）+「条数 · 最新时间 · 未处理 N」（次），
+/// 左侧 chevron 指示展开状态，整行点击切换。
+class _ConversationHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final String conversationKey;
+  final String title;
+  final int count;
+  final int latestAt;
+  final int pendingCount;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  const _ConversationHeaderDelegate({
+    required this.conversationKey,
+    required this.title,
+    required this.count,
+    required this.latestAt,
+    required this.pendingCount,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  /// 两行（会话名 + 元信息），44 放不下；58 = 8 + 20 + 2 + 16 + 8 + 余量。
+  static const double kHeight = 58;
+
+  @override
+  double get minExtent => kHeight;
+
+  @override
+  double get maxExtent => kHeight;
+
+  @override
+  bool shouldRebuild(_ConversationHeaderDelegate oldDelegate) =>
+      conversationKey != oldDelegate.conversationKey ||
+      title != oldDelegate.title ||
+      count != oldDelegate.count ||
+      latestAt != oldDelegate.latestAt ||
+      pendingCount != oldDelegate.pendingCount ||
+      expanded != oldDelegate.expanded;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final cs = Theme.of(context).colorScheme;
+    final meta = <String>['$count 条', formatMessageTime(latestAt)];
+    if (pendingCount > 0) meta.add('未处理 $pendingCount');
+    return Material(
+      color: cs.surface,
+      child: InkWell(
+        onTap: onToggle,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Icon(
+                expanded ? Icons.expand_less : Icons.expand_more,
+                size: 20,
+                color: cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: cs.onSurface),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      meta.join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
