@@ -99,10 +99,10 @@ class SchedulePageState extends State<SchedulePage> {
   //  · 图表高度 = 视口 − 底部抓手 − 任务栏（永远铺满，无页面滚动）。
   static const _barPrefsKey = 'schedule_bar_height';
   static const _nameBandPrefsKey = 'schedule_name_band_h';
-  static const _chartMinH = 200.0; // 两侧下限必须相等：行程 = avail − (下限 × 2)，下限越小行程越大
+  static const _chartMinH = 250.0; // 行程 = avail − 图表下限 − 任务栏下限（该式对两侧恒等）。三轮调参：250/250→97（太小）→200/200→197（翻倍）→250/60→≈287（约三倍）
   // 2026-10-21：310/60 → 250/250（行程≈97，用户嫌太小）→ 200/200（行程≈197，约翻倍）
   // 2026-10-21 用户要求「任务栏可拖范围 = 日程表可拖范围」，故两者都取 250（图表固定 chrome 236 + 余量）
-  static const _barMinH = 200.0;
+  static const _barMinH = 60.0;
 
   /// 45° 标签带高度的下限 / 默认值（default 与 day_view 的 nameLayerH 保持一致）。
   static const _nameBandMin = 70.0;
@@ -239,16 +239,18 @@ class SchedulePageState extends State<SchedulePage> {
     if (next != (_barH ?? barH)) setState(() => _barH = next);
   }
 
-  /// 视口高度 → 标签带允许的最大高度：
-  /// chartH − 抓手空槽 − 刻度带 − 2 行 − 余量（保证行区至少露出 2 行）。
+  /// 视口高度 → 标签带允许的最大高度。
+  ///
+  /// 关键：**标签带行程要与分界线行程一致**，否则用户会觉得「任务栏能拖的比日程表少」。
+  /// 分界线行程 = avail − 图表下限 − 任务栏下限；这里让 标签带上限 = 下限 + 同一行程，
+  /// 再用「至少留 1 行」的布局上限夹一次，保证图表不会把行挤没。
   double _nameBandMaxAt(double vp) {
     if (!vp.isFinite || vp <= 0) return _nameBandMin;
     final avail = vp - _handleH;
-    final barH = _barHAt(vp);
-    final chartH = _safeClamp(avail - barH, _chartMinH, avail);
-    final maxBand =
-        chartH - _handleH - _dayHeaderH - 2 * _dayLaneH - 8;
-    return maxBand < 400.0 ? maxBand : 400.0;
+    final travel = avail - _chartMinH - _barMinH;
+    final chartH = _safeClamp(avail - _barHAt(vp), _chartMinH, avail);
+    final byLayout = chartH - _handleH - _dayHeaderH - _dayLaneH;
+    return _safeClamp(_nameBandMin + travel, _nameBandMin, byLayout);
   }
 
   /// 顶部抓手拖动：**绝对映射** —— 按下记起始标签带高度，之后用累计位移换算。
