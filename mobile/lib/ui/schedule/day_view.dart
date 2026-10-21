@@ -46,6 +46,11 @@ class DayView extends StatefulWidget {
   /// F13②-方案1b：是否画这条顶部抓手（页面按粒度传；非日视图没有名称带）。
   final bool showHandle;
 
+  /// F13②-方案1c：45° 标签带高度（页面持久化并下发）。
+  /// 顶部抓手拖动改的就是它 —— 抓手带的位置 = [nameBandH] 下沿，
+  /// 所以抓手会跟着手指走，而行区/日期带顺势上下浮动，任务栏完全不动。
+  final double nameBandH;
+
   /// 抓手拖动回调：**累计位移 dy**（从按下那一刻算起，逻辑像素，向下为正）。
   /// 直接用原始指针相减，图表与页面之间不换算任何坐标。
   final ValueChanged<double>? onHandleDrag;
@@ -71,6 +76,7 @@ class DayView extends StatefulWidget {
     this.handleSlotH = 0,
     this.panExcludeTop = 0,
     this.showHandle = false,
+    this.nameBandH = _DayLayout.nameLayerH,
     this.onHandleDrag,
     this.onHandleDragEnd,
   });
@@ -466,6 +472,7 @@ class DayViewState extends State<DayView>
           pulseMin: _pulseMin,
           contentY: _contentY,
           handleSlotH: widget.handleSlotH,
+          nameBandH: widget.nameBandH,
         );
         // F13②：layout 内已按「行总高 - 可视行高」夹紧，回写避免越拖越远
         _contentY = layout.contentY;
@@ -562,7 +569,10 @@ class DayViewState extends State<DayView>
                 _handleStartY = null;
                 widget.onHandleDragEnd?.call();
               },
-              onPointerCancel: (_) => _handleStartY = null,
+              onPointerCancel: (_) {
+                _handleStartY = null;
+                widget.onHandleDragEnd?.call();
+              },
             ),
           ),
         ]);
@@ -680,6 +690,7 @@ class _DayLayout {
     required double? pulseMin,
     required double contentY,
     double handleSlotH = 0,
+    double nameBandH = nameLayerH,
   }) {
     final (majorTickMin, minorTickMin, labelStride) = dayTickInterval(ppm);
 
@@ -718,8 +729,11 @@ class _DayLayout {
       return rowSpans.length - 1;
     }
 
-    // 名称带高度：有任务就预留（放不下的标签不画，但带子保留，避免行位置跳动）
-    final namesH = tasks.isEmpty ? 0.0 : nameLayerH; // 45° 标签需要顶部名称带
+    // 名称带高度：有任务就预留（放不下的标签不画，但带子保留，避免行位置跳动）。
+    // F13②-方案1c：高度由页面下发（顶部抓手拖动改它），不再是固定常量。
+    final namesH = tasks.isEmpty
+        ? 0.0
+        : (nameBandH.isFinite ? math.max(0.0, nameBandH) : nameLayerH);
 
     // 行区纵向几何（laneY / 夹紧）在行分配完成后再算 —— 行数决定总高。
 

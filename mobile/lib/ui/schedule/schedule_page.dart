@@ -89,20 +89,36 @@ class SchedulePageState extends State<SchedulePage> {
   final _monthKey = GlobalKey<MonthViewState>();
   final _dayKey = GlobalKey<DayViewState>();
 
-  // ---- F13②：图表区 / 任务栏 两段独立高度（2026-10-21 全量重写）----
+  // ---- F13②：图表区 / 任务栏 / 标签带 三段独立高度（2026-10-21）----
   //
   // 设计原则（用户要求：拖其中一条时另一部分不许跟着动）：
-  //  · `_chartH` 与 `_barH` **完全独立**，各自持久化，互不推导；
-  //  · 顶部手柄只改 `_chartH`；底部手柄只改 `_barH`；
-  //  · 两者之和超出可视高度 → 整页纵向滚动；放得下时下方留白（不自动拉伸，避免耦合）。
+  //  · `_barH`（任务栏）与 `_nameBandH`（45° 标签带）**互相独立**，各自持久化；
+  //  · **顶部抓手** = 图表内部那条（day_view 自绘自收手势）：它跟着手指走，
+  //    改的是「标签带高度」`_nameBandH` —— 抓手自己移动、任务栏纹丝不动，行区相应增减；
+  //  · **底部抓手** = 页面里那条：只改 `_barH`（任务栏高度），图表随之变高/变矮；
+  //  · 图表高度 = 视口 − 底部抓手 − 任务栏（永远铺满，无页面滚动）。
   static const _barPrefsKey = 'schedule_bar_height';
+  static const _nameBandPrefsKey = 'schedule_name_band_h';
   static const _chartMinH = 310.0; // 图表最小高度：标签带160+空槽32+刻度44+2行(68)≈304，取 310，避免被压到看不见行
   static const _barMinH = 120.0;
+
+  /// 45° 标签带高度的下限 / 默认值（default 与 day_view 的 nameLayerH 保持一致）。
+  static const _nameBandMin = 70.0;
+  static const _nameBandDefault = 160.0;
+
+  /// 图表内部固定的两条带高（与 day_view 的常量对齐）：
+  /// 刻度带 44 + 行高 34。标签带上限要留出「空槽 + 刻度带 + 至少 2 行 + 余量」。
+  static const _dayHeaderH = 44.0;
+  static const _dayLaneH = 34.0;
 
   /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
   static const _handleH = 32.0; // 拖动手柄高度：加大热区，手指更容易按住（2026-10-21）
 
   double? _barH; // 任务栏高度；null = 用默认比例
+
+  /// 45° 标签带（顶部抓手拖出来的那段）高度，持久化。
+  double _nameBandH = _nameBandDefault;
+  double? _nameBandStart; // 按下瞬间的标签带高度（绝对映射用）
 
   /// 底部手柄的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
   /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
@@ -121,13 +137,15 @@ class SchedulePageState extends State<SchedulePage> {
     reload();
   }
 
-  /// 读回上次拖好的两段高度（读不到就用默认比例）。
+  /// 读回上次拖好的高度（读不到就用默认值）。
   Future<void> _loadHeights() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final bar = prefs.getDouble(_barPrefsKey);
+      final nameBand = prefs.getDouble(_nameBandPrefsKey);
       setState(() {
         if (bar != null) _barH = bar;
+        if (nameBand != null) _nameBandH = nameBand;
       });
     } catch (_) {
       // 读失败用默认布局，不影响使用
@@ -139,6 +157,7 @@ class SchedulePageState extends State<SchedulePage> {
       final prefs = await SharedPreferences.getInstance();
       final bar = _barH;
       if (bar != null) await prefs.setDouble(_barPrefsKey, bar);
+      await prefs.setDouble(_nameBandPrefsKey, _nameBandH);
     } catch (_) {
       // fire-and-forget：写失败只影响下次进入的默认值
     }
@@ -213,7 +232,29 @@ class SchedulePageState extends State<SchedulePage> {
     if (next != (_barH ?? barH)) setState(() => _barH = next);
   }
 
-  /// 布局：**永远铺满屏幕**，只有「任务栏高度」一个自由度。
+  /// 视口高度 → 标签带允许的最大高度：
+  /// chartH − 抓手空槽 − 刻度带 − 2 行 − 余量（保证行区至少露出 2 行）。
+  double _nameBandMaxAt(double vp) {
+    if (!vp.isFinite || vp <= 0) return _nameBandMin;
+    final avail = vp - _handleH;
+    final barH = _barHAt(vp);
+    final chartH = (avail - barH).clamp(_chartMinH, avail);
+    final maxBand =
+        chartH - _handleH - _dayHeaderH - 2 * _dayLaneH - 8;
+    return maxBand < 400.0 ? maxBand : 400.0;
+  }
+
+  /// 顶部抓手拖动：**绝对映射** —— 按下记起始标签带高度，之后用累计位移换算。
+  /// 向下拖 = 标签带变高（抓手跟着手指走）、行区变矮；**任务栏高度完全不参与**。
+  void _dragNameBand(double dyFromPress) {
+    final vp = _splitVp;
+    if (!vp.isFinite || vp <= 0) return;
+    final start = _nameBandStart ??= _nameBandH;
+    final next = (start + dyFromPress).clamp(_nameBandMin, _nameBandMaxAt(vp));
+    if (next != _nameBandH) setState(() => _nameBandH = next);
+  }
+
+  /// 布局：**永远铺满屏幕**，自由度只有「任务栏高度」与「标签带高度」。
   ///
   /// 2026-10-21 用户反馈：拖红色（图表）→ 蓝色（任务栏）被拖着走、拖绿色（任务栏标题）→ 整页滚动、
   /// 在红色里滚动 → 也变成整页滚动。根因是上一版把整页放进 `SingleChildScrollView` 并允许两段各自独立
@@ -236,6 +277,8 @@ class SchedulePageState extends State<SchedulePage> {
       final chartH = (avail - barH).clamp(_chartMinH, avail);
       // 记录视口高度：底部抓手 + day_view 内部那条抓手都靠它换算边界
       _splitVp = vp;
+      // 标签带高度按当前分栏几何夹紧：任务栏被拖大后，标签带不会把行区挤没
+      _nameBandH = _nameBandH.clamp(_nameBandMin, _nameBandMaxAt(vp));
 
       // F13②-方案1b：顶部抓手由 DayView 自己画、自己收指针（位置与图表几何
       // 天然对齐），页面侧不再叠 Positioned 抓手，否则两层会抢指针。
@@ -672,12 +715,15 @@ class SchedulePageState extends State<SchedulePage> {
           ),
           onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
-          // F13②-方案1b：名称带与日期带之间预留抓手空槽，抓手由图表自绘自收手势；
-          // 页面只拿「累计位移」回调去改分栏高度（与底部抓手同一套 dragBoundary）。
+          // F13②：名称带高度由页面持久化并下发（抓手拖动改的就是它）；
+          // 抓手空槽仍由图表自绘自收手势，页面只拿「累计位移」回调。
           handleSlotH: _handleH,
           showHandle: _granularity == 3,
-          onHandleDrag: _dragBoundary,
+          nameBandH: _nameBandH,
+          // 顶部抓手 → 标签带高度（抓手自己跟着手指走，任务栏不动）
+          onHandleDrag: _dragNameBand,
           onHandleDragEnd: () {
+            _nameBandStart = null;
             _barDragStart = null;
             _saveHeights();
           },
