@@ -13,6 +13,28 @@ import '../services/auto_process.dart';
 import '../services/prompt_rules.dart';
 import '../../services/app_log.dart';
 
+/// B03：切到「仅指定应用」前是否需要先让用户选应用。
+///
+/// 空 allowlist 在数据层就等于「一条通知都不采集」（[AppFilterConfig.allows] 的既定契约，
+/// 不在这里改），而切模式只是一键操作，用户很容易在没加任何应用时就切过去。
+/// 所以把「先加应用、再加模式」的顺序提到 UI 层防呆。
+bool filterNeedsAppSelection(String targetMode, List<String> currentPackages) =>
+    targetMode == AppFilterConfig.modeAllowlist && currentPackages.isEmpty;
+
+/// B03：把应用选择结果合进「仅指定应用」配置。
+///
+/// [picked] 为 null（用户按返回取消）或空集合（一个都没勾）时返回 null，
+/// 调用方据此保持原模式不变，避免静默切成「全屏蔽」。
+AppFilterConfig? filterConfigAfterSelection({
+  required List<String> currentPackages,
+  required Set<String>? picked,
+}) {
+  if (picked == null || picked.isEmpty) return null;
+  final merged = <String>{...currentPackages, ...picked};
+  return AppFilterConfig(
+      mode: AppFilterConfig.modeAllowlist, packages: merged.toList());
+}
+
 /// v2 设置页（设计 §9）：外观 / 自定义提示词 / AI 接口 / 连接 / 采集过滤。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -468,7 +490,8 @@ class _SettingsPageState extends State<SettingsPage> {
     return (name != null && name.isNotEmpty) ? name : packageName;
   }
 
-  Future<void> _addFilteredApps() async {
+  /// 打开应用选择页，返回用户勾选的包名集合；用户取消（返回键）时为 null。
+  Future<Set<String>?> _pickFilteredApps() async {
     // v2.4：应用选择页以 PackageManager 全量可启动应用为主，
     // 补充"已见但已卸载/无启动器入口"的历史应用
     final results = await Future.wait([
@@ -480,7 +503,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final installedPkgs = {for (final a in installed) a.packageName};
     final extra = seen.where((a) => !installedPkgs.contains(a.packageName));
     final apps = [...installed, ...extra];
-    if (!mounted) return;
+    if (!mounted) return null;
     final selected = await Navigator.of(context).push<Set<String>>(
       MaterialPageRoute(
         builder: (_) => _AppPickerPage(
@@ -490,14 +513,40 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
     );
-    if (selected == null) return;
-    final packages = _filterConfig.packages.toSet()..addAll(selected);
+    if (selected == null || !mounted) return selected;
     final names = Map<String, String?>.of(_knownAppNames);
     for (final a in apps) {
       names[a.packageName] = a.appName;
     }
+    setState(() => _knownAppNames = names);
+    return selected;
+  }
+
+  Future<void> _addFilteredApps() async {
+    final selected = await _pickFilteredApps();
+    if (selected == null) return;
+    final packages = _filterConfig.packages.toSet()..addAll(selected);
     await _saveFilter(_filterConfig.copyWith(packages: packages.toList()));
-    if (mounted) setState(() => _knownAppNames = names);
+  }
+
+  /// B03：切模式时对「仅指定应用 + 空名单」防呆 —— 先让用户选应用；
+  /// 取消或一个都没勾则**保持原模式**，只给一条提示。
+  Future<void> _onFilterModeChanged(String v) async {
+    if (!filterNeedsAppSelection(v, _filterConfig.packages)) {
+      await _saveFilter(_filterConfig.copyWith(mode: v));
+      return;
+    }
+    final selected = await _pickFilteredApps();
+    if (!mounted) return;
+    final next = filterConfigAfterSelection(
+      currentPackages: _filterConfig.packages,
+      picked: selected,
+    );
+    if (next == null) {
+      _toast('未添加应用，仍收集全部应用的通知');
+      return;
+    }
+    await _saveFilter(next);
   }
 
   // ---- 后台保活（v2.6）----
@@ -872,7 +921,9 @@ class _SettingsPageState extends State<SettingsPage> {
               labels: const ['全部应用', '仅指定应用', '屏蔽指定应用'],
               height: 40,
               selected: _filterConfig.mode,
-              onChanged: (v) => _saveFilter(_filterConfig.copyWith(mode: v)),
+              // B03：切到「仅指定应用」且名单为空时，先弹应用选择器，
+              // 没选就保持原模式（否则空 allowlist 会静默切断全部采集）
+              onChanged: _onFilterModeChanged,
             ),
             if (_filterConfig.isAllowlist || _filterConfig.isBlacklist) ...[
               const SizedBox(height: 12),
@@ -883,15 +934,36 @@ class _SettingsPageState extends State<SettingsPage> {
                     color: cs.errorContainer,
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.warning_amber_outlined,
-                          color: cs.onErrorContainer),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '当前不会收集任何应用的通知，请添加应用或切换为全部应用',
-                          style: TextStyle(color: cs.onErrorContainer),
+                      Row(
+                        children: [
+                          Icon(Icons.warning_amber_outlined,
+                              color: cs.onErrorContainer),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '当前不会收集任何应用的通知，请添加应用或切换为全部应用',
+                              style: TextStyle(color: cs.onErrorContainer),
+                            ),
+                          ),
+                        ],
+                      ),
+                      // B03：给一条一键退路，避免用户卡在「一条都收不到」里
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: cs.onErrorContainer,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            minimumSize: const Size(0, 36),
+                            tapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: () => _saveFilter(_filterConfig
+                              .copyWith(mode: AppFilterConfig.modeAll)),
+                          child: const Text('切换为全部应用'),
                         ),
                       ),
                     ],
