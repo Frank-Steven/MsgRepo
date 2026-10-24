@@ -50,6 +50,26 @@
             </intent-filter>
         </service>
 
+        <!-- B04（2026-10-24）：flutter_local_notifications 从 16 版起不再在自己的
+             manifest 里声明接收器，必须由 App 声明（插件 17.2.4 README:252-263）。
+             漏声明的后果是「到点闹钟已触发、广播无处投递」→ 通知 0 条且应用侧
+             零日志、零错误，只在真机上暴露；回归守卫见 test/manifest_receivers_test.dart。
+             ScheduledNotificationReceiver：到点后真正发通知的接收器。
+             ScheduledNotificationBootReceiver：重启/应用更新后重排已缓存的提醒。 -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false"/>
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2"/>
