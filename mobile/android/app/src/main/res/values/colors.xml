@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- F15：启动底色（与主题 seed Colors.indigo 一致） -->
+    <!-- F15：启动底色（与主题 seed Colors.indigo 一致）。
+         B07/Q13②：启动页只保留这一档品牌蓝，昼夜都用它 —— 不要在这里或 values-night 引入第二档色。 -->
     <color name="splash_bg">#3F51B5</color>
+
+    <!-- B06：adaptive icon 背景层（取自品牌图自身底色 #F7F3FF，避免遮罩后露出白框） -->
+    <color name="ic_launcher_background">#F7F3FF</color>
 </resources>

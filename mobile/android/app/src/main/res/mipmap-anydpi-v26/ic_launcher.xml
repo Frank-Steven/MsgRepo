@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- B06（2026-10-24）：补齐 adaptive icon（Android 8+）。
+     此前 Manifest 直接引 mipmap-*/ic_launcher.png（纯位图），启动器会给它套遮罩，
+     容易出现白框 / 图标偏小 / 圆形内留白，且各厂商表现不一致。
+
+     - background：纯色（取自品牌图自身底色 #F7F3FF），遮罩范围内不会露白边；
+     - foreground：108dp 画布，品牌图缩到 90dp 居中 ——
+       图中内容只占图面约 72.9%，90dp × 72.9% ≈ 65.6dp，
+       落在 72dp 可见区 / 66dp 安全区内，四角不会被任何形状的遮罩裁掉。
+
+     monochrome（Android 13 主题图标）暂未提供：品牌图是彩色插画，
+     需要单独设计一版单色剪影才不会糊成一团，见交付说明的遗留项。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

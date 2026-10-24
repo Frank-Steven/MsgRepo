@@ -88,13 +88,17 @@ Future<void> _bootstrapColdStart() async {
     await ReminderService.instance.init();
     // 进程重启后重排未来提醒（年度任务的逐年重复提醒暂不支持，跳过）
     await ReminderService.instance.rescheduleAll();
-  } catch (e) {
-    debugPrint('ReminderService 初始化失败: $e');
+  } catch (e, st) {
+    // E06（2026-10-24）：F15 后初始化在首帧后并行执行，失败不再阻塞界面，
+    // 但绝不能静默 —— 否则本会话所有提醒都会失效，设备侧也无法定因（B04 就卡在这里）。
+    ReminderService.instance.noteInitFailure(e);
+    AppLog.instance.warn('reminder.init', e, st);
   }
   try {
     NotificationBridge.instance.startPolling();
-  } catch (e) {
+  } catch (e, st) {
     debugPrint('NotificationBridge 启动失败: $e');
+    AppLog.instance.warn('notification.poll', e, st);
   }
 }
 

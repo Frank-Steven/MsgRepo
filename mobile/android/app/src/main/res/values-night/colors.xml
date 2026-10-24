@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="splash_bg">#283593</color>
+    <!-- B07（2026-10-24）：夜间**不再**换成 #283593。
+         原生侧跟系统夜间模式、Flutter 侧跟 App 主题设置，两套判据不一致时
+         「系统浅 + App 深」会出现 #3F51B5 → #283593 的色相跳变。
+         Q13② 已拍板统一品牌蓝，因此这里必须与 values/colors.xml 完全相同。 -->
+    <color name="splash_bg">#3F51B5</color>
 </resources>

@@ -70,6 +70,20 @@ class ReminderService {
   /// 最近一次重排失败的原因，设置页展示用。
   String? get lastError => _lastError;
 
+  /// E06（2026-10-24）：记录初始化失败。
+  ///
+  /// F15 把 init 移到首帧后并行执行；一旦它失败，[_initialized] 会保持 false，
+  /// 之后每次 [rescheduleAll] 都会被静默跳过 —— 所以这里必须留下可诊断痕迹。
+  void noteInitFailure(Object error) {
+    _lastError = '提醒初始化失败：$error';
+    debugPrint(_lastError!);
+  }
+
+  /// 清空最近一次错误（测试隔离 / 用户已确认后使用）。
+  void clearLastError() {
+    _lastError = null;
+  }
+
   /// 是否具备精确闹钟权限；未查询过时按 true 处理（乐观，首次重排会校准）。
   bool get exactAlarmsAllowed => _exactAllowed ?? true;
 
@@ -222,7 +236,13 @@ class ReminderService {
   /// 不用 cancelAll()：那会连带清掉 AI 完成通知（P1-4）；
   /// 失败一律记录到 [lastError] 并 debugPrint，不再静默（P1-5）。
   Future<void> rescheduleAll() async {
-    if (!_initialized) return;
+    if (!_initialized) {
+      // E06（2026-10-24）：静默早退是 B04「提醒完全不触发」最难定因的一环 ——
+      // 初始化失败后本会话每次重排都会被这一行吞掉，因此必须留下可诊断错误。
+      _lastError = '提醒重排被跳过：ReminderService 未初始化';
+      debugPrint(_lastError!);
+      return;
+    }
     _lastError = null;
     try {
       final prefs = await SharedPreferences.getInstance();

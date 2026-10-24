@@ -1051,6 +1051,23 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
               ],
             ),
+            // E06（2026-10-24）：提醒初始化/调度失败必须可见 —— 无错误时不显示，不增加干扰。
+            if (ReminderService.instance.lastError != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.error_outline, color: cs.error),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      '任务提醒异常：${ReminderService.instance.lastError}',
+                      style: TextStyle(fontSize: 12, color: cs.error),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
