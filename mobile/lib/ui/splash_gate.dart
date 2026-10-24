@@ -165,6 +165,8 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
                           fontWeight: FontWeight.w600,
                           letterSpacing: 0.5,
                           color: Colors.white,
+                          // 2026-10-24 用户：开屏两行文字都纯白、都不要下划线
+                          decoration: TextDecoration.none,
                         ),
                       ),
                     ),
@@ -177,8 +179,10 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: splashTaglineFontSize,
-                          color: Colors.white70,
+                          // 2026-10-24 用户：小字也改纯白（原 white70 偏灰）
+                          color: Colors.white,
                           letterSpacing: 1.2,
+                          decoration: TextDecoration.none,
                         ),
                       ),
                     ),

@@ -76,7 +76,7 @@ void main() {
     await settleSplash(tester);
   });
 
-  testWidgets('文字：名称 21sp 白色，小字 12sp white70', (tester) async {
+  testWidgets('文字：两行都纯白、无下划线（名称 21sp / 小字 12sp）', (tester) async {
     setDevice(tester);
     await pumpSplash(tester);
     await tester.pump(const Duration(milliseconds: 200));
@@ -85,12 +85,16 @@ void main() {
     expect(name.data, 'MsgRepo');
     expect(name.style?.fontSize, 21);
     expect(name.style?.color, Colors.white);
+    // 2026-10-24 用户：两行都不要下划线
+    expect(name.style?.decoration, isNot(TextDecoration.underline));
 
     final tagline =
         tester.widget<Text>(find.byKey(const ValueKey('splash-tagline')));
     expect(tagline.data, '让纷杂的消息，归于条理');
     expect(tagline.style?.fontSize, 12);
-    expect(tagline.style?.color, Colors.white70);
+    // 小字原为 white70，用户要求改纯白
+    expect(tagline.style?.color, Colors.white);
+    expect(tagline.style?.decoration, isNot(TextDecoration.underline));
 
     await settleSplash(tester);
   });
