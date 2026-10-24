@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- F15：启动底色（与主题 seed Colors.indigo 一致） -->
+    <color name="splash_bg">#3F51B5</color>
+</resources>

@@ -29,6 +29,11 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme"/>
+            <!-- F15：让 Flutter 在引擎初始化期间继续显示启动图，直到画出第一帧。
+                 没有它，FlutterActivity 会立刻换成 NormalTheme 的背景 → 表现为长时间白屏。 -->
+            <meta-data
+                android:name="io.flutter.embedding.android.SplashScreenDrawable"
+                android:resource="@drawable/launch_background"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

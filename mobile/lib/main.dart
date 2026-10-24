@@ -16,6 +16,7 @@ import 'ui/messages/messages_page.dart';
 import 'ui/notes/notes_page.dart';
 import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
+import 'ui/splash_gate.dart';
 import 'ui/todos/todos_page.dart';
 import 'ui/theme_fader.dart';
 import 'services/app_log.dart';
@@ -67,7 +68,22 @@ Future<void> main() async {
     };
   }
 
-  // 初始化失败（如本地数据损坏）也不能阻塞 runApp，否则直接黑屏
+  // 主题模式要在第一帧前就位（否则会先亮一下浅色再跳深色）；这次读取很轻量。
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    themeModeNotifier.value =
+        themeModeFromString(prefs.getString('theme_mode'));
+  } catch (e) {
+    debugPrint('主题设置读取失败: $e');
+  }
+
+  // F15：重活（提醒初始化/重排、采集轮询）不再阻塞 runApp —— 交给 SplashGate 在
+  // 「图标淡入」的启动页背后跑，用户看到的是动画而不是白屏。
+  runApp(MsgRepoApp(bootstrap: _bootstrapColdStart()));
+}
+
+/// 冷启动的初始化（F15 后移到 runApp 之后执行，失败也不阻塞界面）。
+Future<void> _bootstrapColdStart() async {
   try {
     await ReminderService.instance.init();
     // 进程重启后重排未来提醒（年度任务的逐年重复提醒暂不支持，跳过）
@@ -80,16 +96,6 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('NotificationBridge 启动失败: $e');
   }
-
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    themeModeNotifier.value =
-        themeModeFromString(prefs.getString('theme_mode'));
-  } catch (e) {
-    debugPrint('主题设置读取失败: $e');
-  }
-
-  runApp(const MsgRepoApp());
 }
 
 Future<void> _appendDebugError(
@@ -136,7 +142,10 @@ final ThemeData _darkTheme = ThemeData(
 );
 
 class MsgRepoApp extends StatelessWidget {
-  const MsgRepoApp({super.key});
+  const MsgRepoApp({super.key, required this.bootstrap});
+
+  /// 冷启动初始化（在启动页背后执行，见 [SplashGate]）。
+  final Future<void> bootstrap;
 
   @override
   Widget build(BuildContext context) {
@@ -156,7 +165,7 @@ class MsgRepoApp extends StatelessWidget {
             themeAnimationDuration: Duration.zero,
             builder: (context, child) =>
                 ThemeFader(child: child ?? const SizedBox.shrink()),
-            home: const HomeShell(),
+            home: SplashGate(bootstrap: bootstrap, child: const HomeShell()),
         );
       },
     );
