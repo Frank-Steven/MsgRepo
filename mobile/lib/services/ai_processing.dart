@@ -149,6 +149,61 @@ List<AiOutcome> selectAutoConfirmTargets({
           o,
     ];
 
+/// 一条消息要用的草稿列表（N1：多草稿优先，其次兼容旧的单草稿字段）。
+List<AiTaskDraft> draftsOf(AiProcessResult result) =>
+    result.taskDrafts.isNotEmpty
+        ? result.taskDrafts
+        : (result.taskDraft != null
+            ? [result.taskDraft!]
+            : const <AiTaskDraft>[]);
+
+/// 一条消息的「确认计划」（纯函数，便于单测）：
+/// 把 AI 草稿转成**要新建的任务**；命中进行中任务时只记复用、不新建（防重复任务）。
+///
+/// 会就地 `activeTasks.add(task)`：同一条消息的后续草稿、以及同批后续消息的草稿
+/// 因此也能命中刚规划出来的任务（原实现依赖这一点来避免同批重复建任务）。
+///
+/// 返回 (新任务列表, 命中的已有任务 id 列表)；复用命中**不计入**新建数（B08）。
+({List<Task> newTasks, List<String> reusedIds}) planConfirmTasks({
+  required List<AiTaskDraft> drafts,
+  required List<Task> activeTasks,
+  required String messageId,
+  required int now,
+}) {
+  final newTasks = <Task>[];
+  final reusedIds = <String>[];
+  for (final draft in drafts) {
+    if (draft.title.trim().isEmpty) continue; // 空标题草稿丢弃
+    final startAtMs = draft.startAt?.millisecondsSinceEpoch;
+    final reuse =
+        findReusableTask(activeTasks, title: draft.title, startAt: startAtMs);
+    if (reuse != null) {
+      // 命中已有任务：不新建，稍后只加一条关联（多对多的本意）
+      if (!reusedIds.contains(reuse.id)) reusedIds.add(reuse.id);
+      continue;
+    }
+    final task = Task(
+      id: const Uuid().v4(),
+      title: draft.title,
+      description: draft.description,
+      kind: draft.kind,
+      startAt: draft.startAt?.millisecondsSinceEpoch,
+      // 兜底：point 任务不落 end_at，保持与派生尺度一致（P1-1）
+      endAt: draft.kind == TaskKind.range
+          ? draft.endAt?.millisecondsSinceEpoch
+          : null,
+      priority: draft.priority,
+      sourceMessageId: messageId,
+      status: TaskStatus.active,
+      createdAt: now,
+      updatedAt: now,
+    );
+    newTasks.add(task);
+    activeTasks.add(task); // 同批内的后续草稿也能命中这条
+  }
+  return (newTasks: newTasks, reusedIds: reusedIds);
+}
+
 class AiProcessingService extends ChangeNotifier {
   AiProcessingService._();
 
@@ -558,44 +613,19 @@ class AiProcessingService extends ChangeNotifier {
       final r = o.result;
       if (r == null) continue;
       final m = o.message;
-      // N1：一条消息可能产出多个任务草稿；空标题的丢弃。
-      final drafts = r.taskDrafts.isNotEmpty
-          ? r.taskDrafts
-          : (r.taskDraft != null ? [r.taskDraft!] : const <AiTaskDraft>[]);
       final oldTaskIds = oldLinks[m.id] ?? const <String>[];
-      final newTasks = <Task>[];
-      final createdIds = <String>[];
-      final reusedIds = <String>[];
-      for (final draft in drafts) {
-        if (draft.title.trim().isEmpty) continue;
-        final startAtMs = draft.startAt?.millisecondsSinceEpoch;
-        final reuse = findReusableTask(activeTasks,
-            title: draft.title, startAt: startAtMs);
-        if (reuse != null) {
-          // 命中已有任务：不新建，稍后只加一条关联（多对多的本意）
-          if (!reusedIds.contains(reuse.id)) reusedIds.add(reuse.id);
-          continue;
-        }
-        final task = Task(
-          id: const Uuid().v4(),
-          title: draft.title,
-          description: draft.description,
-          kind: draft.kind,
-          startAt: draft.startAt?.millisecondsSinceEpoch,
-          // 兜底：point 任务不落 end_at，保持与派生尺度一致（P1-1）
-          endAt: draft.kind == TaskKind.range
-              ? draft.endAt?.millisecondsSinceEpoch
-              : null,
-          priority: draft.priority,
-          sourceMessageId: m.id,
-          status: TaskStatus.active,
-          createdAt: now,
-          updatedAt: now,
-        );
-        newTasks.add(task); // 攒起来，最后一次性事务提交
-        createdIds.add(task.id);
-        activeTasks.add(task); // 同批内的后续草稿也能命中这条
-      }
+      // B08：新建任务数必须真的累加（原来 createdTasks 声明后从未自增，
+      // 「新建 M 个任务」的通知文案里 M 恒为 0，而任务其实建了）。复用命中不计入。
+      final plan = planConfirmTasks(
+        drafts: draftsOf(r),
+        activeTasks: activeTasks,
+        messageId: m.id,
+        now: now,
+      );
+      final newTasks = plan.newTasks;
+      final createdIds = [for (final t in newTasks) t.id];
+      final reusedIds = plan.reusedIds;
+      createdTasks += newTasks.length;
       // 攒成一条 batch 记录，循环结束后一次性单事务提交
       batchItems.add((
         messageId: m.id,
