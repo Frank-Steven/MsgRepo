@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show SocketException;
 
 import 'package:characters/characters.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,6 +15,34 @@ import '../models/message.dart';
 import 'categories.dart';
 import 'junk_rules.dart';
 import '../services/app_log.dart';
+
+/// 是否是「电脑端没启动 / 网络不可达」这类**预期内**的离线异常。
+///
+/// E03（2026-10-25）：移动端大部分时间电脑端都不在线，health 探测失败是常态而不是
+/// 错误；只有这两类异常属于「离线预期」：
+/// - [TimeoutException]：2s 探测超时（.timeout）；
+/// - [SocketException]：连接被拒 / 主机不可达 / DNS 失败。
+///   package:http 1.6 会把 socket 错误包成 `ClientException`，但其同时
+///   `implements SocketException`（io_client.dart 的 _ClientSocketException），
+///   所以这里按 SocketException 判断即可，不需要单独认 ClientException。
+///
+/// **不算离线预期**（仍要留痕，别掩盖真问题）：TLS/证书（HandshakeException）、
+/// 响应解析（FormatException）、裸 ClientException（如连接被提前关闭）等。
+bool isExpectedOfflineError(Object error) =>
+    error is TimeoutException || error is SocketException;
+
+/// health 探测失败时的留痕策略（E03 降噪，纯分支、便于单测）：
+/// - 离线预期 → 只 debugPrint，**不写 AppLog**（否则设置页「最近错误」会被
+///   `ai.health` 刷屏，用户分不清真故障）；
+/// - 其余异常 → 照旧 `AppLog.instance.warn('ai.health', ...)`。
+@visibleForTesting
+void reportHealthProbeError(Object error, StackTrace stack) {
+  if (isExpectedOfflineError(error)) {
+    debugPrint('ai.health 离线（预期，不计入最近错误）：$error');
+    return;
+  }
+  AppLog.instance.warn('ai.health', error, stack);
+}
 
 /// AI 接口配置（设计 §8.1/§9）。电脑端条目自动生成（isDesktop=true），不持久化、不可删；
 /// 远程接口以 JSON 列表存 shared_preferences。
@@ -423,7 +453,8 @@ class AiClient {
           .timeout(const Duration(seconds: 2));
       ok = resp.statusCode == 200;
     } catch (e, st) {
-      AppLog.instance.warn('ai.health', e, st);
+      // E03：电脑端没启动（连不上/超时）是常态 → 只 debugPrint；其余真问题仍进 AppLog
+      reportHealthProbeError(e, st);
       ok = false;
     }
     _desktopOnlineCache = ok;
