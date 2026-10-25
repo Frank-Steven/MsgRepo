@@ -70,14 +70,78 @@ class ReminderService {
   /// 最近一次重排失败的原因，设置页展示用。
   String? get lastError => _lastError;
 
+  // ---- E06（2026-10-25）：统一失败留痕 + 同错去重 + 可控故障注入 ----
+
+  /// 上一条**已留痕**错误的完整文本（含异常详情），用于同错去重。
+  String? _lastLoggedDetail;
+
+  /// 被去重压掉的重复次数（同类错误再次出现时不再刷 AppLog，只累计）。
+  int _suppressedRepeats = 0;
+
+  /// 统一失败记录：设置页 [lastError] + debugPrint + AppLog，三处口径一致。
+  ///
+  /// **同错去重/限流**：与上一条已记录的错误文本相同时，只把 [lastError] 更新为
+  /// 最新（设置页仍显示当前错误），不再刷 debugPrint / AppLog —— 否则「每次写库都
+  /// 触发重排、每轮都失败」会把设置页「最近错误」刷满，反而看不出真问题。
+  /// 去重状态由 [clearErrorDedupe]（重排成功后）清除，让下一次真失败仍能被记录。
+  void recordError(
+    String message, {
+    Object? error,
+    StackTrace? stack,
+    String scope = 'reminder',
+  }) {
+    _lastError = message;
+    final detail = error == null ? message : '$message：$error';
+    if (_lastLoggedDetail == detail) {
+      _suppressedRepeats++;
+      return;
+    }
+    final tail =
+        _suppressedRepeats > 0 ? '（同类错误另有 $_suppressedRepeats 次未重复记录）' : '';
+    _suppressedRepeats = 0;
+    _lastLoggedDetail = detail;
+    debugPrint(detail);
+    AppLog.instance.warn(scope, '$detail$tail', stack);
+  }
+
+  /// 成功重排后清除同错去重状态（不清 [lastError]，由调用点决定）。
+  void clearErrorDedupe() {
+    _lastLoggedDetail = null;
+    _suppressedRepeats = 0;
+  }
+
+  /// 故障注入开关的**编译期**取值（默认 false，正常构建完全不变）。
+  ///
+  /// 打开方式：
+  /// - 构建：`flutter build apk --debug --dart-define=E06_FAULT_INJECT=true`
+  /// - 运行：`flutter run --dart-define=E06_FAULT_INJECT=true`
+  static const bool faultInjectCompiled =
+      bool.fromEnvironment('E06_FAULT_INJECT');
+
+  /// 运行期开关（默认取编译期常量；单测可改写以验证注入/恢复）。
+  @visibleForTesting
+  bool faultInjectEnabled = faultInjectCompiled;
+
+  bool _faultInjectedOnce = false;
+
+  /// 若开关打开且尚未注入过 → 返回 true（由 [init] 抛出一次模拟异常）。
+  ///
+  /// 设计成「消费一次」的形式：注入只影响当前进程的**首次** init，
+  /// 之后自动恢复，避免真机验证时 App 永久起不来。
+  @visibleForTesting
+  bool consumeFaultInjection() {
+    if (!faultInjectEnabled || _faultInjectedOnce) return false;
+    _faultInjectedOnce = true;
+    return true;
+  }
+
   /// E06（2026-10-24）：记录初始化失败。
   ///
   /// F15 把 init 移到首帧后并行执行；一旦它失败，[_initialized] 会保持 false，
   /// 之后每次 [rescheduleAll] 都会被静默跳过 —— 所以这里必须留下可诊断痕迹。
-  void noteInitFailure(Object error) {
-    _lastError = '提醒初始化失败：$error';
-    debugPrint(_lastError!);
-  }
+  /// 走 [recordError]，与重排失败共用同一条留痕/去重口径。
+  void noteInitFailure(Object error, [StackTrace? stack]) =>
+      recordError('提醒初始化失败：$error', stack: stack, scope: 'reminder.init');
 
   /// 清空最近一次错误（测试隔离 / 用户已确认后使用）。
   void clearLastError() {
@@ -93,6 +157,11 @@ class ReminderService {
 
   Future<void> init() async {
     if (_initialized) return;
+    // E06 可控故障注入（默认关，见 [faultInjectCompiled]）：只让**首次** init 失败，
+    // 用于真机验证「初始化失败 → 设置页显示提醒异常 + 最近错误留条」这条链路。
+    if (consumeFaultInjection()) {
+      throw StateError('E06_FAULT_INJECT：模拟提醒初始化失败（仅本次）');
+    }
     tzdata.initializeTimeZones();
     _resolveLocalTimezone();
 
@@ -237,10 +306,10 @@ class ReminderService {
   /// 失败一律记录到 [lastError] 并 debugPrint，不再静默（P1-5）。
   Future<void> rescheduleAll() async {
     if (!_initialized) {
-      // E06（2026-10-24）：静默早退是 B04「提醒完全不触发」最难定因的一环 ——
-      // 初始化失败后本会话每次重排都会被这一行吞掉，因此必须留下可诊断错误。
-      _lastError = '提醒重排被跳过：ReminderService 未初始化';
-      debugPrint(_lastError!);
+      // E06：静默早退是 B04「提醒完全不触发」最难定因的一环 —— 初始化失败后本会话
+      // 每次重排都会被这一行吞掉，因此必须走统一留痕（同错只记一次）。
+      recordError('提醒重排被跳过：ReminderService 未初始化',
+          scope: 'reminder.reschedule');
       return;
     }
     _lastError = null;
@@ -264,6 +333,10 @@ class ReminderService {
           await AppDatabase.instance.getTasks(status: TaskStatus.active);
       final scheduled = <String>[];
       final ids = assignNotificationIds(tasks.map((t) => t.id));
+      // E06：单条失败不阻塞其余任务，但**汇总成一条**留痕（含失败条数与首个错误），
+      // 避免上千条任务反复失败时把「最近错误」逐条刷满。
+      var failed = 0;
+      String? firstFailure;
       for (final task in tasks) {
         try {
           final id = ids[task.id];
@@ -271,15 +344,21 @@ class ReminderService {
             scheduled.add(id.toString());
           }
         } catch (e) {
-          // 单条失败不阻塞其余任务，但要留下痕迹
-          _lastError = '任务「${task.title}」排提醒失败：$e';
-          debugPrint(_lastError!);
+          failed++;
+          firstFailure ??= '任务「${task.title}」排提醒失败：$e';
         }
       }
       await prefs.setStringList(_keyScheduledIds, scheduled);
-    } catch (e) {
-      _lastError = '提醒重排失败：$e';
-      debugPrint(_lastError!);
+      if (failed > 0) {
+        recordError('提醒排程失败 $failed 条，首个：$firstFailure',
+            scope: 'reminder.reschedule');
+      } else {
+        // 整轮成功：解除同错去重，下一次真失败仍能被记录
+        clearErrorDedupe();
+      }
+    } catch (e, st) {
+      recordError('提醒重排失败', error: e, stack: st,
+          scope: 'reminder.reschedule');
     }
   }
 
