@@ -467,6 +467,43 @@ class AiProcessingService extends ChangeNotifier {
     }
   }
 
+  /// 不采用 / 驳回（A02，用户 2026-10-20 确认语义）：把选中的**待确认结果**从
+  /// 会话里丢掉，消息回到「未处理」——不写库、不建任务、不改 priority/status。
+  ///
+  /// 与 [confirm] 的本质区别：confirm 走 applyAiConfirmBatch 写库并注册复合撤销；
+  /// 这里**一条数据库语句都不发**（AI 结果只存在于内存会话，从未落库，丢弃本身
+  /// 没有可撤销的写操作，因此也不进撤销队列）。
+  ///
+  /// 只移除 `result != null` 的条目：失败条目（error）与未完成条目没有「AI 结果」
+  /// 可丢弃，保持原样，由用户重试或关闭面板时按既有规则收尾。
+  /// 队列空且已无待确认结果时按 [closePanel] 的规则清空会话。返回丢弃条数。
+  int discard(Iterable<AiOutcome> targets) {
+    final s = _session;
+    if (s == null) return 0;
+    var count = 0;
+    for (final o in targets) {
+      if (o.result == null) continue; // 失败/未完成条目不属于「待确认结果」
+      s.removeOutcome(o);
+      s.rawById.remove(o.message.id); // 顺手释放流式原文（与 confirm 一致）
+      count++;
+    }
+    if (count == 0) return 0;
+    revision++;
+    notifyListeners();
+    // 收尾规则与 closePanel 一致：队列空（没有在跑/排队的条目）且无待确认结果
+    // → 会话清空；仍有未选中的待确认结果或失败残留时保留会话。
+    final alive = _session;
+    if (alive != null &&
+        !_pumping &&
+        alive.remainingCount == 0 &&
+        alive.pendingConfirmCount == 0) {
+      _session = null;
+      revision++;
+      notifyListeners();
+    }
+    return count;
+  }
+
   /// 取消：中断当前模型调用，未产出结果的排队/在飞条目丢弃，
   /// 已产出的结果保留在汇总面板。
   Future<void> cancel() async {

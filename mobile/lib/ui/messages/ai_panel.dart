@@ -113,6 +113,55 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
     _showUndoSnack('已确认 $count 条 AI 结果');
   }
 
+  /// 不采用 / 驳回选中（A02，用户 2026-10-20 确认语义）：丢弃这批 AI 结果、
+  /// 消息退回未处理，不落库、不建任务。走服务层纯内存 [AiProcessingService.discard]，
+  /// 与「确认选中」共用同一作用范围（checkbox 选中的待确认结果）。
+  ///
+  /// 与确认不同，丢弃没有可撤销的写操作，所以二次确认用普通对话框而不是撤销
+  /// SnackBar —— 一旦丢弃只能重新发起 AI 处理。
+  Future<void> _discard(List<AiOutcome> targets) async {
+    final n = targets.where((o) => o.result != null).length;
+    if (n == 0) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('不采用这些 AI 结果？'),
+        content: Text('丢弃 $n 条 AI 结果，消息退回未处理，不建任务。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('丢弃')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final count = _svc.discard(targets);
+    if (count == 0) return;
+    widget.onChanged?.call();
+    _toastDiscarded(count);
+  }
+
+  /// 不采用后的提示。
+  ///
+  /// 丢弃会把选中的待确认结果移出会话；若因此清空会话，面板会立刻自动收起
+  /// （_onService 里的 maybePop），面板内嵌的 ScaffoldMessenger 随路由销毁，
+  /// 提示会丢 —— 此时退回页面级 messenger。
+  void _toastDiscarded(int count) {
+    final text = '已丢弃 $count 条 AI 结果（消息保持未处理）';
+    final inner = _messengerKey.currentState;
+    if (_session != null && inner != null) {
+      inner.hideCurrentSnackBar();
+      inner.showSnackBar(SnackBar(content: Text(text)));
+      return;
+    }
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
   /// 关闭：交由服务层收尾（队列空且无待确认结果才清空会话；否则会话保留，
   /// 消息页入口可回来继续确认/观看进度）。
   void _close() {
@@ -408,6 +457,22 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
                 },
                 child: Text(checkedCount < pendingCount ? '全选' : '全不选'),
               ),
+            TextButton(
+              onPressed: _close,
+              child: Text(pendingCount > 0 ? '稍后确认' : '关闭'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(parts.join(' / '),
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+        // A02：批量操作单独一行。「确认选中」与新增的「不采用」作用范围完全相同
+        // （checkbox 选中的待确认结果），二者并排且同时受 checkedCount 控制；
+        // 原来「确认选中 / 稍后确认」与标题挤在同一行，再加一个按钮在窄屏或大
+        // 字号下必然溢出（与 U9 头部同一类问题），故拆成两行。
+        const SizedBox(height: 8),
+        Row(
+          children: [
             FilledButton(
               onPressed: checkedCount == 0
                   ? null
@@ -418,15 +483,17 @@ class _AiProcessPanelState extends State<AiProcessPanel> {
               child: Text(checkedCount == 0 ? '确认选中' : '确认选中（$checkedCount）'),
             ),
             const SizedBox(width: 8),
-            TextButton(
-              onPressed: _close,
-              child: Text(pendingCount > 0 ? '稍后确认' : '关闭'),
+            OutlinedButton(
+              onPressed: checkedCount == 0
+                  ? null
+                  : () => _discard([
+                        for (final o in outcomes)
+                          if (o.result != null && o.checked) o,
+                      ]),
+              child: Text(checkedCount == 0 ? '不采用' : '不采用（$checkedCount）'),
             ),
           ],
         ),
-        const SizedBox(height: 4),
-        Text(parts.join(' / '),
-            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
         const Divider(height: 16),
         // O02：同上，汇总页也惰性渲染。
         Expanded(
