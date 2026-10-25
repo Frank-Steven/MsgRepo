@@ -73,12 +73,13 @@ void main() {
           reason: '成功一轮后的新失败必须重新留痕');
     });
 
-    test('带异常对象时 AppLog 文本包含详情，同错仍只记一次', () {
+    test('带异常对象时 AppLog 与 lastError 都包含详情，同错仍只记一次', () {
       svc.recordError('提醒重排失败', error: StateError('db locked'));
       svc.recordError('提醒重排失败', error: StateError('db locked'));
 
       expect(AppLog.instance.count, 1);
       expect(AppLog.instance.latest!.message, contains('db locked'));
+      expect(svc.lastError, contains('db locked'), reason: '设置页也要看到具体异常');
     });
   });
 

@@ -90,8 +90,8 @@ class ReminderService {
     StackTrace? stack,
     String scope = 'reminder',
   }) {
-    _lastError = message;
     final detail = error == null ? message : '$message：$error';
+    _lastError = detail;
     if (_lastLoggedDetail == detail) {
       _suppressedRepeats++;
       return;

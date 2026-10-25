@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
@@ -142,6 +143,13 @@ class AppDatabase {
   static final AppDatabase instance = AppDatabase._();
 
   Database? _db;
+
+  /// 测试注入：让 confirm 等写库路径跑内存 SQLite，而不是真机库。
+  @visibleForTesting
+  void debugAttachDatabase(Database db) => _db = db;
+
+  @visibleForTesting
+  void debugDetachDatabase() => _db = null;
 
   Future<Database> get database async {
     final existing = _db;
