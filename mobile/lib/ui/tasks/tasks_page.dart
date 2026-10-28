@@ -8,6 +8,10 @@ import 'task_schedule_view.dart';
 /// 顶部视图切换「列表 / 日 / 月 / 年 / 年度」，数据同源 tasks 表，各视图按
 /// 时间尺度（deriveTaskScale / scalesForView）过滤。
 ///
+/// ui-structure §3/§6.2 收编后：整屏唯一 AppBar 由本页持有（标题「任务」），
+/// 两个内嵌视图不再带 AppBar；视图级操作上收 AppBar actions 并按当前视图
+/// 分显隐（甘特模式的「现在」定位）；列表视图的多选态降级为内容首行工具条。
+///
 /// - 列表 = 原待办页（[TaskListView]：尺度页签 + 多选 + 内嵌详情）；
 /// - 日/月/年/年度 = 原日程页对应粒度（[TaskScheduleView]，粒度由本页下发，
 ///   年度档 = granularity 0 的 YearlyView；视图内下钻（点月份/日期/年份）
@@ -32,6 +36,9 @@ class TasksPageState extends State<TasksPage> {
 
   /// 甘特视图是否已创建（未访问过的模式不构建）。
   bool _scheduleBuilt = false;
+
+  /// 列表视图处于多选态时隐藏 FAB（避免遮挡底部批量操作条）。
+  bool _listSelecting = false;
 
   /// 壳层切页时刷新：列表始终刷新；甘特视图仅在已构建时刷新。
   Future<void> reload() async {
@@ -63,48 +70,62 @@ class TasksPageState extends State<TasksPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      floatingActionButton: FloatingActionButton(
-        tooltip: '新建任务',
-        onPressed: _createTask,
-        child: const Icon(Icons.add),
+      appBar: AppBar(
+        title: const Text('任务'),
+        actions: [
+          // 视图级操作上收（ui-structure §6.2）：「现在」仅甘特模式显示。
+          if (_mode != 0)
+            TextButton(
+              onPressed: () => _scheduleKey.currentState?.goNow(),
+              child: const Text('现在'),
+            ),
+        ],
       ),
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: Center(
-                child: SizedBox(
-                  width: 300,
-                  child: SegmentedSelector<int>(
-                    values: const [0, 1, 2, 3, 4],
-                    labels: const ['列表', '日', '月', '年', '年度'],
-                    selected: _mode,
-                    onChanged: _switchMode,
-                  ),
+      floatingActionButton: _listSelecting
+          ? null
+          : FloatingActionButton(
+              tooltip: '新建任务',
+              onPressed: _createTask,
+              child: const Icon(Icons.add),
+            ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Center(
+              child: SizedBox(
+                width: 300,
+                child: SegmentedSelector<int>(
+                  values: const [0, 1, 2, 3, 4],
+                  labels: const ['列表', '日', '月', '年', '年度'],
+                  selected: _mode,
+                  onChanged: _switchMode,
                 ),
               ),
             ),
-            const Divider(height: 1),
-            Expanded(
-              child: IndexedStack(
-                index: _mode == 0 ? 0 : 1,
-                children: [
-                  TaskListView(key: _listKey),
-                  if (_scheduleBuilt)
-                    TaskScheduleView(
-                      key: _scheduleKey,
-                      granularity: _granularityForMode[_mode] ?? 3,
-                      onSwitchGranularity: _switchGranularity,
-                    )
-                  else
-                    const SizedBox.shrink(),
-                ],
-              ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: IndexedStack(
+              index: _mode == 0 ? 0 : 1,
+              children: [
+                TaskListView(
+                  key: _listKey,
+                  onSelectionChanged: (selecting) =>
+                      setState(() => _listSelecting = selecting),
+                ),
+                if (_scheduleBuilt)
+                  TaskScheduleView(
+                    key: _scheduleKey,
+                    granularity: _granularityForMode[_mode] ?? 3,
+                    onSwitchGranularity: _switchGranularity,
+                  )
+                else
+                  const SizedBox.shrink(),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

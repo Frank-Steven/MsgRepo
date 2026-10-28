@@ -20,9 +20,13 @@ import 'views/yearly_view.dart';
 ///
 /// v3 阶段 4 变更：
 /// - 粒度不再由本组件内的段选器控制，改由 [granularity] 构造参数下发
-///   （任务页顶部「列表/日/月/年/年度」切换）；「现在」按钮移入 AppBar actions；
+///   （任务页顶部「列表/日/月/年/年度」切换）；
 /// - 详情面板跳父/子任务需要跨粒度时经 [onSwitchGranularity] 回调请求
 ///   宿主（任务页）切换视图模式。
+///
+/// ui-structure §3/§6.2 收编：本视图不持有 AppBar（由任务页容器统一持有）；
+/// 期导航（上一期/标题/下一期）降级为内容首行工具条，「现在」定位上收任务页
+/// AppBar actions（经 [goNow] 调用）。
 ///
 /// 历史行为（保持不变）：
 /// - 任务加载按可视窗口增量缓存（[onVisibleWindowChanged] 驱动），
@@ -678,6 +682,9 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     }
   }
 
+  /// 任务页 AppBar「现在」入口（ui-structure §6.2：仅甘特模式显示）。
+  void goNow() => _goNow();
+
   void _goNow() {
     switch (widget.granularity) {
       case 0:
@@ -899,34 +906,40 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     );
   }
 
+  /// 期导航首行工具条（原 AppBar 标题 Row 降级而来）：上一期/标题/下一期。
+  /// 「现在」已上收任务页 AppBar actions（ui-structure §6.2）。
+  Widget _buildPeriodHeader() {
+    return SizedBox(
+      height: 48,
+      child: Row(children: [
+        IconButton(
+          tooltip: '上一期',
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _shiftPeriod(-1),
+          icon: const Icon(Icons.chevron_left),
+        ),
+        Expanded(child: Center(child: Text(_title))),
+        IconButton(
+          tooltip: '下一期',
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _shiftPeriod(1),
+          icon: const Icon(Icons.chevron_right),
+        ),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // B01：视图还没上报可视窗口时，先用推算窗口，避免底部「任务 0」闪一下
     _maybeSeedWindow();
 
+    // ui-structure §3：内嵌视图不持有 AppBar（由任务页容器统一持有）。
     return Scaffold(
-      appBar: AppBar(
-        title: Row(children: [
-          IconButton(
-            tooltip: '上一期',
-            visualDensity: VisualDensity.compact,
-            onPressed: () => _shiftPeriod(-1),
-            icon: const Icon(Icons.chevron_left),
-          ),
-          Expanded(child: Center(child: Text(_title))),
-          IconButton(
-            tooltip: '下一期',
-            visualDensity: VisualDensity.compact,
-            onPressed: () => _shiftPeriod(1),
-            icon: const Icon(Icons.chevron_right),
-          ),
-        ]),
-        actions: [
-          TextButton(onPressed: _goNow, child: const Text('现在')),
-        ],
-      ),
       body: Column(
         children: [
+          _buildPeriodHeader(),
+          const Divider(height: 1),
           if (_loading)
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else

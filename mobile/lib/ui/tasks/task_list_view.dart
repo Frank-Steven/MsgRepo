@@ -22,8 +22,13 @@ import 'task_tile.dart';
 /// 任务状态交集：全部已归档 → 删除/取出；全部未归档且全部 active → 归档/完成；
 /// 全部未归档且全部 done → 归档/取消完成；混合（active+done）→ 仅归档。
 /// 所有批量操作走 UndoService 可撤销。
+/// ui-structure §3 收编：本视图不持有 AppBar（由任务页容器统一持有）；
+/// 多选态的「退出/已选 N 项/全选/取消」从 AppBar 降级为内容首行工具条。
 class TaskListView extends StatefulWidget {
-  const TaskListView({super.key});
+  const TaskListView({super.key, this.onSelectionChanged});
+
+  /// 多选态变化回调：任务页容器用来在多选时隐藏 FAB（避免遮挡底部操作条）。
+  final ValueChanged<bool>? onSelectionChanged;
 
   @override
   State<TaskListView> createState() => TaskListViewState();
@@ -183,6 +188,7 @@ class TaskListViewState extends State<TaskListView> {
       // P1：派生数据随数据一起刷新，build 里不再逐页签重算。
       _rebuildTabCache();
     });
+    widget.onSelectionChanged?.call(_selecting);
   }
 
   /// P1：一次性重建各页签派生数据（任务排序 + 子任务分组 + 可见行 + 徽标）。
@@ -319,6 +325,7 @@ class TaskListViewState extends State<TaskListView> {
       if (!_selected.remove(t.id)) _selected.add(t.id);
       if (_selected.isEmpty) _selecting = false;
     });
+    widget.onSelectionChanged?.call(_selecting);
   }
 
   void _enterSelection(Task t) {
@@ -327,6 +334,7 @@ class TaskListViewState extends State<TaskListView> {
       _selected.add(t.id);
       _detailTask = null;
     });
+    widget.onSelectionChanged?.call(true);
   }
 
   void _exitSelection() {
@@ -334,6 +342,7 @@ class TaskListViewState extends State<TaskListView> {
       _selecting = false;
       _selected.clear();
     });
+    widget.onSelectionChanged?.call(false);
   }
 
   /// 批量置状态（归档/取出），撤销 = 恢复各自原状态（v2.6.1）。
@@ -559,16 +568,23 @@ class TaskListViewState extends State<TaskListView> {
     return now - task.updatedAt < _recentWindow.inMilliseconds;
   }
 
-  AppBar _buildAppBar() {
-    if (_selecting) {
-      return AppBar(
-        leading: IconButton(
-          tooltip: '退出',
-          icon: const Icon(Icons.close),
-          onPressed: _exitSelection,
-        ),
-        title: Text('已选 ${_selected.length} 项'),
-        actions: [
+  /// 多选态首行工具条（ui-structure §4 视图级操作；原多选 AppBar 降级而来，
+  /// 与消息分区 _buildSelectionHeader 同一范式）。
+  Widget _buildSelectionHeader() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      height: 48,
+      color: cs.surfaceContainerLow,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: '退出',
+            icon: const Icon(Icons.close),
+            onPressed: _exitSelection,
+          ),
+          Text('已选 ${_selected.length} 项'),
+          const Spacer(),
           TextButton(
             onPressed: () => setState(
                 () => _selected.addAll(_tasksForTab(_tab).map((t) => t.id))),
@@ -581,10 +597,8 @@ class TaskListViewState extends State<TaskListView> {
             child: const Text('取消'),
           ),
         ],
-      );
-    }
-    // 主创建已统一为任务页 FAB（ui-structure §4），AppBar 不再放新建入口。
-    return AppBar(title: const Text('待办'));
+      ),
+    );
   }
 
   /// 多选底部操作条（v2.6.1）：按所选任务状态交集决定可用项——
@@ -639,10 +653,11 @@ class TaskListViewState extends State<TaskListView> {
 
   @override
   Widget build(BuildContext context) {
+    // ui-structure §3：内嵌视图不持有 AppBar（由任务页容器统一持有）。
     return Scaffold(
-      appBar: _buildAppBar(),
       body: Column(
         children: [
+          if (_selecting) _buildSelectionHeader(),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: SegmentedSelector<int>(

@@ -14,6 +14,8 @@ import 'task_anchors_test.dart' show createBaseTables;
 /// 任务页视图切换「列表/日/月/年/年度」五档回归（v3 收尾）：
 /// 「年度」档 = TaskScheduleView(granularity: 0) 的 YearlyView，
 /// 甘特视图懒构建（首次切到才创建）。
+/// ui-structure §6.2 收编回归：整屏唯一 AppBar（标题「任务」）由
+/// TasksPage 持有，「现在」按视图分显隐（仅甘特模式）。
 ///
 /// 在 tester.runAsync 真异步区里跑：FakeAsync 区会让 sqflite_ffi 的
 /// DB 调用挂死（与 anchor_navigation_test 同一范式）。
@@ -54,11 +56,22 @@ void main() {
       expect(find.byType(TaskListView), findsOneWidget);
       expect(find.byType(YearlyView), findsNothing, reason: '甘特懒构建');
 
-      // 切到「年度」：granularity 0 → YearlyView
+      // ui-structure §3/§6.2：整屏唯一 AppBar，标题「任务」；
+      // 列表模式不显示「现在」（仅甘特模式的 action）。
+      expect(find.byType(AppBar), findsOneWidget);
+      expect(
+        find.descendant(of: find.byType(AppBar), matching: find.text('任务')),
+        findsOneWidget,
+      );
+      expect(find.text('待办'), findsNothing, reason: '内层 AppBar 已收编');
+      expect(find.text('现在'), findsNothing, reason: '列表模式无「现在」');
+
+      // 切到「年度」：granularity 0 → YearlyView；「现在」出现
       await tester.tap(switcherLabel('年度'));
       await settle(tester);
       expect(find.byType(TaskScheduleView), findsOneWidget);
       expect(find.byType(YearlyView), findsOneWidget);
+      expect(find.text('现在'), findsOneWidget, reason: '甘特模式显示「现在」');
       final schedule = tester.widget<TaskScheduleView>(
           find.byType(TaskScheduleView));
       expect(schedule.granularity, 0);
@@ -68,6 +81,12 @@ void main() {
       await settle(tester);
       expect(find.byType(YearView), findsOneWidget);
       expect(find.byType(YearlyView), findsNothing);
+      expect(find.byType(AppBar), findsOneWidget, reason: '换视图后仍唯一 AppBar');
+
+      // 切回「列表」：「现在」随视图隐藏
+      await tester.tap(switcherLabel('列表'));
+      await settle(tester);
+      expect(find.text('现在'), findsNothing);
 
       appDb.debugDetachDatabase();
       await db.close();
