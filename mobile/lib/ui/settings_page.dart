@@ -7,6 +7,7 @@ import 'shared/app_icon.dart';
 import 'shared/segmented_selector.dart';
 import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
+import '../services/archive_export_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/reminder_service.dart';
 import '../services/auto_process.dart';
@@ -72,6 +73,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final Set<String> _testing = {};
 
   bool _listenerEnabled = false;
+  bool _exporting = false;
   bool _batteryOptimized = true; // true = 已加入白名单（不需要再优化）
   bool _exactAlarms = true; // 精确闹钟权限（Android 12+ 可能需要手动开启）
   AppFilterConfig _filterConfig = const AppFilterConfig();
@@ -549,6 +551,48 @@ class _SettingsPageState extends State<SettingsPage> {
     await _saveFilter(next);
   }
 
+  // ---- 数据（v2.9 过渡版本：存档导出）----
+
+  Future<void> _exportArchive() async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final result = await ArchiveExportService.instance.exportArchive();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('导出完成'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('任务 ${result.tasks} 条 · 消息 ${result.messages} 条 · '
+                  '笔记 ${result.notes} 篇 · 文件 ${result.files} 个 · '
+                  '锚点 ${result.anchors} 条'
+                  '${result.skippedFiles > 0 ? '\n${result.skippedFiles} 个附件文件已丢失，未打包' : ''}'),
+              const SizedBox(height: 12),
+              Text('存档位置：',
+                  style: TextStyle(fontSize: 12, color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+              SelectableText(result.path,
+                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      _toast('导出失败：$e');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   // ---- 后台保活（v2.6）----
 
   Future<void> _requestBatteryWhitelist() async {
@@ -825,6 +869,25 @@ class _SettingsPageState extends State<SettingsPage> {
             Text(
               '上限 500：消息页一次只加载 500 条，再高就数不到了',
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+          ]),
+          const Divider(height: 32),
+          _section('数据', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.archive_outlined, color: cs.onSurfaceVariant),
+              title: const Text('导出存档'),
+              subtitle: Text(
+                '把全部消息、任务、笔记与附件打包为一个 zip（v3 存档格式）',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: _exporting
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.chevron_right),
+              onTap: _exporting ? null : _exportArchive,
             ),
           ]),
           const Divider(height: 32),
