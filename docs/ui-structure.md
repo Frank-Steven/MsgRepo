@@ -146,6 +146,6 @@ lib/services/assistant/    # 助理域服务（tool_spec/parser/proposal_*）
 | 6 | 消息分区的 AI 面板删除后残留的入口空洞排查 | 随阶段 7 已完成 | ✅ c8fa147 |
 | 7 | 提案卡片在对话页与待确认区是两套实现 | 抽取同构组件（§7） | 中 |
 | 8 | 旧命名残留（`MsgRepoApp` 类名、注释中的 v2 术语） | 逐步清扫，不动 public 行为 | 低 |
-| 9 | 任务页双层头部（TasksPage 段选器 + TaskListView 内层 AppBar「待办」） | 比照库页模式收编：TaskListView 交出 AppBar，任务页 AppBar 标题「任务」，多选态落首行工具条 | 高 |
+| 9 | 任务页双层头部（TasksPage 段选器 + TaskListView 内层 AppBar「待办」） | 比照库页模式收编：TaskListView 交出 AppBar，任务页 AppBar 标题「任务」，多选态落首行工具条 | ✅ 7b4707e |
 
 整改以「新代码先合规、旧代码按优先级收编」执行；每完成一项在此表标注 commit。
