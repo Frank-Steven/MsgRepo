@@ -61,22 +61,20 @@ void main() {
     await settleSplash(tester);
   });
 
-  testWidgets('间距：图标底→名称顶 35dp，名称底→小字顶 29dp', (tester) async {
+  testWidgets('间距：图标底→名称顶 35dp', (tester) async {
     setDevice(tester);
     await pumpSplash(tester);
     await tester.pump(const Duration(milliseconds: 200));
 
     final icon = tester.getRect(find.byKey(const ValueKey('splash-icon')));
     final name = tester.getRect(find.byKey(const ValueKey('splash-name')));
-    final tagline = tester.getRect(find.byKey(const ValueKey('splash-tagline')));
 
     expect(name.top - icon.bottom, closeTo(35, 0.01));
-    expect(tagline.top - name.bottom, closeTo(29, 0.01));
 
     await settleSplash(tester);
   });
 
-  testWidgets('文字：两行都纯白、无下划线（名称 21sp / 小字 12sp）', (tester) async {
+  testWidgets('文字：名称纯白、无下划线（21sp）；标语已移除', (tester) async {
     setDevice(tester);
     await pumpSplash(tester);
     await tester.pump(const Duration(milliseconds: 200));
@@ -85,16 +83,11 @@ void main() {
     expect(name.data, 'Manalist');
     expect(name.style?.fontSize, 21);
     expect(name.style?.color, Colors.white);
-    // 2026-10-24 用户：两行都不要下划线
+    // 2026-10-24 用户：不要下划线
     expect(name.style?.decoration, isNot(TextDecoration.underline));
 
-    final tagline =
-        tester.widget<Text>(find.byKey(const ValueKey('splash-tagline')));
-    expect(tagline.data, '让纷杂的消息，归于条理');
-    expect(tagline.style?.fontSize, 12);
-    // 小字原为 white70，用户要求改纯白
-    expect(tagline.style?.color, Colors.white);
-    expect(tagline.style?.decoration, isNot(TextDecoration.underline));
+    // 2026-10-28 用户：启动页标语移除
+    expect(find.byKey(const ValueKey('splash-tagline')), findsNothing);
 
     await settleSplash(tester);
   });

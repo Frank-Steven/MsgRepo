@@ -17,17 +17,11 @@ const double splashIconCenterRatio = 0.465;
 /// 图标底 → 名称顶的距离（dp）。设计稿 96px @2.75。
 const double splashIconToNameGap = 35;
 
-/// 名称底 → 小字顶的距离（dp）。设计稿 80px @2.75。
-const double splashNameToTaglineGap = 29;
-
 /// 圆角半径占图标边长的比例（设计稿 rx 56 / 256 ≈ 21.875%）。
 const double splashIconRadiusRatio = 0.21875;
 
 /// 名称字号（sp）。设计稿 56px @2.75 ≈ 21sp。
 const double splashNameFontSize = 21;
-
-/// 一句话介绍字号（sp）。设计稿 32px @2.75 ≈ 12sp。
-const double splashTaglineFontSize = 12;
 
 /// F15（2026-10-22 用户）+ Q13②（2026-10-24 用户拍板）启动动画。
 ///
@@ -37,7 +31,7 @@ const double splashTaglineFontSize = 12;
 ///    Q13-A（2026-10-24 用户选 A）后，**原生阶段只铺品牌蓝、不画任何图标**
 ///    （`windowSplashScreenAnimatedIcon` 显式指向透明占位），因此这次 0 → 1 淡入
 ///    是图标的**首次出现**，不存在「原生图标消失再重现」的交接闪烁；
-/// 2. 名称与一行小字延后 150ms 淡入（500ms），避免三块同时跳到脸上；
+/// 2. 名称延后 150ms 淡入（500ms），避免两块同时跳到脸上（2026-10-28 用户：标语小字移除）；
 /// 3. 底层先在**第一帧**画启动页，下一帧才构建 [child]（主界面），这样数据库/页面初始化的
 ///    重活发生在启动页盖着的时候，而不是让用户盯着白屏；
 /// 4. 启动完成（[bootstrap] 完成且不短于 [minimumDuration]）后启动页整体淡出（300ms）。
@@ -151,42 +145,21 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
                 top: iconTop + splashIconSize + splashIconToNameGap,
                 left: 0,
                 right: 0,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    FadeTransition(
-                      opacity: textFade,
-                      child: const Text(
-                        'Manalist',
-                        key: ValueKey('splash-name'),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: splashNameFontSize,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
-                          color: Colors.white,
-                          // 2026-10-24 用户：开屏两行文字都纯白、都不要下划线
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
+                child: FadeTransition(
+                  opacity: textFade,
+                  child: const Text(
+                    'Manalist',
+                    key: ValueKey('splash-name'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: splashNameFontSize,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.5,
+                      color: Colors.white,
+                      // 2026-10-24 用户：开屏文字纯白、不要下划线
+                      decoration: TextDecoration.none,
                     ),
-                    const SizedBox(height: splashNameToTaglineGap),
-                    FadeTransition(
-                      opacity: textFade,
-                      child: const Text(
-                        '让纷杂的消息，归于条理',
-                        key: ValueKey('splash-tagline'),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: splashTaglineFontSize,
-                          // 2026-10-24 用户：小字也改纯白（原 white70 偏灰）
-                          color: Colors.white,
-                          letterSpacing: 1.2,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ],
