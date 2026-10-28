@@ -390,6 +390,7 @@ class TaskListViewState extends State<TaskListView> {
 
   /// 批量删除已归档任务（v2.6.1）：删父前子任务先升级为普通任务，
   /// 与单个删除同一复合撤销语义（设计 §7）。
+  /// 删除前快照锚点行 + 受影响正文原文，撤销时整体复原（设计 §7 修订）。
   Future<void> _batchDelete(List<Task> targets) async {
     final db = AppDatabase.instance;
     final childrenOf = <String, List<Task>>{};
@@ -401,6 +402,8 @@ class TaskListViewState extends State<TaskListView> {
         await db.updateTask(c.copyWith(parentId: () => null));
       }
     }
+    final snapshot =
+        await db.snapshotTaskDeletion([for (final t in targets) t.id]);
     await db.deleteTasks([for (final t in targets) t.id]);
     UndoService.instance.register(
       label: '已删除',
@@ -408,6 +411,7 @@ class TaskListViewState extends State<TaskListView> {
         for (final t in targets) {
           await db.insertTask(t);
         }
+        await db.restoreTaskDeletionSnapshot(snapshot);
         for (final children in childrenOf.values) {
           for (final c in children) {
             await db.updateTask(c);
@@ -452,11 +456,14 @@ class TaskListViewState extends State<TaskListView> {
       for (final c in children) {
         await db.updateTask(c.copyWith(parentId: () => null));
       }
+      // 删除前快照锚点行 + 受影响正文原文，撤销时整体复原。
+      final snapshot = await db.snapshotTaskDeletion([task.id]);
       await db.deleteTasks([task.id]);
       UndoService.instance.register(
         label: '已删除',
         undo: () async {
           await db.insertTask(task);
+          await db.restoreTaskDeletionSnapshot(snapshot);
           for (final c in children) {
             await db.updateTask(c);
           }

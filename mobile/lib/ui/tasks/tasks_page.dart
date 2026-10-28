@@ -5,12 +5,13 @@ import 'task_list_view.dart';
 import 'task_schedule_view.dart';
 
 /// 任务页（design-v3 §4，v3 阶段 4）：合并原「待办」与「日程」两页，
-/// 顶部视图切换「列表 / 日 / 月 / 年」，数据同源 tasks 表，各视图按
+/// 顶部视图切换「列表 / 日 / 月 / 年 / 年度」，数据同源 tasks 表，各视图按
 /// 时间尺度（deriveTaskScale / scalesForView）过滤。
 ///
 /// - 列表 = 原待办页（[TaskListView]：尺度页签 + 多选 + 内嵌详情）；
-/// - 日/月/年 = 原日程页对应粒度（[TaskScheduleView]，粒度由本页下发，
-///   视图内下钻（点月份/日期）经 onSwitchGranularity 回本页换 mode）。
+/// - 日/月/年/年度 = 原日程页对应粒度（[TaskScheduleView]，粒度由本页下发，
+///   年度档 = granularity 0 的 YearlyView；视图内下钻（点月份/日期/年份）
+///   经 onSwitchGranularity 回本页换 mode）。
 /// - 甘特视图懒构建：首次切到才创建（与壳层 _builtTabs 同一策略）。
 class TasksPage extends StatefulWidget {
   const TasksPage({super.key});
@@ -20,11 +21,11 @@ class TasksPage extends StatefulWidget {
 }
 
 class TasksPageState extends State<TasksPage> {
-  /// 0=列表 1=日 2=月 3=年
+  /// 0=列表 1=日 2=月 3=年 4=年度
   int _mode = 0;
 
-  static const _granularityForMode = {1: 3, 2: 2, 3: 1};
-  static const _modeForGranularity = {3: 1, 2: 2, 1: 3};
+  static const _granularityForMode = {1: 3, 2: 2, 3: 1, 4: 0};
+  static const _modeForGranularity = {3: 1, 2: 2, 1: 3, 0: 4};
 
   final _listKey = GlobalKey<TaskListViewState>();
   final _scheduleKey = GlobalKey<TaskScheduleViewState>();
@@ -46,7 +47,7 @@ class TasksPageState extends State<TasksPage> {
     });
   }
 
-  /// 甘特视图内部下钻/详情跳转需要换粒度时回调（年=1 月=2 日=3）。
+  /// 甘特视图内部下钻/详情跳转需要换粒度时回调（年度=0 年=1 月=2 日=3）。
   void _switchGranularity(int g) {
     final mode = _modeForGranularity[g];
     if (mode != null) _switchMode(mode);
@@ -65,8 +66,8 @@ class TasksPageState extends State<TasksPage> {
                 child: SizedBox(
                   width: 300,
                   child: SegmentedSelector<int>(
-                    values: const [0, 1, 2, 3],
-                    labels: const ['列表', '日', '月', '年'],
+                    values: const [0, 1, 2, 3, 4],
+                    labels: const ['列表', '日', '月', '年', '年度'],
                     selected: _mode,
                     onChanged: _switchMode,
                   ),

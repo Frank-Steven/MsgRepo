@@ -16,11 +16,11 @@ import 'views/year_view.dart';
 import 'views/yearly_view.dart';
 
 /// 任务页·甘特视图宿主（原日程页 SchedulePage，v3 阶段 4 改造；设计 §2，v2.3/v2.4 修订）：
-/// 年/月/日三级视图均无限滚动，年度视图组件保留在 views/ 可重新启用。
+/// 年度/年/月/日四级视图均无限滚动。
 ///
 /// v3 阶段 4 变更：
 /// - 粒度不再由本组件内的段选器控制，改由 [granularity] 构造参数下发
-///   （任务页顶部「列表/日/月/年」切换）；「现在」按钮移入 AppBar actions；
+///   （任务页顶部「列表/日/月/年/年度」切换）；「现在」按钮移入 AppBar actions；
 /// - 详情面板跳父/子任务需要跨粒度时经 [onSwitchGranularity] 回调请求
 ///   宿主（任务页）切换视图模式。
 ///
@@ -35,7 +35,7 @@ import 'views/yearly_view.dart';
 /// 尺度过滤表（§2）：年视图 = quarterly/monthly/weekly；
 /// 月视图 = weekly/daily；日视图 = timed；不定时不进甘特视图。
 class TaskScheduleView extends StatefulWidget {
-  /// 1=年 2=月 3=日（0=年度保留但任务页当前不下发）。
+  /// 0=年度 1=年 2=月 3=日（由任务页视图切换器下发）。
   final int granularity;
 
   /// 详情面板跳转需要切到别的粒度时回调（宿主负责换 mode 并重建本组件）。
@@ -459,11 +459,14 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
       for (final c in children) {
         await db.updateTask(c.copyWith(parentId: () => null));
       }
+      // 删除前快照锚点行 + 受影响正文原文，撤销时整体复原。
+      final snapshot = await db.snapshotTaskDeletion([task.id]);
       await db.deleteTasks([task.id]);
       UndoService.instance.register(
         label: '已删除',
         undo: () async {
           await db.insertTask(task);
+          await db.restoreTaskDeletionSnapshot(snapshot);
           for (final c in children) {
             await db.updateTask(c);
           }
@@ -536,12 +539,13 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
 
   /// 详情面板中点父/子任务：按目标任务的尺度切换到能展示它的粒度并定位，
   /// 选中并展示其详情。跨粒度时经 [TaskScheduleView.onSwitchGranularity]
-  /// 请宿主换 mode（v3 阶段 4；年度尺度任务落到年视图）。
+  /// 请宿主换 mode（v3 阶段 4；年度尺度任务落到年度视图）。
   void _jumpToTask(Task t) {
     final s = t.startAt;
     if (s == null) return; // 不定时任务在甘特无视图可跳
     final g = switch (deriveTaskScale(t.startAt, t.endAt, kind: t.kind)) {
-      'yearly' || 'quarterly' || 'monthly' => 1,
+      'yearly' => 0,
+      'quarterly' || 'monthly' => 1,
       'weekly' || 'daily' => 2,
       _ => 3,
     };

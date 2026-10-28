@@ -201,14 +201,19 @@ class ProposalExecutor {
 
       case ToolNames.taskDelete:
         final old = (await db.getTaskById(args['id'] as String))!;
-        final anchors = await db.anchorsForTask(old.id);
+        // 删除前快照完整状态：锚点行 + 受影响正文原文（撤销整体复原）。
+        final snapshot = await db.snapshotTaskDeletion([old.id]);
         await db.deleteTasks([old.id]);
         return (
           ProposalExecution(
               true,
               '已删除任务「${old.title}」'
-              '${anchors.isEmpty ? '' : '（${anchors.length} 个锚点已残迹化，撤销不恢复锚点）'}'),
-          {'op': 'task.restore', 'task': old.toRow()},
+              '${snapshot.anchors.isEmpty ? '' : '（${snapshot.anchors.length} 个锚点已残迹化，撤销将一并恢复）'}'),
+          {
+            'op': 'task.restore',
+            'task': old.toRow(),
+            'snapshot': snapshot.toJson(),
+          },
         );
 
       case ToolNames.noteCreate:
@@ -332,6 +337,13 @@ class ProposalExecutor {
       case 'task.restore':
         await db
             .insertTask(Task.fromRow((undo['task'] as Map).cast<String, Object?>()));
+        // v3 收尾：删除提案的快照含锚点行 + 受影响正文原文，撤销整体复原；
+        // 旧快照无 'snapshot' 键（只恢复任务行）。
+        final snapshot = undo['snapshot'];
+        if (snapshot is Map) {
+          await db.restoreTaskDeletionSnapshot(
+              TaskDeletionSnapshot.fromJson(snapshot.cast<String, dynamic>()));
+        }
       case 'note.delete':
         await db.deleteNote(undo['noteId'] as String);
       case 'note.content':

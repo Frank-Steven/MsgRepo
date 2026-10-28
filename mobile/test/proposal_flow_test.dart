@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/models/conversation.dart';
+import 'package:msgrepo_mobile/models/message.dart';
 import 'package:msgrepo_mobile/models/task.dart';
 import 'package:msgrepo_mobile/services/assistant/models.dart';
 import 'package:msgrepo_mobile/services/assistant/proposal_executor.dart';
@@ -9,7 +10,8 @@ import 'package:msgrepo_mobile/services/database.dart';
 import 'package:msgrepo_mobile/services/undo_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-import 'task_anchors_test.dart' show createBaseTables, insertMessage, insertTask;
+import 'task_anchors_test.dart'
+    show anchor, anchorId1, createBaseTables, insertMessage, insertTask;
 
 /// 提案全链路（design-v3 §5.4、details §2.3）：
 /// 工具块 → 校验 → 落 change_proposals → 审批 → 执行 → 回注对话 → 撤销；
@@ -173,6 +175,42 @@ void main() {
 
       expect(await executor.undoApplied('amsg-d_b0'), isTrue);
       expect((await appDb.getTaskById('t1'))?.title, '要删的');
+    });
+
+    test('task.delete 带锚点：撤销恢复任务行 + 锚点行 + 正文 marker/content_hash/edited_at',
+        () async {
+      const origBody = '记得买菜 ⟦task:$anchorId1⟧';
+      await insertMessage(db, 'm1', origBody);
+      await db.update('messages', {'edited_at': 12345},
+          where: 'id = ?', whereArgs: ['m1']);
+      await insertTask(db, 't1', title: '买菜');
+      await appDb.insertAnchor(anchor(anchorId1, 't1', 'm1', label: '买菜'));
+      final hashBefore = computeContentHash('com.test', '标题m1', origBody, 2000);
+
+      await service.handleToolBlock(
+        conversationId: convId,
+        batchId: 'amsg-da',
+        block: block(0, 'task.delete', {'id': 't1'}),
+      );
+      final exec = await executor.approve('amsg-da_b0');
+      expect(exec.ok, isTrue);
+      expect(exec.message, contains('撤销将一并恢复'));
+
+      // 删除后：任务行/锚点行删除，正文残迹化
+      expect(await appDb.getTaskById('t1'), isNull);
+      expect(await appDb.anchorsForTask('t1'), isEmpty);
+      expect((await appDb.getMessageById('m1'))!.body, '记得买菜 [任务:买菜]');
+
+      // 撤销（_undo 快照经 change_proposals 落库 JSON 往返后仍完整）
+      expect(await executor.undoApplied('amsg-da_b0'), isTrue);
+      expect((await appDb.getTaskById('t1'))?.title, '买菜');
+      expect((await appDb.anchorsForTask('t1')).single.id, anchorId1);
+      final restored =
+          (await db.query('messages', where: 'id = ?', whereArgs: ['m1']))
+              .single;
+      expect(restored['body'], origBody, reason: 'marker 精确复原');
+      expect(restored['content_hash'], hashBefore);
+      expect(restored['edited_at'], 12345);
     });
 
     test('note.append 与 note.replace_section', () async {

@@ -355,7 +355,8 @@ class MessagesPageState extends State<MessagesPage> {
   /// 与删除合并为同一个复合撤销（设计 §7）。
   /// 取消选中消息各自关联的**全部**任务（v8：一条消息可被多个锚点连接）。
   /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），与删除合并为同一复合撤销。
-  /// deleteTasks 会先残迹化锚点（正文 marker 变 [任务:标题] 纯文本）。
+  /// deleteTasks 会先残迹化锚点（正文 marker 变 [任务:标题] 纯文本）；
+  /// 删除前快照锚点行 + 受影响正文原文，撤销时整体复原（marker 精确回写）。
   Future<void> _deleteLinkedTasks(List<Message> targets) async {
     // (消息, 该消息锚点连接的任务列表)
     final pairs = <(Message, List<Task>)>[];
@@ -383,19 +384,18 @@ class MessagesPageState extends State<MessagesPage> {
       for (final (_, tasks) in pairs)
         for (final t in tasks) t.id,
     ];
+    // 删除前完整快照：锚点行 + 受影响正文原文（撤销整体复原）。
+    final snapshot = await _db.snapshotTaskDeletion(allIds);
     if (allIds.isNotEmpty) await _db.deleteTasks(allIds);
     UndoService.instance.register(
       label: '已取消任务',
       undo: () async {
-        for (final (m, tasks) in pairs) {
+        for (final (_, tasks) in pairs) {
           for (final t in tasks) {
             await _db.insertTask(t);
-            await AnchorService.instance.insertAnchor(
-                taskId: t.id,
-                targetType: AnchorTargetType.message,
-                targetId: m.id);
           }
         }
+        await _db.restoreTaskDeletionSnapshot(snapshot);
         for (final children in childrenOf.values) {
           for (final c in children) {
             await _db.updateTask(c);

@@ -265,6 +265,73 @@ Future<int> insertMessagesIfNewInto(
   return inserted;
 }
 
+/// 删除任务撤销快照中的一条受影响正文（[AppDatabase.snapshotTaskDeletion]）。
+///
+/// message → body 原文 + edited_at 原值；note → content 原文 + updated_at 原值
+///（统一放在 [editedAt] 字段）。撤销时整段原文回写，marker 精确复原，
+/// 消息的 content_hash 由原文重算（同一输入天然复原），留痕字段写回原值。
+class TaskDeletionBodySnapshot {
+  final String targetType; // AnchorTargetType.message | note
+  final String targetId;
+
+  /// 删除前的正文原文（含 ⟦task:id⟧ marker，未残迹化）。
+  final String content;
+
+  /// 删除前的留痕字段原值：message.edited_at / note.updated_at。
+  final int? editedAt;
+
+  const TaskDeletionBodySnapshot({
+    required this.targetType,
+    required this.targetId,
+    required this.content,
+    required this.editedAt,
+  });
+
+  factory TaskDeletionBodySnapshot.fromJson(Map<String, dynamic> json) =>
+      TaskDeletionBodySnapshot(
+        targetType: json['targetType'] as String,
+        targetId: json['targetId'] as String,
+        content: json['content'] as String,
+        editedAt: (json['editedAt'] as num?)?.toInt(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'targetType': targetType,
+        'targetId': targetId,
+        'content': content,
+        'editedAt': editedAt,
+      };
+}
+
+/// 删除任务的撤销快照（details §1.5 撤销补全）：任务行由调用方持有，
+/// 本快照覆盖 [AppDatabase.deleteTasks] 事务内被改写的其余状态 ——
+/// 该任务的全部 task_anchors 行 + 所有受影响正文（notes.content /
+/// messages.body）的原文与留痕原值。file 锚点不入正文，只记行。
+class TaskDeletionSnapshot {
+  final List<TaskAnchor> anchors;
+  final List<TaskDeletionBodySnapshot> bodies;
+
+  const TaskDeletionSnapshot({required this.anchors, required this.bodies});
+
+  factory TaskDeletionSnapshot.fromJson(Map<String, dynamic> json) =>
+      TaskDeletionSnapshot(
+        anchors: [
+          for (final a in (json['anchors'] as List?) ?? const [])
+            TaskAnchor.fromJson((a as Map).cast<String, dynamic>()),
+        ],
+        bodies: [
+          for (final b in (json['bodies'] as List?) ?? const [])
+            TaskDeletionBodySnapshot.fromJson(
+                (b as Map).cast<String, dynamic>()),
+        ],
+      );
+
+  Map<String, dynamic> toJson() => {
+        'anchors': [for (final a in anchors) a.toJson()],
+        'bodies': [for (final b in bodies) b.toJson()],
+      };
+}
+
 class AppDatabase {
   AppDatabase._();
 
@@ -1124,6 +1191,9 @@ class AppDatabase {
 
   /// 删除任务：先把该任务所有锚点残迹化（正文 marker 替换为 label 纯文本，
   /// 删除锚点行，details §1.5），再删任务行，同一事务。
+  ///
+  /// 需要可撤销的调用方：删除前先 [snapshotTaskDeletion]，撤销时
+  /// [restoreTaskDeletionSnapshot] + 回插任务行。
   Future<void> deleteTasks(List<String> ids) async {
     if (ids.isEmpty) return;
     final db = await database;
@@ -1135,6 +1205,102 @@ class AppDatabase {
       await txn.delete('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
     });
     _rescheduleReminders();
+  }
+
+  /// 删除任务前的完整快照（撤销用，details §1.5）：[taskIds] 全部任务的
+  /// 锚点行 + 受影响正文（message/note，按目标去重）的原文与留痕原值。
+  /// 同一正文含多个被删任务的锚点时只记一份原文，整段回写天然正确。
+  Future<TaskDeletionSnapshot> snapshotTaskDeletion(
+      List<String> taskIds) async {
+    final db = await database;
+    final anchors = <TaskAnchor>[];
+    final seenTasks = <String>{};
+    for (final id in taskIds) {
+      if (!seenTasks.add(id)) continue;
+      final rows = await db.query('task_anchors',
+          where: 'task_id = ?', whereArgs: [id], orderBy: 'created_at ASC');
+      anchors.addAll(rows.map(_anchorFromRow));
+    }
+    final bodies = <TaskDeletionBodySnapshot>[];
+    final seenTargets = <String>{};
+    for (final a in anchors) {
+      if (a.targetType == AnchorTargetType.file) continue; // 文件锚点不入正文
+      if (!seenTargets.add('${a.targetType}|${a.targetId}')) continue;
+      if (a.targetType == AnchorTargetType.message) {
+        final rows = await db.query('messages',
+            columns: ['body', 'edited_at'],
+            where: 'id = ?',
+            whereArgs: [a.targetId],
+            limit: 1);
+        if (rows.isEmpty) continue;
+        bodies.add(TaskDeletionBodySnapshot(
+          targetType: a.targetType,
+          targetId: a.targetId,
+          content: rows.first['body'] as String,
+          editedAt: (rows.first['edited_at'] as num?)?.toInt(),
+        ));
+      } else if (a.targetType == AnchorTargetType.note) {
+        final rows = await db.query('notes',
+            columns: ['content', 'updated_at'],
+            where: 'id = ?',
+            whereArgs: [a.targetId],
+            limit: 1);
+        if (rows.isEmpty) continue;
+        bodies.add(TaskDeletionBodySnapshot(
+          targetType: a.targetType,
+          targetId: a.targetId,
+          content: rows.first['content'] as String,
+          editedAt: (rows.first['updated_at'] as num?)?.toInt(),
+        ));
+      }
+    }
+    return TaskDeletionSnapshot(anchors: anchors, bodies: bodies);
+  }
+
+  /// 撤销删除：正文原文整段回写（marker 精确复原；message 的 content_hash
+  /// 由原文重算一并复原；edited_at / updated_at 写回删除前原值），
+  /// 锚点行原样回插。任务行本身由调用方回插。目标已删除时跳过其正文。
+  Future<void> restoreTaskDeletionSnapshot(TaskDeletionSnapshot snap) async {
+    if (snap.anchors.isEmpty && snap.bodies.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final b in snap.bodies) {
+        if (b.targetType == AnchorTargetType.message) {
+          final rows = await txn.query('messages',
+              columns: ['package_name', 'title', 'posted_at'],
+              where: 'id = ?',
+              whereArgs: [b.targetId],
+              limit: 1);
+          if (rows.isEmpty) continue;
+          final r = rows.first;
+          await txn.update(
+            'messages',
+            {
+              'body': b.content,
+              'edited_at': b.editedAt,
+              'content_hash': computeContentHash(
+                  r['package_name'] as String,
+                  r['title'] as String,
+                  b.content,
+                  (r['posted_at'] as num).toInt()),
+            },
+            where: 'id = ?',
+            whereArgs: [b.targetId],
+          );
+        } else if (b.targetType == AnchorTargetType.note) {
+          await txn.update(
+            'notes',
+            {'content': b.content, 'updated_at': b.editedAt},
+            where: 'id = ?',
+            whereArgs: [b.targetId],
+          );
+        }
+      }
+      for (final a in snap.anchors) {
+        await txn.insert('task_anchors', _anchorToRow(a),
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
   }
 
   Timer? _rescheduleTimer;
