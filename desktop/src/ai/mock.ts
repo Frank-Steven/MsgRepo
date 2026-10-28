@@ -1,46 +1,27 @@
-import type { AIProvider, EvaluateOptions } from "./provider.js";
-import type { CategoryRegistry, EvalPriority, EvalResult, ProcessInputMessage } from "../types.js";
+import type { AIProvider, ChatOptions, ProviderChatMessage } from "./provider.js";
 
 /**
- * 规则引擎 provider（P3-12 精简版）：不依赖任何模型也能端到端跑通 /v1/process。
- *
- * v1 的 process()（StructuredItem + 关键词分类 + 正则抽取 + 归并）随 v1 管线一并删除，
- * 这里只保留 v2 的逐条/批量评估，用少量关键词给出确定性结果，供无模型环境联调。
+ * mock provider（design-v3 §6.2）：内置假模型，不依赖任何真实模型服务，
+ * 供无模型环境端到端跑通 /v1/chat 全链路（SSE 流式事件、手机端联调、单元测试）。
+ * 回复为固定模板 + 对末条用户消息的简短回显，按小段多次回调 onToken 模拟逐 token 流式。
  */
 export class MockProvider implements AIProvider {
   readonly name = "mock";
 
-  readonly model = "mock-rules";
+  readonly model = "mock-chat";
 
-  private judge(message: ProcessInputMessage): EvalResult {
-    const text = `${message.title} ${message.body}`;
-    const junk = /(退订|秒杀|限时|领取|红包|刷单|兼职|0元购)/.test(text);
-    const actionable = /(开会|评审|截止|提醒|提交|报名|缴费|还款)/.test(text);
-    const priority: EvalPriority = junk ? "junk" : actionable ? "red" : "green";
-    return {
-      priority,
-      reason: junk
-        ? "命中营销关键词（mock 规则）"
-        : actionable
-          ? "含可执行事项（mock 规则）"
-          : "无明确事项（mock 规则）",
-      taskDraft: null,
-    };
-  }
-
-  async evaluateStreaming(
-    message: ProcessInputMessage,
-    _registry: CategoryRegistry,
-    _options: EvaluateOptions,
-  ): Promise<EvalResult> {
-    return this.judge(message);
-  }
-
-  async evaluateBatchStreaming(
-    messages: ProcessInputMessage[],
-    _registry: CategoryRegistry,
-    _options: EvaluateOptions,
-  ): Promise<Map<string, EvalResult>> {
-    return new Map(messages.map((m) => [m.id, this.judge(m)]));
+  async chat(messages: ProviderChatMessage[], options?: ChatOptions): Promise<string> {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const echo = lastUser ? lastUser.content.replace(/\s+/g, " ").slice(0, 40) : "";
+    const reply = `【mock 回复】已收到你的消息${echo ? `（"${echo}"）` : ""}。` +
+      `我是内置假模型，用于在没有真实模型服务时验证链路。`;
+    let full = "";
+    // 每 4 字一段回调，保证客户端能观察到多个 token_delta 事件
+    for (let i = 0; i < reply.length; i += 4) {
+      const delta = reply.slice(i, i + 4);
+      full += delta;
+      options?.onToken?.(delta);
+    }
+    return full;
   }
 }

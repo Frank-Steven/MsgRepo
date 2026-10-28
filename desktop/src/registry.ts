@@ -1,8 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ajv2020 } from "ajv/dist/2020.js";
-import type { CategoryRegistry } from "./types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // src/ 与编译产物 dist/ 的上一级都是 desktop/
@@ -21,27 +19,4 @@ export const SHARED_DIR = resolveSharedDir();
 
 export function readSharedJson(rel: string): unknown {
   return JSON.parse(readFileSync(path.join(SHARED_DIR, rel), "utf8"));
-}
-
-export function loadDefaultRegistry(): CategoryRegistry {
-  return readSharedJson("registry/default.json") as CategoryRegistry;
-}
-
-/** 加载当前生效注册表：优先 data/registry.json（协商落盘），否则 shared 默认。 */
-export function loadRegistry(dataDir: string): CategoryRegistry {
-  const negotiated = path.join(dataDir, "registry.json");
-  if (existsSync(negotiated)) {
-    try {
-      return JSON.parse(readFileSync(negotiated, "utf8")) as CategoryRegistry;
-    } catch {
-      // 损坏则回退默认
-    }
-  }
-  return loadDefaultRegistry();
-}
-
-export function validateRegistry(registry: unknown): registry is CategoryRegistry {
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  const schema = readSharedJson("schemas/category-registry.schema.json") as object;
-  return ajv.validate(schema, registry);
 }

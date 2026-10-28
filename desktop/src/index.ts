@@ -3,10 +3,8 @@ import { DESKTOP_ROOT } from "./registry.js";
 import { loadOrCreatePairing, PairingManager } from "./auth.js";
 import { createServer } from "./server.js";
 import { loadConfig } from "./config.js";
-import { createProvider } from "./ai/factory.js";
+import { ModelManager } from "./models.js";
 
-// P3-12：v1 的 demo 命令（runPipeline + MockProvider + StructuredItem）随 v1 管线一并移除；
-// 现在只剩 start（起服务）与 pair（查看配对 token）。
 const DATA_DIR = path.join(DESKTOP_ROOT, "data");
 
 async function main(): Promise<void> {
@@ -25,18 +23,19 @@ async function main(): Promise<void> {
   }
 
   const cfg = loadConfig();
-  const provider = createProvider(cfg);
+  const models = new ModelManager(() => loadConfig());
   const pairing = new PairingManager(DATA_DIR);
   const server = createServer({
     host: cfg.host,
     port: cfg.port,
     pairing,
-    provider,
-    dataDir: DATA_DIR,
+    models,
   });
   server.listen(cfg.port, cfg.host, () => {
-    console.log(`MsgRepo desktop 已启动: http://${cfg.host}:${cfg.port}`);
-    console.log(`AI provider: ${provider.name}${provider.model ? ` (${provider.model})` : ""}`);
+    console.log(`AndroidLocAI desktop 已启动: http://${cfg.host}:${cfg.port}`);
+    console.log(
+      `模型：${models.models.map((m) => `${m.id}(${m.provider})`).join(", ")}；默认 ${models.defaultModelId}`,
+    );
     if (pairing.created) {
       console.log(`\n首次启动，已生成配对 token: ${pairing.token}`);
       console.log(`手机端请使用请求头: Authorization: Bearer ${pairing.token}\n`);

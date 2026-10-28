@@ -7,7 +7,8 @@ import { after, before, test } from "node:test";
 
 import { PairingManager } from "./auth.js";
 import { createServer } from "./server.js";
-import type { AIProvider } from "./ai/provider.js";
+import { ModelManager } from "./models.js";
+import type { Config } from "./config.js";
 
 // P2-2 回归：/v1/pair 首次配对免认证，但 reset 必须带当前 token。
 const dataDir = mkdtempSync(path.join(os.tmpdir(), "msgrepo-pair-"));
@@ -15,20 +16,21 @@ let server: ReturnType<typeof createServer>;
 let base = "";
 const pairing = new PairingManager(dataDir);
 
-const stubProvider = {
-  name: "stub",
-  async evaluateStreaming() {
-    return { priority: "green", reason: "stub", taskDraft: null };
-  },
-} as unknown as AIProvider;
+const testConfig: Config = {
+  host: "127.0.0.1",
+  port: 0,
+  models: [
+    { id: "mock-1", name: "Mock", provider: "mock", baseUrl: "http://127.0.0.1:9", model: "mock-chat" },
+  ],
+  defaultModelId: "mock-1",
+};
 
 before(async () => {
   server = createServer({
     host: "127.0.0.1",
     port: 0,
     pairing,
-    provider: stubProvider,
-    dataDir,
+    models: new ModelManager(() => testConfig),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address() as AddressInfo;

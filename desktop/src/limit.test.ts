@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { GateBusyError, SerialGate } from "./limit.js";
+import { GateBusyError, GatePool, SerialGate } from "./limit.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -64,4 +64,45 @@ test("acquireSlot 重复调用释放函数只释放一次", async () => {
   release();
   release();
   assert.equal(gate.activeCount, 0);
+});
+
+test("GatePool：不同 key 并行，同一 key 串行", async () => {
+  const pool = new GatePool(1, 8);
+  let activeA = 0;
+  let peakA = 0;
+  let overlap = 0; // a 与 b 同时运行的采样计数
+  const taskA = async () => {
+    activeA++;
+    peakA = Math.max(peakA, activeA);
+    await sleep(20);
+    activeA--;
+  };
+  const taskB = async () => {
+    if (activeA > 0) overlap++;
+    await sleep(20);
+  };
+  await Promise.all([
+    pool.gateFor("a").run(taskA),
+    pool.gateFor("a").run(taskA),
+    pool.gateFor("b").run(taskB),
+  ]);
+  assert.equal(peakA, 1, "同一 key 必须串行");
+  assert.ok(overlap > 0, "不同 key 应并行");
+});
+
+test("GatePool：同一 key 的排队上限独立生效", async () => {
+  const pool = new GatePool(1, 1);
+  const slow = () => sleep(50);
+  const p1 = pool.gateFor("a").run(slow);
+  const p2 = pool.gateFor("a").run(slow);
+  await assert.rejects(() => pool.gateFor("a").run(slow), GateBusyError);
+  // key b 的闸不受 a 排队满影响
+  assert.equal(await pool.gateFor("b").run(async () => 7), 7);
+  await Promise.all([p1, p2]);
+});
+
+test("GatePool：同一 key 返回同一个闸实例", () => {
+  const pool = new GatePool();
+  assert.equal(pool.gateFor("x"), pool.gateFor("x"));
+  assert.notEqual(pool.gateFor("x"), pool.gateFor("y"));
 });

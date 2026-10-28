@@ -1,7 +1,10 @@
 /**
- * 极简串行闸（P2-4）：/v1/process 与 /v1/sync 都会调用本地推理，多设备或手动请求
+ * 极简串行闸（P2-4）：推理端点会调用本地/远程模型，多设备或手动请求
  * 并发会打满模型进程。这里把并发限制在 maxConcurrent，超出排队；队列满时立刻
  * 抛 GateBusyError，由 HTTP 层转成 429 —— 宁可让客户端稍后重试，也不无界排队。
+ *
+ * v3（design-v3 §6.3）：SerialGate 保持单闸语义；GatePool 按模型 id 分闸——
+ * 不同后端（模型配置）可并行，同一后端仍串行。
  */
 export class GateBusyError extends Error {
   readonly code = "GATE_BUSY";
@@ -70,5 +73,32 @@ export class SerialGate {
     } finally {
       release();
     }
+  }
+}
+
+/**
+ * 按 key（模型 id）分闸的闸池（v3）：每个 key 一个独立 SerialGate，
+ * 不同 key 并行、同 key 串行；排队上限由各自的 SerialGate 保证。
+ */
+export class GatePool {
+  private readonly gates = new Map<string, SerialGate>();
+
+  constructor(
+    private readonly maxConcurrent = 1,
+    private readonly maxQueue = 8,
+  ) {}
+
+  gateFor(key: string): SerialGate {
+    let gate = this.gates.get(key);
+    if (!gate) {
+      gate = new SerialGate(this.maxConcurrent, this.maxQueue);
+      this.gates.set(key, gate);
+    }
+    return gate;
+  }
+
+  /** 取得指定 key 的一个槽位，返回释放函数；由调用方在响应结束时调用。 */
+  acquireSlot(key: string): Promise<() => void> {
+    return this.gateFor(key).acquireSlot();
   }
 }
