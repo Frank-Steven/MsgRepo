@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../shared/segmented_selector.dart';
+import '../../services/app_ui_state.dart';
 import 'task_list_view.dart';
 import 'task_schedule_view.dart';
 
@@ -11,6 +11,8 @@ import 'task_schedule_view.dart';
 /// ui-structure §3/§6.2 收编后：整屏唯一 AppBar 由本页持有（标题「任务」），
 /// 两个内嵌视图不再带 AppBar；视图级操作上收 AppBar actions 并按当前视图
 /// 分显隐（甘特模式的「现在」定位）；列表视图的多选态降级为内容首行工具条。
+/// 视图切换器与库页一致收进 AppBar.bottom 的 TabBar；当前视图经
+/// [AppUiState.tasksViewMode] 持久化（首次默认「列表」），启动时恢复。
 ///
 /// - 列表 = 原待办页（[TaskListView]：尺度页签 + 多选 + 内嵌详情）；
 /// - 日/月/年/年度 = 原日程页对应粒度（[TaskScheduleView]，粒度由本页下发，
@@ -24,9 +26,12 @@ class TasksPage extends StatefulWidget {
   State<TasksPage> createState() => TasksPageState();
 }
 
-class TasksPageState extends State<TasksPage> {
+class TasksPageState extends State<TasksPage>
+    with SingleTickerProviderStateMixin {
   /// 0=列表 1=日 2=月 3=年 4=年度
   int _mode = 0;
+
+  late final TabController _tab;
 
   static const _granularityForMode = {1: 3, 2: 2, 3: 1, 4: 0};
   static const _modeForGranularity = {3: 1, 2: 2, 1: 3, 0: 4};
@@ -40,6 +45,27 @@ class TasksPageState extends State<TasksPage> {
   /// 列表视图处于多选态时隐藏 FAB（避免遮挡底部批量操作条）。
   bool _listSelecting = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _mode = AppUiState.instance.tasksViewMode;
+    _scheduleBuilt = _mode != 0;
+    _tab = TabController(length: 5, vsync: this, initialIndex: _mode);
+    _tab.addListener(_onTabChanged);
+  }
+
+  @override
+  void dispose() {
+    _tab.removeListener(_onTabChanged);
+    _tab.dispose();
+    super.dispose();
+  }
+
+  void _onTabChanged() {
+    if (_tab.indexIsChanging) return;
+    _switchMode(_tab.index);
+  }
+
   /// 壳层切页时刷新：列表始终刷新；甘特视图仅在已构建时刷新。
   Future<void> reload() async {
     await _listKey.currentState?.reload();
@@ -52,6 +78,8 @@ class TasksPageState extends State<TasksPage> {
       _mode = mode;
       if (mode != 0) _scheduleBuilt = true;
     });
+    if (_tab.index != mode) _tab.animateTo(mode);
+    AppUiState.instance.setTasksViewMode(mode);
   }
 
   /// 甘特视图内部下钻/详情跳转需要换粒度时回调（年度=0 年=1 月=2 日=3）。
@@ -80,6 +108,16 @@ class TasksPageState extends State<TasksPage> {
               child: const Text('现在'),
             ),
         ],
+        bottom: TabBar(
+          controller: _tab,
+          tabs: const [
+            Tab(text: '列表'),
+            Tab(text: '日'),
+            Tab(text: '月'),
+            Tab(text: '年'),
+            Tab(text: '年度'),
+          ],
+        ),
       ),
       floatingActionButton: _listSelecting
           ? null
@@ -88,43 +126,22 @@ class TasksPageState extends State<TasksPage> {
               onPressed: _createTask,
               child: const Icon(Icons.add),
             ),
-      body: Column(
+      body: IndexedStack(
+        index: _mode == 0 ? 0 : 1,
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: Center(
-              child: SizedBox(
-                width: 300,
-                child: SegmentedSelector<int>(
-                  values: const [0, 1, 2, 3, 4],
-                  labels: const ['列表', '日', '月', '年', '年度'],
-                  selected: _mode,
-                  onChanged: _switchMode,
-                ),
-              ),
-            ),
+          TaskListView(
+            key: _listKey,
+            onSelectionChanged: (selecting) =>
+                setState(() => _listSelecting = selecting),
           ),
-          const Divider(height: 1),
-          Expanded(
-            child: IndexedStack(
-              index: _mode == 0 ? 0 : 1,
-              children: [
-                TaskListView(
-                  key: _listKey,
-                  onSelectionChanged: (selecting) =>
-                      setState(() => _listSelecting = selecting),
-                ),
-                if (_scheduleBuilt)
-                  TaskScheduleView(
-                    key: _scheduleKey,
-                    granularity: _granularityForMode[_mode] ?? 3,
-                    onSwitchGranularity: _switchGranularity,
-                  )
-                else
-                  const SizedBox.shrink(),
-              ],
-            ),
-          ),
+          if (_scheduleBuilt)
+            TaskScheduleView(
+              key: _scheduleKey,
+              granularity: _granularityForMode[_mode] ?? 3,
+              onSwitchGranularity: _switchGranularity,
+            )
+          else
+            const SizedBox.shrink(),
         ],
       ),
     );

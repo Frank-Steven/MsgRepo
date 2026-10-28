@@ -3,14 +3,13 @@ import 'package:flutter/material.dart';
 import '../../models/conversation.dart';
 import '../../services/assistant/assistant_service.dart';
 import '../../services/database.dart';
-import '../settings_page.dart';
 import 'approvals_page.dart';
 import 'chat_page.dart';
 import 'model_picker.dart';
 
 /// 助理主 Tab（design-v3 §5.1）：对话列表（新建/改名/删除），
-/// AppBar 一级入口：待确认区、模型配置；设置入口也降级在这里
-/// （v3 阶段 6：设置从底部导航移出，取成本最低的 AppBar 图标方案）。
+/// AppBar 一级入口：待确认区、模型配置。设置已改回底部第 4 个 tab，
+/// 本页不再持有设置入口。
 class ConversationsPage extends StatefulWidget {
   const ConversationsPage({super.key});
 
@@ -118,13 +117,6 @@ class ConversationsPageState extends State<ConversationsPage> {
             icon: const Icon(Icons.model_training),
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const ModelPickerPage()),
-            ),
-          ),
-          IconButton(
-            tooltip: '设置',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SettingsPage()),
             ),
           ),
         ],

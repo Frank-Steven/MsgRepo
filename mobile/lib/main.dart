@@ -12,6 +12,7 @@ import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
 import 'ui/assistant/conversations_page.dart';
 import 'ui/library/library_page.dart';
+import 'ui/settings_page.dart';
 import 'ui/splash_gate.dart';
 import 'ui/tasks/tasks_page.dart';
 import 'ui/theme_fader.dart';
@@ -69,8 +70,10 @@ Future<void> main() async {
     final prefs = await SharedPreferences.getInstance();
     themeModeNotifier.value =
         themeModeFromString(prefs.getString('theme_mode'));
+    // 位置记忆：库页分区 / 任务页视图启动时恢复（主 Tab 不记忆，每次回库）。
+    await AppUiState.instance.restore();
   } catch (e) {
-    debugPrint('主题设置读取失败: $e');
+    debugPrint('主题/位置记忆读取失败: $e');
   }
 
   // F15：重活（提醒初始化/重排、采集轮询）不再阻塞 runApp —— 交给 SplashGate 在
@@ -235,6 +238,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final _tasksKey = GlobalKey<TasksPageState>();
   final _assistantKey = GlobalKey<ConversationsPageState>();
 
+  // 设置页 State 为私有，无法 GlobalKey 调 reload；每次切入换 key 重建，
+  // 让 initState 的 _load 重跑（权限/过滤配置等保持新鲜）。
+  Key _settingsKey = UniqueKey();
+
   // O10：页面懒构建。原来所有页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
   // 任何主题切换都要把这些树重新 build 一遍（真机实测单帧 build 达 924ms）。
   // 现在只构建「用户访问过」的页面，没访问过的放占位，切过去时再创建（GlobalKey 保状态）。
@@ -243,9 +250,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Widget _pageAt(int i) {
     if (!_builtTabs.contains(i)) return const SizedBox.shrink();
     return switch (i) {
-      0 => LibraryPage(key: _libraryKey),
-      1 => TasksPage(key: _tasksKey),
-      _ => ConversationsPage(key: _assistantKey),
+      AppUiState.libraryTabIndex => LibraryPage(key: _libraryKey),
+      AppUiState.tasksTabIndex => TasksPage(key: _tasksKey),
+      AppUiState.assistantTabIndex => ConversationsPage(key: _assistantKey),
+      _ => SettingsPage(key: _settingsKey),
     };
   }
 
@@ -282,6 +290,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _tasksKey.currentState?.reload();
       case AppUiState.assistantTabIndex:
         _assistantKey.currentState?.reload();
+      case AppUiState.settingsTabIndex:
+        // 换 key 强制重建，等效于 reload（在本次 setState 的下一帧生效）。
+        _settingsKey = UniqueKey();
     }
   }
 
@@ -312,6 +323,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             icon: Icon(Icons.check_circle_outline), label: '任务'),
         const NavigationDestination(
             icon: Icon(Icons.smart_toy_outlined), label: '助理'),
+        const NavigationDestination(
+            icon: Icon(Icons.settings_outlined), label: '设置'),
       ],
     );
   }

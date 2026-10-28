@@ -5,7 +5,8 @@ import '../messages/messages_page.dart';
 import '../notes/notes_page.dart';
 import 'files_page.dart';
 
-/// v3 阶段 3「库」页容器（design-v3 §3.1）：顶部三分区切换「笔记 / 消息 / 文件」。
+/// v3 阶段 3「库」页容器（design-v3 §3.1）：顶部三分区切换「消息 / 笔记 / 文件」，
+/// 首次默认「消息」分区（带未处理数角标的采集入口）。
 ///
 /// ui-structure §3/§6.1 收编后：整屏唯一 AppBar 由本页持有（标题「库」，
 /// TabBar 收进 AppBar.bottom），三个分区页不再带 AppBar；分区级操作上收
@@ -125,22 +126,35 @@ class LibraryPageState extends State<LibraryPage>
         ],
         bottom: TabBar(
           controller: _tab,
-          tabs: const [
-            Tab(text: '笔记'),
-            Tab(text: '消息'),
-            Tab(text: '文件'),
+          tabs: [
+            // 消息分区是采集入口，带未处理数角标（与底部导航「库」同源）。
+            Tab(
+              child: AnimatedBuilder(
+                animation: MessageBadges.instance,
+                builder: (context, _) {
+                  final pending = MessageBadges.instance.pending;
+                  return Badge(
+                    isLabelVisible: pending > 0,
+                    label: Text(pending > 99 ? '99+' : '$pending'),
+                    child: const Text('消息'),
+                  );
+                },
+              ),
+            ),
+            const Tab(text: '笔记'),
+            const Tab(text: '文件'),
           ],
         ),
       ),
       body: TabBarView(
         controller: _tab,
         children: [
-          NotesPage(key: _notesKey),
           MessagesPage(
             key: _messagesKey,
             onSelectionChanged: (selecting) =>
                 setState(() => _messagesSelecting = selecting),
           ),
+          NotesPage(key: _notesKey),
           FilesPage(key: _filesKey),
         ],
       ),

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/services/database.dart';
-import 'package:msgrepo_mobile/ui/shared/segmented_selector.dart';
 import 'package:msgrepo_mobile/ui/tasks/task_list_view.dart';
 import 'package:msgrepo_mobile/ui/tasks/task_schedule_view.dart';
 import 'package:msgrepo_mobile/ui/tasks/tasks_page.dart';
@@ -16,6 +15,7 @@ import 'task_anchors_test.dart' show createBaseTables;
 /// 甘特视图懒构建（首次切到才创建）。
 /// ui-structure §6.2 收编回归：整屏唯一 AppBar（标题「任务」）由
 /// TasksPage 持有，「现在」按视图分显隐（仅甘特模式）。
+/// 导航结构调整：切换器改为与库页一致的 AppBar.bottom TabBar。
 ///
 /// 在 tester.runAsync 真异步区里跑：FakeAsync 区会让 sqflite_ffi 的
 /// DB 调用挂死（与 anchor_navigation_test 同一范式）。
@@ -33,10 +33,9 @@ void main() {
     await tester.pump();
   }
 
-  /// 任务页顶部切换器（5 档）；TaskListView 的尺度页签也是
-  /// SegmentedSelector<int>（10 档），按段数区分。
+  /// 任务页顶部切换器（AppBar.bottom 的 TabBar，5 档）。
   Finder tasksPageSwitcher() => find.byWidgetPredicate(
-      (w) => w is SegmentedSelector<int> && w.values.length == 5);
+      (w) => w is TabBar && w.tabs.length == 5);
 
   Finder switcherLabel(String label) =>
       find.descendant(of: tasksPageSwitcher(), matching: find.text(label));
