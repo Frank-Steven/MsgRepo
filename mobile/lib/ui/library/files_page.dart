@@ -85,6 +85,34 @@ class FilesPageState extends State<FilesPage> {
     }
   }
 
+  /// 库页 FAB「导入」入口（ui-structure §4：领域主创建统一 FAB）：
+  /// 原 AppBar 溢出菜单的两项导入降为小 sheet（L5）。
+  Future<void> importEntry() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: const Text('导入文件'),
+              onTap: () => Navigator.of(sheetContext).pop('files'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('导入图片/截图'),
+              onTap: () => Navigator.of(sheetContext).pop('image'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'files') await _importFiles();
+    if (action == 'image') await _importImage();
+  }
+
   // ---- 重命名 / 删除 ----
 
   Future<void> _rename(LibraryFile file) async {
@@ -245,60 +273,42 @@ class FilesPageState extends State<FilesPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // ui-structure §3：分区页不持有 AppBar（由库页容器统一持有）；
+    // 原 AppBar 里的导入进度指示降级为内容顶部进度条。
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('文件'),
-        actions: [
-          if (_importing)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Center(
-                  child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))),
-            )
-          else
-            PopupMenuButton<String>(
-              tooltip: '导入',
-              icon: const Icon(Icons.add),
-              onSelected: (action) => switch (action) {
-                'files' => _importFiles(),
-                _ => _importImage(),
-              },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'files', child: Text('导入文件')),
-                PopupMenuItem(value: 'image', child: Text('导入图片/截图')),
-              ],
-            ),
+      body: Column(
+        children: [
+          if (_importing) const LinearProgressIndicator(minHeight: 2),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _files.isEmpty
+                    ? Center(
+                        child: Text('暂无文件，点右下角 + 导入',
+                            style: TextStyle(color: cs.onSurfaceVariant)),
+                      )
+                    : RefreshIndicator(
+                        onRefresh: reload,
+                        child: ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          itemCount: _files.length,
+                          itemBuilder: (context, index) {
+                            final file = _files[index];
+                            return ListTile(
+                              leading: Icon(_iconFor(file)),
+                              title: Text(file.name, maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle: Text(
+                                  '${_formatSize(file.size)} · ${_formatTime(file.createdAt)}'),
+                              trailing: const Icon(Icons.more_vert),
+                              onTap: () => _showActions(file),
+                            );
+                          },
+                        ),
+                      ),
+          ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _files.isEmpty
-              ? Center(
-                  child: Text('暂无文件，点右上角 + 导入',
-                      style: TextStyle(color: cs.onSurfaceVariant)),
-                )
-              : RefreshIndicator(
-                  onRefresh: reload,
-                  child: ListView.builder(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: _files.length,
-                    itemBuilder: (context, index) {
-                      final file = _files[index];
-                      return ListTile(
-                        leading: Icon(_iconFor(file)),
-                        title: Text(file.name, maxLines: 1,
-                            overflow: TextOverflow.ellipsis),
-                        subtitle: Text(
-                            '${_formatSize(file.size)} · ${_formatTime(file.createdAt)}'),
-                        trailing: const Icon(Icons.more_vert),
-                        onTap: () => _showActions(file),
-                      );
-                    },
-                  ),
-                ),
     );
   }
 }

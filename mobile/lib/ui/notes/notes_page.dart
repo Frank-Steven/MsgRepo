@@ -78,6 +78,9 @@ class NotesPageState extends State<NotesPage> {
   /// 供外部（如底部导航切页）触发的公开刷新入口。
   Future<void> reload() => _reload();
 
+  /// 库页 FAB「新建笔记本」入口（ui-structure §4：领域主创建统一 FAB）。
+  Future<void> createNotebook() => _addNotebook();
+
   Future<void> _reload() async {
     final db = AppDatabase.instance;
     var notebooks = await db.getNotebooks();
@@ -199,15 +202,10 @@ class NotesPageState extends State<NotesPage> {
 
   @override
   Widget build(BuildContext context) {
+    // ui-structure §3：分区页不持有 AppBar（由库页容器统一持有）。
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('笔记'),
-        actions: [
-          IconButton(icon: const Icon(Icons.add), onPressed: _addNotebook),
-        ],
-      ),
       body: _notebooks.isEmpty
-          ? const Center(child: Text('暂无笔记本，点右上角 + 新建'))
+          ? const Center(child: Text('暂无笔记本，点右下角 + 新建'))
           : ReorderableListView.builder(
               itemCount: _notebooks.length,
               onReorderItem: _onReorder,

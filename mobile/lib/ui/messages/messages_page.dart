@@ -21,8 +21,13 @@ import '../../services/fold_markers.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
 /// + 多选批量操作。归档消息在独立页面（ArchivedMessagesPage）。
+/// ui-structure §3 收编：本页不持有 AppBar（由库页容器统一持有）；
+/// 多选态的「已选/全选/退出」从 AppBar 降级为内容首行工具条（§4 分区级操作）。
 class MessagesPage extends StatefulWidget {
-  const MessagesPage({super.key});
+  const MessagesPage({super.key, this.onSelectionChanged});
+
+  /// 多选态变化回调：库页容器用来在多选时隐藏 FAB（避免遮挡底部操作条）。
+  final ValueChanged<bool>? onSelectionChanged;
 
   @override
   State<MessagesPage> createState() => MessagesPageState();
@@ -128,6 +133,7 @@ class MessagesPageState extends State<MessagesPage> {
         _selected.removeWhere((id) => !_messages.any((m) => m.id == id));
         if (_selected.isEmpty) _selecting = false;
       });
+      widget.onSelectionChanged?.call(_selecting);
     } catch (e, st) {
       AppLog.instance.warn('messages.reload', e, st);
       if (mounted) setState(() => _loading = false);
@@ -312,6 +318,9 @@ class MessagesPageState extends State<MessagesPage> {
     await reload();
   }
 
+  /// 库页 FAB「手动添加」入口（ui-structure §4：领域主创建统一 FAB）。
+  Future<void> addManually() => _addManually();
+
   // ---- 单条/批量操作（成功后注册撤销，见设计 §6）----
 
   Future<void> _createTask(Message msg) async {
@@ -474,6 +483,7 @@ class MessagesPageState extends State<MessagesPage> {
       if (!_selected.remove(m.id)) _selected.add(m.id);
       if (_selected.isEmpty) _selecting = false;
     });
+    widget.onSelectionChanged?.call(_selecting);
   }
 
   void _exitSelection() {
@@ -481,6 +491,7 @@ class MessagesPageState extends State<MessagesPage> {
       _selecting = false;
       _selected.clear();
     });
+    widget.onSelectionChanged?.call(false);
   }
 
   Future<void> _runBatch(Future<void> Function(List<Message>) op) async {
@@ -554,18 +565,27 @@ class MessagesPageState extends State<MessagesPage> {
     await reload();
   }
 
+  /// 库页 AppBar「归档箱」入口（ui-structure §6.1：消息分区时显示）。
+  Future<void> openArchived() => _openArchived();
+
   // ---- UI ----
 
-  AppBar _buildAppBar() {
-    if (_selecting) {
-      return AppBar(
-        leading: IconButton(
-          tooltip: '退出',
-          icon: const Icon(Icons.close),
-          onPressed: _exitSelection,
-        ),
-        title: Text('已选 ${_selected.length} 项'),
-        actions: [
+  /// 多选态首行工具条（ui-structure §4 分区级操作；原多选 AppBar 降级而来）。
+  Widget _buildSelectionHeader() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      height: 48,
+      color: cs.surfaceContainerLow,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: '退出',
+            icon: const Icon(Icons.close),
+            onPressed: _exitSelection,
+          ),
+          Text('已选 ${_selected.length} 项'),
+          const Spacer(),
           TextButton(
             onPressed: () => setState(
                 () => _selected.addAll(_visible.map((m) => m.id))),
@@ -578,22 +598,7 @@ class MessagesPageState extends State<MessagesPage> {
             child: const Text('取消'),
           ),
         ],
-      );
-    }
-    return AppBar(
-      title: const Text('消息'),
-      actions: [
-        IconButton(
-          tooltip: '手动添加',
-          icon: const Icon(Icons.add),
-          onPressed: _addManually,
-        ),
-        IconButton(
-          tooltip: '已归档',
-          icon: const Icon(Icons.archive_outlined),
-          onPressed: _openArchived,
-        ),
-      ],
+      ),
     );
   }
 
@@ -763,6 +768,7 @@ class MessagesPageState extends State<MessagesPage> {
             _selecting = true;
             _selected.add(m.id);
           });
+          widget.onSelectionChanged?.call(true);
         }
       },
     );
@@ -890,12 +896,12 @@ class MessagesPageState extends State<MessagesPage> {
 
   @override
   Widget build(BuildContext context) {
+    // ui-structure §3：分区页不持有 AppBar（由库页容器统一持有）。
     return Scaffold(
-      appBar: _buildAppBar(),
       body: Column(
         children: [
           if (_listenerEnabled == false) _buildListenerBanner(context),
-          _buildFilterRow(context),
+          if (_selecting) _buildSelectionHeader() else _buildFilterRow(context),
           const Divider(height: 1),
           Expanded(
             child: RefreshIndicator(

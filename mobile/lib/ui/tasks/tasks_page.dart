@@ -53,9 +53,21 @@ class TasksPageState extends State<TasksPage> {
     if (mode != null) _switchMode(mode);
   }
 
+  /// FAB 新建任务（ui-structure §4：领域主创建统一 FAB，复用任务编辑器）。
+  /// 编辑器返回后列表与甘特（若已构建）都刷新。
+  Future<void> _createTask() async {
+    await _listKey.currentState?.createTask();
+    if (_scheduleBuilt) await _scheduleKey.currentState?.reload();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      floatingActionButton: FloatingActionButton(
+        tooltip: '新建任务',
+        onPressed: _createTask,
+        child: const Icon(Icons.add),
+      ),
       body: SafeArea(
         bottom: false,
         child: Column(

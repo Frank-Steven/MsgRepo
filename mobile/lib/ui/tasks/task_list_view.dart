@@ -424,6 +424,9 @@ class TaskListViewState extends State<TaskListView> {
     if (mounted) _showUndoSnack('已删除');
   }
 
+  /// 任务页 FAB「新建任务」入口（ui-structure §4：领域主创建统一 FAB）。
+  Future<void> createTask() => _createTask();
+
   Future<void> _createTask() async {
     final result = await showTaskEditor(context);
     final task = result?.task;
@@ -580,16 +583,8 @@ class TaskListViewState extends State<TaskListView> {
         ],
       );
     }
-    return AppBar(
-      title: const Text('待办'),
-      actions: [
-        IconButton(
-          tooltip: '新建任务',
-          onPressed: _createTask,
-          icon: const Icon(Icons.add),
-        ),
-      ],
-    );
+    // 主创建已统一为任务页 FAB（ui-structure §4），AppBar 不再放新建入口。
+    return AppBar(title: const Text('待办'));
   }
 
   /// 多选底部操作条（v2.6.1）：按所选任务状态交集决定可用项——
