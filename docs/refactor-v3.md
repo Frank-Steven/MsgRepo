@@ -103,7 +103,8 @@
 - `mobile/lib/services/assistant/tools/inbox_triage.dart`（新）：提案生成器（details §4）——junk 规则预过滤 → 10 条/批子调用（原批量评估提示词迁移至此）→ 映射为 `message.set_priority` / `task.create` 提案；上限 50。
 - 批处理管线残余删除：`ai_processing.dart`、`auto_process.dart`、`ai_panel.dart` 及配套测试（有价值用例迁入 `inbox_triage_test`）。
 - 存档功能重写：`archive_export_service.dart` 改为直读 v8 结构（`task_anchors` 直读、notes.attachments、files 表；移除 links 转换逻辑）；新增 `archive_import_service.dart`（details §5.3：格式校验 → 空库守卫 → 单事务入库全量保留原 id → marker 一致性警告列表）；设置页加「导入存档」。
-- README 重写；design-v2.md 标注 superseded 指向 design-v3；docs 全量刷新。
+- **App 改名 Manalist**：用户可见名称全部替换（AndroidManifest `android:label`、MaterialApp title、开屏/关于页文案）；`applicationId`/pubspec name 等标识符保持不变（改名即新安装已满足「全新安装」策略，动标识符只会带来 Kotlin 目录与测试的无效 churn）；desktop 端维持 AndroidLocAI 不变。
+- README 重写（含 Manalist 命名）；design-v2.md 标注 superseded 指向 design-v3；docs 全量刷新。
 - 测试：`inbox_triage_test`、`archive_roundtrip_test`。
 
 验证（端到端回归清单，真机）：采集 → 助理对话打锚点/建任务 → 待确认区审批 → 任务四视图 → 笔记 markdown/附件 → inbox.triage 批量审批 → 导出存档 → 全新安装导入完整还原 → 断线走远程 → 重连配对。
