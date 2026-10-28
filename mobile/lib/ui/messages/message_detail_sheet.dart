@@ -16,7 +16,7 @@ import '../../services/system_intent.dart';
 ///
 /// - 看图（缩略图点击放大）；
 /// - F07 编辑正文 / 增删附件（写 messages.body / attachments，并打 edited_at）；
-/// - F08 展示关联待办（message_task_links），点击跳到待办页；
+/// - F08 展示关联待办（v8 起走 task_anchors），点击跳到待办页；
 /// - F09 附件里的链接可「打开」「复制」；
 /// - F10 附件里的文件可「导出到下载」（MediaStore，不需要存储权限）；
 /// - F11 小程序附件如实说明暂不支持打开，并允许复制路径。

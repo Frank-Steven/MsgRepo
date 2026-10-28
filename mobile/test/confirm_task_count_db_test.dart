@@ -56,12 +56,19 @@ void main() {
     UndoService.instance.clear();
     svc.reset();
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
+    // v8：关联落点为 task_anchors；锚点重建路径要读/写消息正文与 content_hash
     await db.execute('''
       CREATE TABLE messages(
         id TEXT PRIMARY KEY,
+        package_name TEXT NOT NULL DEFAULT 'com.test',
+        title TEXT NOT NULL DEFAULT '标题',
+        body TEXT NOT NULL DEFAULT '正文',
+        posted_at INTEGER NOT NULL DEFAULT 1700000000000,
+        content_hash TEXT NOT NULL DEFAULT '',
         priority TEXT NOT NULL DEFAULT 'none',
         status TEXT NOT NULL DEFAULT 'pending',
-        linked_task_id TEXT
+        linked_task_id TEXT,
+        edited_at INTEGER
       )
     ''');
     await db.execute('''
@@ -81,7 +88,7 @@ void main() {
         updated_at INTEGER NOT NULL
       )
     ''');
-    await createMessageTaskLinksTable(db);
+    await createV8Tables(db);
     await db.insert('messages', {
       'id': 'm1',
       'priority': MessagePriority.none,
@@ -144,8 +151,13 @@ void main() {
     expect(confirmed, 1);
     expect(svc.lastConfirmCreatedTasks, 0, reason: '复用命中不能计入新建任务');
     expect((await db.query('tasks')).length, 1);
-    final links = await db.query('message_task_links');
-    expect(links.length, 1);
-    expect(links.single['task_id'], 't1');
+    final anchors = await db.query('task_anchors');
+    expect(anchors.length, 1, reason: 'v8：确认落锚点而不是 links 行');
+    expect(anchors.single['task_id'], 't1');
+    expect(anchors.single['target_id'], 'm1');
+    expect(anchors.single['target_type'], 'message');
+    // marker 追加到正文末尾
+    final body = (await db.query('messages')).single['body'] as String;
+    expect(body, '正文 ⟦task:${anchors.single['id']}⟧');
   });
 }

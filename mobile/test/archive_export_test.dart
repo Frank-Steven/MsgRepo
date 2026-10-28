@@ -10,9 +10,14 @@ import 'package:msgrepo_mobile/services/database.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-/// v2.9 过渡版本存档导出：zip 结构、manifest、links/linked_task_id → 锚点转换、
-/// front matter、附件打包。用 sqflite_common_ffi 内存库跑真 SQLite（与
-/// message_task_links_test 同款基建），zip 用 archive 包解开校验。
+/// v3 存档导出（基于 DB v8）：zip 结构、manifest、anchors.json 直读
+/// task_anchors（marker 已在消息正文里，原样随正文导出）、front matter
+/// （attachments 从 notes 列读取）、附件打包。用 sqflite_common_ffi 内存库
+/// 跑真 SQLite（与 task_anchors_test 同款基建），zip 用 archive 包解开校验。
+const anchorId1 = '11111111-1111-4111-8111-111111111111';
+const anchorId2 = '22222222-2222-4222-8222-222222222222';
+const anchorId3 = '33333333-3333-4333-8333-333333333333';
+
 void main() {
   sqfliteFfiInit();
 
@@ -21,12 +26,9 @@ void main() {
   late Directory attachDir;
   late Directory outDir;
 
-  const markerPattern =
-      r'⟦task:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})⟧';
-
   setUp(() async {
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
-    // 与 database.dart 的 v7 形态一致的最小建表
+    // 与 database.dart 的 v8 形态一致的最小建表
     await db.execute('''
       CREATE TABLE messages(
         id TEXT PRIMARY KEY,
@@ -66,13 +68,13 @@ void main() {
         parent_id TEXT
       )
     ''');
-    await createMessageTaskLinksTable(db);
+    await createV8Tables(db);
     await db.execute(
         'CREATE TABLE notebooks(id TEXT PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)');
     await db.execute(
         'CREATE TABLE chapters(id TEXT PRIMARY KEY, notebook_id TEXT NOT NULL, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)');
     await db.execute(
-        'CREATE TABLE notes(id TEXT PRIMARY KEY, chapter_id TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT \'\', content_format TEXT NOT NULL DEFAULT \'plain\', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+        "CREATE TABLE notes(id TEXT PRIMARY KEY, chapter_id TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', content_format TEXT NOT NULL DEFAULT 'plain', attachments TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
 
     tmp = Directory.systemTemp.createTempSync('archive_export_test');
     attachDir = Directory(p.join(tmp.path, 'attachments'))..createSync();
@@ -108,8 +110,7 @@ void main() {
   }
 
   Future<void> insertMessage(String id, String body,
-      {String? linkedTaskId,
-      List<Attachment> attachments = const [],
+      {List<Attachment> attachments = const [],
       int createdAt = 2000}) async {
     await db.insert('messages', {
       'id': id,
@@ -128,16 +129,23 @@ void main() {
       'content_hash': 'hash-$id',
       'status': 'pending',
       'priority': 'none',
-      'linked_task_id': linkedTaskId,
+      'linked_task_id': null,
       'edited_at': null,
       'created_at': createdAt,
     });
   }
 
-  Future<void> insertLink(String messageId, String taskId, int createdAt) =>
-      db.insert('message_task_links', {
-        'message_id': messageId,
+  Future<void> insertAnchor(String id, String taskId, String targetId,
+          {String targetType = 'message',
+          String? label,
+          int createdAt = 3000}) =>
+      db.insert('task_anchors', {
+        'id': id,
         'task_id': taskId,
+        'target_type': targetType,
+        'target_id': targetId,
+        'label': label,
+        'created_by': 'user',
         'created_at': createdAt,
       });
 
@@ -181,68 +189,44 @@ void main() {
         {'tasks': 0, 'messages': 0, 'notes': 0, 'files': 0, 'anchors': 0});
   });
 
-  test('links 与 linked_task_id 都转为锚点，marker 追加到正文末尾', () async {
+  test('锚点行直读导出：marker 已在正文里，原样随 messages.json 导出', () async {
     await insertTask('t1', title: '买菜');
     await insertTask('t2', title: '取快递', status: 'archived');
     await insertTask('t3', title: '无关任务');
-    await insertMessage('m1', '记得买菜', createdAt: 2001);
-    await insertMessage('m2', '也别忘了', linkedTaskId: 't1', createdAt: 2002);
+    // m1 有两个锚点（同一消息多任务），m2 一个；marker 已在正文末尾
+    await insertMessage('m1', '记得买菜 ⟦task:$anchorId1⟧ ⟦task:$anchorId2⟧',
+        createdAt: 2001);
+    await insertMessage('m2', '也别忘了 ⟦task:$anchorId3⟧', createdAt: 2002);
     await insertMessage('m3', '无关联', createdAt: 2003);
-    // m1 关联 t1、t2（多锚点），linked_task_id 双写 t1（应去重，不产生第二个锚点）
-    await insertLink('m1', 't1', 3001);
-    await insertLink('m1', 't2', 3002);
-    await db.update('messages', {'linked_task_id': 't1'},
-        where: 'id = ?', whereArgs: ['m1']);
+    await insertAnchor(anchorId1, 't1', 'm1', label: '买菜', createdAt: 3001);
+    await insertAnchor(anchorId2, 't2', 'm1', label: '取快递', createdAt: 3002);
+    await insertAnchor(anchorId3, 't1', 'm2', label: '买菜', createdAt: 3003);
 
     final files = await exportAndUnzip();
 
+    // anchors.json = task_anchors 全量原样（含 archived 任务的锚点）
     final anchors = jsonListOf(files, 'anchors.json');
-    expect(anchors.length, 3, reason: 'm1→t1、m1→t2、m2→t1 各一个锚点');
-    for (final a in anchors) {
-      expect(a['created_by'], 'user');
-      expect(a['target_type'], 'message');
-      expect(
-          a['id'],
-          matches(RegExp(
-              r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')));
-    }
-    // 同一任务 t1 有两个锚点（不同 anchorId），同一消息 m1 有两个锚点
-    final t1Anchors = anchors.where((a) => a['task_id'] == 't1').toList();
-    expect(t1Anchors.length, 2);
-    expect(t1Anchors[0]['id'] == t1Anchors[1]['id'], isFalse);
+    expect(anchors.length, 3);
     expect(
-        anchors.where((a) => a['target_id'] == 'm1').length, 2);
-    // label 取任务标题快照
-    final m1t1 = anchors.singleWhere(
-        (a) => a['task_id'] == 't1' && a['target_id'] == 'm1');
-    expect(m1t1['label'], '买菜');
-    expect(m1t1['created_at'], 3001);
+        anchors.map((a) => a['id']),
+        containsAll([anchorId1, anchorId2, anchorId3]));
+    final a1 = anchors.singleWhere((a) => a['id'] == anchorId1);
+    expect(a1['task_id'], 't1');
+    expect(a1['target_type'], 'message');
+    expect(a1['target_id'], 'm1');
+    expect(a1['label'], '买菜');
+    expect(a1['created_by'], 'user');
+    expect(a1['created_at'], 3001);
 
+    // 正文原样导出（marker 不再追加，已在正文里）
     final messages = jsonListOf(files, 'messages.json');
     final m1 = messages.singleWhere((m) => m['id'] == 'm1');
     final m2 = messages.singleWhere((m) => m['id'] == 'm2');
     final m3 = messages.singleWhere((m) => m['id'] == 'm3');
-
-    // marker 按关联创建时间升序追加在正文末尾
-    final m1Markers = RegExp(markerPattern)
-        .allMatches(m1['body'] as String)
-        .map((m) => m.group(1)!)
-        .toList();
-    expect(m1Markers.length, 2);
-    expect(m1['body'] as String, startsWith('记得买菜 '));
-    expect(m1['body'] as String, endsWith('⟧'));
-    final m1t1Anchor = anchors.singleWhere(
-        (a) => a['task_id'] == 't1' && a['target_id'] == 'm1');
-    final m1t2Anchor = anchors.singleWhere(
-        (a) => a['task_id'] == 't2' && a['target_id'] == 'm1');
-    expect(m1Markers, [m1t1Anchor['id'], m1t2Anchor['id']]);
-
-    expect(
-        (m2['body'] as String)
-            .endsWith('⟦task:${t1Anchors.singleWhere((a) => a['target_id'] == 'm2')['id']}⟧'),
-        isTrue);
+    expect(m1['body'], '记得买菜 ⟦task:$anchorId1⟧ ⟦task:$anchorId2⟧');
+    expect(m2['body'], '也别忘了 ⟦task:$anchorId3⟧');
     expect(m3['body'], '无关联');
-    // content_hash 原样导出（导入侧重算）
+    // content_hash 原样导出（导入侧按 §1.4 重算，不信任导出值）
     expect(m1['content_hash'], 'hash-m1');
     // attachments 解码为 JSON 数组
     expect(m1['attachments'], isA<List<dynamic>>());
@@ -250,8 +234,7 @@ void main() {
     // tasks 全量导出（含 archived 与 parent_id 字段）
     final tasks = jsonListOf(files, 'tasks.json');
     expect(tasks.length, 3);
-    expect(tasks.map((t) => t['id']),
-        containsAll(['t1', 't2', 't3']));
+    expect(tasks.map((t) => t['id']), containsAll(['t1', 't2', 't3']));
     expect(tasks.singleWhere((t) => t['id'] == 't2')['status'], 'archived');
     expect(tasks.first.containsKey('parent_id'), isTrue);
 
@@ -260,7 +243,18 @@ void main() {
         {'tasks': 3, 'messages': 3, 'notes': 0, 'files': 0, 'anchors': 3});
   });
 
-  test('笔记三级：notebooks.json + front matter 字段正确（plain 也导出为 .md）',
+  test('文件锚点（target_type=file）同样原样导出', () async {
+    await insertTask('t1', title: '报销');
+    await insertAnchor(anchorId1, 't1', 'file-9',
+        targetType: 'file', label: '报销');
+
+    final files = await exportAndUnzip();
+    final anchors = jsonListOf(files, 'anchors.json');
+    expect(anchors.single['target_type'], 'file');
+    expect(anchors.single['target_id'], 'file-9');
+  });
+
+  test('笔记三级：notebooks.json + front matter 字段正确（attachments 从列读取）',
       () async {
     await db.insert('notebooks',
         {'id': 'nb1', 'name': '学习', 'sort': 0, 'created_at': 4000});
@@ -277,6 +271,7 @@ void main() {
       'title': '公式: 速查 #1',
       'content': 'E = mc^2\n第二行',
       'content_format': 'plain',
+      'attachments': jsonEncode(['f1', 'f2']),
       'created_at': 4002,
       'updated_at': 4003,
     });
@@ -308,13 +303,14 @@ void main() {
     expect(md, contains('\ncontent_format: plain\n'));
     expect(md, contains('\ncreated_at: 4002\n'));
     expect(md, contains('\nupdated_at: 4003\n'));
-    expect(md, contains('\nattachments: []\n'));
+    expect(md, contains('\nattachments: [f1, f2]\n'), reason: '从 notes 列读取');
     expect(md, endsWith('---\nE = mc^2\n第二行'));
 
     final md2 = textOf(files, 'library/notes/n2.md');
     expect(md2, contains('\ncontent_format: markdown\n'));
     // 安全标题原样输出不加引号（贴近规格示例）
     expect(md2, contains('\ntitle: markdown 笔记\n'));
+    expect(md2, contains('\nattachments: []\n'), reason: '缺省空数组');
 
     final manifest = jsonOf(files, 'manifest.json');
     expect(manifest['counts']['notes'], 2);
@@ -377,19 +373,5 @@ void main() {
 
     final manifest = jsonOf(files, 'manifest.json');
     expect(manifest['counts']['files'], 1);
-  });
-
-  test('关联指向已删除的任务/消息时不产生锚点', () async {
-    await insertTask('t1');
-    await insertMessage('m1', '还在');
-    await insertLink('m1', 't1', 3001);
-    await insertLink('m1', 'ghost-task', 3002);
-    await insertLink('ghost-message', 't1', 3003);
-
-    final files = await exportAndUnzip();
-    final anchors = jsonListOf(files, 'anchors.json');
-    expect(anchors.length, 1);
-    expect(anchors.single['task_id'], 't1');
-    expect(anchors.single['target_id'], 'm1');
   });
 }

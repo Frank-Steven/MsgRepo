@@ -5,7 +5,6 @@ import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
-import 'package:uuid/uuid.dart';
 
 import '../models/message.dart';
 import 'attachment_store.dart';
@@ -34,13 +33,11 @@ class ArchiveExportResult {
   });
 }
 
-/// 过渡版本 v2.9 存档导出（design-v3 §7.1，格式定稿见 design-v3-details §5）。
+/// v3 存档导出（格式定稿见 design-v3-details §5，导出流程 §5.2）。
 ///
 /// 纯新增、只读：事务快照读全量表 → 组装 v3 格式 zip → 落盘到应用文档目录，
-/// 不写回任何数据。与 v2 的差异只在导出侧：
-/// `message_task_links` / `messages.linked_task_id` 在这里转换为锚点
-/// （anchors.json 行 + 追加到消息正文末尾的 ⟦task:<anchorId>⟧ marker），
-/// v3 导入时无需再兼容任何旧关联格式。
+/// 不写回任何数据。基于 DB v8：锚点直读 `task_anchors`（正文中的 marker 天然
+/// 随正文导出，无转换步骤）；notes 的 attachments 从列读取。
 class ArchiveExportService {
   ArchiveExportService._();
 
@@ -52,9 +49,6 @@ class ArchiveExportService {
 
   /// 未接入 package_info_plus（不为此新增依赖），与 pubspec version 保持一致。
   static const appVersion = '0.2.0+2';
-
-  /// 锚点 marker 语法（design-v3-details §1.1）：id 即 anchors.json 行 id。
-  static String anchorMarker(String anchorId) => '⟦task:$anchorId⟧';
 
   /// 导出全量数据为单个 zip，返回落盘路径与条数。
   ///
@@ -71,69 +65,28 @@ class ArchiveExportService {
       return (
         tasks: await txn.query('tasks'),
         messages: await txn.query('messages'),
-        links: await txn.query('message_task_links',
-            orderBy: 'created_at ASC, task_id ASC'),
+        anchors:
+            await txn.query('task_anchors', orderBy: 'created_at ASC, id ASC'),
         notebooks: await txn.query('notebooks'),
         chapters: await txn.query('chapters'),
         notes: await txn.query('notes'),
       );
     });
 
-    // 2. links + linked_task_id → 锚点（仅过渡版本有此步骤，§5.2-2）。
-    //    linked_task_id 与 links 表是双写关系（linkMessageTask 两边都写），
-    //    同一 (message_id, task_id) 只生成一个锚点，避免重复。
-    final taskTitles = {
-      for (final r in snapshot.tasks) r['id'] as String: r['title'] as String,
-    };
-    final messageIds = {for (final r in snapshot.messages) r['id'] as String};
-    final anchors = <Map<String, Object?>>[];
-    final markersByMessage = <String, List<String>>{};
-    final seenPairs = <String>{};
-
-    void addAnchor(String messageId, String taskId, int createdAt) {
-      if (!seenPairs.add('$messageId|$taskId')) return;
-      final label = taskTitles[taskId];
-      if (label == null || !messageIds.contains(messageId)) return;
-      final id = const Uuid().v4();
-      anchors.add({
-        'id': id,
-        'task_id': taskId,
-        'target_type': 'message',
-        'target_id': messageId,
-        'label': label,
-        'created_by': 'user',
-        'created_at': createdAt,
-      });
-      markersByMessage.putIfAbsent(messageId, () => []).add(anchorMarker(id));
-    }
-
-    for (final r in snapshot.links) {
-      addAnchor(r['message_id'] as String, r['task_id'] as String,
-          (r['created_at'] as num).toInt());
-    }
-    for (final r in snapshot.messages) {
-      final linked = r['linked_task_id'] as String?;
-      if (linked != null) {
-        addAnchor(r['id'] as String, linked,
-            (r['created_at'] as num).toInt());
-      }
-    }
-
-    // 3. messages.json：正文末尾追加 marker 原文；attachments 列解码为 JSON
-    //    数组导出（导入侧直接结构化读取，不必再解一层字符串）。
+    // 2. 锚点直读 task_anchors 写 anchors.json（§5.2-2）：marker 已在正文里，
+    //    随 messages.json 原样导出，无需转换。
+    // 3. messages.json：attachments 列解码为 JSON 数组导出（导入侧直接结构化
+    //    读取，不必再解一层字符串）。
     final messagesJson = [
       for (final r in snapshot.messages)
         {
           ...r,
-          'body': _appendMarkers(
-              r['body'] as String, markersByMessage[r['id'] as String]),
           'attachments':
               jsonDecode(r['attachments'] as String) as List<dynamic>,
         },
     ];
 
     // 4. 笔记三级：notebooks.json + 每篇 notes/<noteId>.md（front matter + 正文）。
-    //    过渡版本 notes 表没有 attachments 列，front matter 一律写空数组。
     final archive = Archive();
     const encoder = JsonEncoder.withIndent('  ');
 
@@ -185,7 +138,7 @@ class ArchiveExportService {
 
     addText('tasks.json', encoder.convert(snapshot.tasks));
     addText('messages.json', encoder.convert(messagesJson));
-    addText('anchors.json', encoder.convert(anchors));
+    addText('anchors.json', encoder.convert(snapshot.anchors));
 
     // 6. manifest（counts 实测填充，§5.2-4）。
     addText(
@@ -200,11 +153,11 @@ class ArchiveExportService {
             'messages': snapshot.messages.length,
             'notes': snapshot.notes.length,
             'files': filesJson.length,
-            'anchors': anchors.length,
+            'anchors': snapshot.anchors.length,
           },
         }));
 
-    // 7. 落盘（过渡版本无分享面板，先写应用文档目录并告知路径）。
+    // 7. 落盘（首版无分享面板，先写应用文档目录并告知路径）。
     final zipBytes = ZipEncoder().encode(archive);
     final dir = outputDir ?? await getApplicationDocumentsDirectory();
     final out = File(p.join(
@@ -217,21 +170,20 @@ class ArchiveExportService {
       messages: snapshot.messages.length,
       notes: snapshot.notes.length,
       files: filesJson.length,
-      anchors: anchors.length,
+      anchors: snapshot.anchors.length,
       skippedFiles: skippedFiles,
     );
   }
 
-  /// marker 逐个追加到正文末尾（空格分隔），保持与锚点生成顺序一致。
-  static String _appendMarkers(String body, List<String>? markers) {
-    if (markers == null || markers.isEmpty) return body;
-    if (body.isEmpty) return markers.join(' ');
-    return '$body ${markers.join(' ')}';
-  }
-
   /// 笔记 .md：YAML front matter（design-v3-details §5.1）+ 正文原文。
   /// content_format='plain' 的笔记同样导出为 .md，front matter 里保留 plain 标记。
+  /// attachments 从 notes 列（JSON 数组）读取，写为 YAML flow 列表。
   static String _noteMarkdown(Map<String, Object?> r) {
+    final attachments = r['attachments'] == null
+        ? const <String>[]
+        : (jsonDecode(r['attachments'] as String) as List)
+            .map((e) => e.toString())
+            .toList();
     final b = StringBuffer()
       ..writeln('---')
       ..writeln('id: ${_yamlScalar(r['id'] as String)}')
@@ -240,7 +192,8 @@ class ArchiveExportService {
       ..writeln('content_format: ${r['content_format'] as String}')
       ..writeln('created_at: ${(r['created_at'] as num).toInt()}')
       ..writeln('updated_at: ${(r['updated_at'] as num).toInt()}')
-      ..writeln('attachments: []')
+      ..writeln(
+          'attachments: [${attachments.map(_yamlScalar).join(', ')}]')
       ..writeln('---')
       ..write(r['content'] as String);
     return b.toString();

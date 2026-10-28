@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../../models/message.dart';
 import '../../models/task.dart';
 import '../../services/ai_processing.dart';
+import '../../services/anchor_service.dart';
+import '../../services/assistant/models.dart';
 import '../../services/database.dart';
 import '../../services/import_service.dart';
 import '../../services/notification_bridge.dart';
@@ -42,7 +44,7 @@ class MessagesPageState extends State<MessagesPage> {
   /// 兼作 v2.4「已完成」筛选与行划线样式数据源）。
   Map<String, Task> _tasksById = {};
 
-  /// messageId → 关联任务 id 列表（N1 多对多）
+  /// messageId → 锚点任务 id 列表（v8 任务锚点）
   Map<String, List<String>> _taskLinks = {};
   bool _loading = true;
 
@@ -164,7 +166,7 @@ class MessagesPageState extends State<MessagesPage> {
         _db.getMessages(packageName: _appFilter),
         _db.getDistinctMessageSources(),
         _db.countMessages(packageName: _appFilter),
-        _db.messageTaskLinks(),
+        _db.messageAnchorTaskIds(),
       ]);
       if (!mounted) return;
       // P3-8：超过默认上限时提示一次，不再静默截断
@@ -216,7 +218,7 @@ class MessagesPageState extends State<MessagesPage> {
     await _maybeAutoProcess();
   }
 
-  /// 某条消息关联的任务 id（N1）：优先关联表，回退旧列。
+  /// 某条消息锚点连接的任务 id（v8）：优先锚点表，回退历史只读旧列。
   List<String> _linkedTaskIds(Message m) {
     final ids = _taskLinks[m.id];
     if (ids != null && ids.isNotEmpty) return ids;
@@ -533,13 +535,21 @@ class MessagesPageState extends State<MessagesPage> {
       await _db.updateTask(result.parentExpanded!);
     }
     await _db.insertTask(task);
-    await _db.setMessageLinkedTask(msg.id, task.id);
+    // v8：消息 ↔ 任务关联落为锚点（marker 追加到正文末尾）
+    final anchorResult = await AnchorService.instance.insertAnchor(
+        taskId: task.id,
+        targetType: AnchorTargetType.message,
+        targetId: msg.id);
+    final anchorId = anchorResult.anchor?.id;
     final parentBefore = result.parentBefore;
     UndoService.instance.register(
       label: '已创建任务',
       undo: () async {
+        // 先摘锚点（清 marker），再删任务——避免 deleteTasks 残迹化留文本
+        if (anchorId != null) {
+          await AnchorService.instance.removeAnchor(anchorId);
+        }
         await _db.deleteTasks([task.id]);
-        await _db.setMessageLinkedTask(msg.id, null);
         if (parentBefore != null) await _db.updateTask(parentBefore);
       },
     );
@@ -551,10 +561,11 @@ class MessagesPageState extends State<MessagesPage> {
   /// 取消选中消息各自关联的任务（删除任务并清除链接）；撤销整体回滚。
   /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），
   /// 与删除合并为同一个复合撤销（设计 §7）。
-  /// 取消选中消息各自关联的**全部**任务（N1：一条消息可能关联多个任务）。
+  /// 取消选中消息各自关联的**全部**任务（v8：一条消息可被多个锚点连接）。
   /// 删父任务前先把其子任务升级为普通任务（parent_id 置空），与删除合并为同一复合撤销。
+  /// deleteTasks 会先残迹化锚点（正文 marker 变 [任务:标题] 纯文本）。
   Future<void> _deleteLinkedTasks(List<Message> targets) async {
-    // (消息, 该消息关联的任务列表)
+    // (消息, 该消息锚点连接的任务列表)
     final pairs = <(Message, List<Task>)>[];
     for (final m in targets) {
       final ids = _linkedTaskIds(m);
@@ -581,16 +592,16 @@ class MessagesPageState extends State<MessagesPage> {
         for (final t in tasks) t.id,
     ];
     if (allIds.isNotEmpty) await _db.deleteTasks(allIds);
-    for (final (m, _) in pairs) {
-      await _db.unlinkAllForMessage(m.id);
-    }
     UndoService.instance.register(
       label: '已取消任务',
       undo: () async {
         for (final (m, tasks) in pairs) {
           for (final t in tasks) {
             await _db.insertTask(t);
-            await _db.linkMessageTask(m.id, t.id);
+            await AnchorService.instance.insertAnchor(
+                taskId: t.id,
+                targetType: AnchorTargetType.message,
+                targetId: m.id);
           }
         }
         for (final children in childrenOf.values) {

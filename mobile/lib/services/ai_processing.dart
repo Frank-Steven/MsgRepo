@@ -6,8 +6,10 @@ import 'package:uuid/uuid.dart';
 import '../models/message.dart';
 import '../models/task.dart';
 import 'ai_client.dart';
+import 'anchor_service.dart';
 import 'app_log.dart';
 import 'app_ui_state.dart';
+import 'assistant/models.dart';
 import 'task_dedupe.dart';
 import 'database.dart';
 import 'reminder_service.dart';
@@ -591,8 +593,8 @@ class AiProcessingService extends ChangeNotifier {
     // 典型场景：群里把同一条通知发了两遍 → 两条消息各自产出同名同时间的草稿，
     // 以前会建出两条一模一样的任务（真机数据里已出现过）。
     final activeTasks = await db.getActiveTasks();
-    // 旧关联一次取全（原来是每条消息一次 SQL，上千条 = 上千次往返）
-    final oldLinks = await db.messageTaskLinks();
+    // 旧锚点一次取全（原来是每条消息一次 SQL，上千条 = 上千次往返）
+    final oldLinks = await db.messageAnchorTaskIds();
     final undoItems = <({
       String messageId,
       String oldPriority,
@@ -655,15 +657,16 @@ class AiProcessingService extends ChangeNotifier {
       label: '已确认 $count 条 AI 结果',
       undo: () async {
         for (final u in undoItems.reversed) {
+          // 先重建旧锚点（顺带清除新建任务的 marker），再删新建任务，
+          // 避免 deleteTasks 的残迹化在正文里留下 [任务:...] 文本。
+          await AnchorService.instance.replaceMessageAnchors(
+              u.messageId, u.oldTaskIds,
+              createdBy: AnchorCreatedBy.user);
           if (u.createdTaskIds.isNotEmpty) {
             await db.deleteTasks(u.createdTaskIds);
           }
           await db.updateMessagePriority([u.messageId], u.oldPriority);
           await db.updateMessageStatus([u.messageId], u.oldStatus);
-          await db.unlinkAllForMessage(u.messageId);
-          for (final id in u.oldTaskIds) {
-            await db.linkMessageTask(u.messageId, id);
-          }
         }
       },
     );

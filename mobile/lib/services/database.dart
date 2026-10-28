@@ -4,11 +4,16 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 
+import '../models/conversation.dart';
+import '../models/library_file.dart';
 import '../models/message.dart';
 import '../models/note.dart';
 import '../models/task.dart';
+import 'anchor_service.dart';
 import 'app_log.dart';
+import 'assistant/models.dart';
 import 'reminder_service.dart';
 
 /// 收件箱按应用筛选用的来源应用项。
@@ -29,7 +34,9 @@ int? _intOrNull(dynamic v) => v == null ? null : (v as num).toInt();
 
 /// 本地 SQLite 存储（设计 §1，DB v5）：messages / tasks / 笔记三级为主表；
 /// v1 的 raw_messages / structured_items 旧表保留不删（只删了读写代码）。
-/// 建「消息 ↔ 任务」多对多关联表（N1，DB v6）。抽成顶层函数便于单测。
+///
+/// v6 的 message_task_links 表在 v8 被 task_anchors 取代并 DROP；
+/// 以下两个函数仅保留给 v5→v6 升级链使用（全新安装不再建 links 表）。
 Future<void> createMessageTaskLinksTable(DatabaseExecutor db) async {
   await db.execute('''
     CREATE TABLE IF NOT EXISTS message_task_links(
@@ -57,23 +64,148 @@ Future<void> migrateLinksToV6(DatabaseExecutor db) async {
   ''', [now]);
 }
 
-/// 单条绑定写入（兼容旧调用点）：同时更新旧列与关联表，保证双向一致。
-Future<void> setSingleMessageTaskLink(
-    DatabaseExecutor db, String messageId, String? taskId) async {
-  await db.update('messages', {'linked_task_id': taskId},
-      where: 'id = ?', whereArgs: [messageId]);
-  await db.delete('message_task_links',
-      where: 'message_id = ?', whereArgs: [messageId]);
-  if (taskId != null) {
-    await db.insert(
-      'message_task_links',
-      {
-        'message_id': messageId,
-        'task_id': taskId,
-        'created_at': DateTime.now().millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.ignore,
+/// DB v8 建表（design-v3 §1.1/§1.3/§1.4）：task_anchors / files /
+/// conversations / chat_messages / change_proposals。onCreate 与 v8 迁移共用。
+Future<void> createV8Tables(DatabaseExecutor db) async {
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS task_anchors(
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      label TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  ''');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_anchors_task ON task_anchors(task_id)');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_anchors_target ON task_anchors(target_type, target_id)');
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS files(
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      mime_type TEXT,
+      size INTEGER,
+      local_path TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  ''');
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS conversations(
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      model_config_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  ''');
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS chat_messages(
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      attachments TEXT,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  ''');
+  await db.execute('''
+    CREATE TABLE IF NOT EXISTS change_proposals(
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      batch_id TEXT,
+      tool TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    )
+  ''');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_proposals_status ON change_proposals(status)');
+}
+
+/// v7 → v8 迁移（design-v3 §1.5）：message_task_links 全量行 +
+/// messages.linked_task_id 非空行 → task_anchors（按 (message_id, task_id)
+/// 去重，悬挂引用跳过），marker 以空格分隔追加到对应消息正文末尾；
+/// 完成后 DROP message_task_links；notes 加 attachments 列。
+///
+/// 锚点 id 为新的小写 uuid，created_by='user'，label 取任务标题快照。
+/// content_hash 不在此重算：迁移产生的尾部空格差异不应改变既有去重语义
+/// （details §1.4 的重算只约束编辑与锚点插入/移除路径）。
+Future<void> migrateToV8(DatabaseExecutor db) async {
+  await createV8Tables(db);
+
+  final taskTitles = {
+    for (final r in await db.query('tasks', columns: ['id', 'title']))
+      r['id'] as String: r['title'] as String,
+  };
+  final messageRows =
+      await db.query('messages', columns: ['id', 'body', 'created_at', 'linked_task_id']);
+  final bodies = {for (final r in messageRows) r['id'] as String: r['body'] as String};
+
+  // (messageId, taskId, createdAt)，按关联创建时间升序收集、去重、悬挂跳过
+  final pairs = <(String, String, int)>[];
+  final seen = <String>{};
+  void add(String messageId, String taskId, int createdAt) {
+    if (!seen.add('$messageId|$taskId')) return;
+    if (!taskTitles.containsKey(taskId)) return; // 任务已删：悬挂引用
+    if (!bodies.containsKey(messageId)) return; // 消息已删：悬挂引用
+    pairs.add((messageId, taskId, createdAt));
+  }
+
+  final linkRows =
+      await db.query('message_task_links', orderBy: 'created_at ASC');
+  for (final r in linkRows) {
+    add(r['message_id'] as String, r['task_id'] as String,
+        (r['created_at'] as num).toInt());
+  }
+  for (final r in messageRows) {
+    final linked = r['linked_task_id'] as String?;
+    if (linked != null) {
+      add(r['id'] as String, linked, (r['created_at'] as num).toInt());
+    }
+  }
+
+  const uuid = Uuid();
+  final markersByMessage = <String, List<String>>{};
+  for (final (messageId, taskId, createdAt) in pairs) {
+    final anchorId = uuid.v4();
+    await db.insert('task_anchors', {
+      'id': anchorId,
+      'task_id': taskId,
+      'target_type': AnchorTargetType.message,
+      'target_id': messageId,
+      'label': taskTitles[taskId],
+      'created_by': AnchorCreatedBy.user,
+      'created_at': createdAt,
+    });
+    markersByMessage
+        .putIfAbsent(messageId, () => [])
+        .add(anchorMarker(anchorId));
+  }
+  for (final entry in markersByMessage.entries) {
+    final body = bodies[entry.key]!;
+    final markers = entry.value.join(' ');
+    await db.update(
+      'messages',
+      {'body': body.isEmpty ? markers : '$body $markers'},
+      where: 'id = ?',
+      whereArgs: [entry.key],
     );
+  }
+
+  await db.execute('DROP TABLE message_task_links');
+  // 升级链上 notes 可能是新建的（已带 attachments 列），先查再加。
+  final noteCols = await db.rawQuery('PRAGMA table_info(notes)');
+  if (!noteCols.any((c) => c['name'] == 'attachments')) {
+    await db.execute(
+        "ALTER TABLE notes ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
   }
 }
 
@@ -157,7 +289,7 @@ class AppDatabase {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'msgrepo.db'),
-      version: 7,
+      version: 8,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -187,6 +319,10 @@ class AppDatabase {
     if (oldVersion < 7) {
       // v7（2026-10-21，F07）：记录用户手动编辑正文/附件的时间，NULL = 采集原文。
       await db.execute('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
+    }
+    if (oldVersion < 8) {
+      // v8（design-v3 §1.5）：任务锚点/文件/对话/提案；links → 锚点迁移。
+      await migrateToV8(db);
     }
   }
 
@@ -269,6 +405,7 @@ class AppDatabase {
       )
     ''');
     await _createV4Tables(db);
+    await createV8Tables(db);
   }
 
   /// v2 数据层建表（设计 §1.1 messages、§1.2 tasks、§1.3 笔记三级）。
@@ -298,7 +435,6 @@ class AppDatabase {
     await db.execute('CREATE INDEX idx_messages_status ON messages(status)');
     await db
         .execute('CREATE INDEX idx_messages_posted_at ON messages(posted_at)');
-    await createMessageTaskLinksTable(db);
     await db.execute('''
       CREATE TABLE tasks(
         id TEXT PRIMARY KEY,
@@ -342,6 +478,7 @@ class AppDatabase {
         title TEXT NOT NULL,
         content TEXT NOT NULL DEFAULT '',
         content_format TEXT NOT NULL DEFAULT 'plain',
+        attachments TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )
@@ -626,14 +763,26 @@ class AppDatabase {
   }
 
   /// 用户手动编辑消息正文（F07）：同时打上 edited_at，便于区分采集原文。
+  /// v8（details §1.4）：保存时重算并更新 content_hash（对剥离 marker 后的
+  /// 文本，strip 内建于 computeContentHash），保证与「同一通知再次送达」的
+  /// 判重语义一致。锚点插入/移除路径也走这里。
   Future<void> updateMessageBody(String id, String body) async {
     final db = await database;
-    await db.update(
-      'messages',
-      {'body': body, 'edited_at': DateTime.now().millisecondsSinceEpoch},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    final values = <String, Object?>{
+      'body': body,
+      'edited_at': DateTime.now().millisecondsSinceEpoch,
+    };
+    final rows = await db.query('messages',
+        columns: ['package_name', 'title', 'posted_at'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1);
+    if (rows.isNotEmpty) {
+      final r = rows.first;
+      values['content_hash'] = computeContentHash(r['package_name'] as String,
+          r['title'] as String, body, (r['posted_at'] as num).toInt());
+    }
+    await db.update('messages', values, where: 'id = ?', whereArgs: [id]);
   }
 
   /// 用户增删消息附件（F07）：整份 attachments JSON 覆盖写，同样打 edited_at。
@@ -651,112 +800,140 @@ class AppDatabase {
     );
   }
 
-  /// 某条消息关联的任务（F08）：走 links 表，未定时的排在后面。
+  /// 某条消息关联的任务（F08）：走 task_anchors（v8 起），未定时的排在后面。
   Future<List<Task>> tasksForMessage(String messageId) async {
     final db = await database;
     final rows = await db.rawQuery(
       'SELECT t.* FROM tasks t '
-      'INNER JOIN message_task_links l ON l.task_id = t.id '
-      'WHERE l.message_id = ? '
+      'INNER JOIN task_anchors a ON a.task_id = t.id '
+      "WHERE a.target_type = 'message' AND a.target_id = ? "
       'ORDER BY t.start_at IS NULL, t.start_at ASC',
       [messageId],
     );
     return rows.map(Task.fromRow).toList();
   }
 
-  Future<void> setMessageLinkedTask(String messageId, String? taskId) async {
+  // ---- v8：任务锚点（task_anchors，design-v3 §1.1） ----
+  // 锚点 marker 的正文写入统一走 AnchorService；这里只做表行 CRUD 与查询。
+
+  static TaskAnchor _anchorFromRow(Map<String, Object?> r) => TaskAnchor(
+        id: r['id'] as String,
+        taskId: r['task_id'] as String,
+        targetType: r['target_type'] as String,
+        targetId: r['target_id'] as String,
+        label: r['label'] as String?,
+        createdBy: r['created_by'] as String,
+        createdAt: (r['created_at'] as num).toInt(),
+      );
+
+  static Map<String, Object?> _anchorToRow(TaskAnchor a) => {
+        'id': a.id,
+        'task_id': a.taskId,
+        'target_type': a.targetType,
+        'target_id': a.targetId,
+        'label': a.label,
+        'created_by': a.createdBy,
+        'created_at': a.createdAt,
+      };
+
+  Future<void> insertAnchor(TaskAnchor anchor) async {
     final db = await database;
-    await setSingleMessageTaskLink(db, messageId, taskId);
+    await db.insert('task_anchors', _anchorToRow(anchor),
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
-  // ---- N1：消息 ↔ 任务 多对多 ----
-
-  /// 追加一条关联（一条消息可以关联多个任务）。旧列 linked_task_id 在为空时补上，
-  /// 让只读旧字段的展示代码仍然有值。
-  Future<void> linkMessageTask(String messageId, String taskId) async {
+  Future<TaskAnchor?> getAnchorById(String id) async {
     final db = await database;
-    await db.insert(
-      'message_task_links',
-      {
-        'message_id': messageId,
-        'task_id': taskId,
-        'created_at': DateTime.now().millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
-    await db.rawUpdate(
-        'UPDATE messages SET linked_task_id = ? WHERE id = ? AND linked_task_id IS NULL',
-        [taskId, messageId]);
+    final rows = await db.query('task_anchors',
+        where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : _anchorFromRow(rows.first);
   }
 
-  /// 解除一条关联；旧列自动改指向剩余的第一条（或清空）。
-  Future<void> unlinkMessageTask(String messageId, String taskId) async {
+  /// 某任务的全部锚点（任务详情「来源」列表用）。
+  Future<List<TaskAnchor>> anchorsForTask(String taskId) async {
     final db = await database;
-    await db.delete('message_task_links',
-        where: 'message_id = ? AND task_id = ?',
-        whereArgs: [messageId, taskId]);
-    final remaining = await taskIdsForMessage(messageId);
-    await db.update('messages',
-        {'linked_task_id': remaining.isEmpty ? null : remaining.first},
-        where: 'id = ?', whereArgs: [messageId]);
+    final rows = await db.query('task_anchors',
+        where: 'task_id = ?', whereArgs: [taskId], orderBy: 'created_at ASC');
+    return rows.map(_anchorFromRow).toList();
   }
 
-  /// 解除某条消息的全部关联（「取消任务」用）。
-  Future<void> unlinkAllForMessage(String messageId) async {
+  /// 某目标（消息/笔记/文件）的全部锚点（目标详情展示用）。
+  Future<List<TaskAnchor>> anchorsForTarget(
+      String targetType, String targetId) async {
     final db = await database;
-    await db.delete('message_task_links',
-        where: 'message_id = ?', whereArgs: [messageId]);
-    await db.update('messages', {'linked_task_id': null},
-        where: 'id = ?', whereArgs: [messageId]);
-  }
-
-  /// 删除任务时清理它的所有关联（避免悬挂引用）。
-  Future<void> unlinkAllForTask(String taskId) async {
-    final db = await database;
-    await db.delete('message_task_links',
-        where: 'task_id = ?', whereArgs: [taskId]);
-    await db.rawUpdate(
-        'UPDATE messages SET linked_task_id = NULL WHERE linked_task_id = ?', [taskId]);
-  }
-
-  /// 单条消息关联的任务 id（按关联创建时间升序）。
-  Future<List<String>> taskIdsForMessage(String messageId) async {
-    final db = await database;
-    final rows = await db.query('message_task_links',
-        columns: ['task_id'],
-        where: 'message_id = ?',
-        whereArgs: [messageId],
+    final rows = await db.query('task_anchors',
+        where: 'target_type = ? AND target_id = ?',
+        whereArgs: [targetType, targetId],
         orderBy: 'created_at ASC');
-    return [for (final r in rows) r['task_id'] as String];
+    return rows.map(_anchorFromRow).toList();
+  }
+
+  /// 按 id 批量取锚点（渲染预取缓存用，避免逐 marker 查库）。
+  Future<List<TaskAnchor>> anchorsByIds(List<String> ids) async {
+    if (ids.isEmpty) return const [];
+    final db = await database;
+    final result = <TaskAnchor>[];
+    for (var i = 0; i < ids.length; i += kMessageHashLookupChunk) {
+      final end = i + kMessageHashLookupChunk <= ids.length
+          ? i + kMessageHashLookupChunk
+          : ids.length;
+      final part = ids.sublist(i, end);
+      final rows = await db.query('task_anchors',
+          where: 'id IN (${List.filled(part.length, '?').join(',')})',
+          whereArgs: part);
+      result.addAll(rows.map(_anchorFromRow));
+    }
+    return result;
+  }
+
+  /// 全量锚点（存档导出用）。
+  Future<List<TaskAnchor>> allAnchors() async {
+    final db = await database;
+    final rows =
+        await db.query('task_anchors', orderBy: 'created_at ASC, id ASC');
+    return rows.map(_anchorFromRow).toList();
+  }
+
+  Future<void> deleteAnchor(String id) async {
+    final db = await database;
+    await db.delete('task_anchors', where: 'id = ?', whereArgs: [id]);
   }
 
   /// 全量映射 messageId → taskIds（消息列表一次取回，避免 N+1 查询）。
-  Future<Map<String, List<String>>> messageTaskLinks() async {
+  Future<Map<String, List<String>>> messageAnchorTaskIds() async {
     final db = await database;
-    final rows = await db.query('message_task_links',
-        columns: ['message_id', 'task_id'], orderBy: 'created_at ASC');
+    final rows = await db.query('task_anchors',
+        columns: ['target_id', 'task_id'],
+        where: "target_type = 'message'",
+        orderBy: 'created_at ASC');
     final map = <String, List<String>>{};
     for (final r in rows) {
-      map.putIfAbsent(r['message_id'] as String, () => []).add(r['task_id'] as String);
+      map
+          .putIfAbsent(r['target_id'] as String, () => [])
+          .add(r['task_id'] as String);
     }
     return map;
   }
 
   /// 全量映射 taskId → messageIds（任务详情展示「来源消息」用）。
-  Future<Map<String, List<String>>> taskMessageLinks() async {
+  Future<Map<String, List<String>>> taskAnchorMessageIds() async {
     final db = await database;
-    final rows = await db.query('message_task_links',
-        columns: ['task_id', 'message_id'], orderBy: 'created_at ASC');
+    final rows = await db.query('task_anchors',
+        columns: ['task_id', 'target_id'],
+        where: "target_type = 'message'",
+        orderBy: 'created_at ASC');
     final map = <String, List<String>>{};
     for (final r in rows) {
-      map.putIfAbsent(r['task_id'] as String, () => []).add(r['message_id'] as String);
+      map
+          .putIfAbsent(r['task_id'] as String, () => [])
+          .add(r['target_id'] as String);
     }
     return map;
   }
 
   /// 某个任务的来源消息（可能多条）。
   Future<List<Message>> messagesForTask(String taskId) async {
-    final ids = await taskMessageLinks();
+    final ids = await taskAnchorMessageIds();
     final list = ids[taskId] ?? const <String>[];
     if (list.isEmpty) return const [];
     return getMessagesByIds(list);
@@ -766,7 +943,13 @@ class AppDatabase {
     if (ids.isEmpty) return;
     final db = await database;
     final placeholders = List.filled(ids.length, '?').join(',');
-    await db.delete('messages', where: 'id IN ($placeholders)', whereArgs: ids);
+    await db.transaction((txn) async {
+      // 锚点行级联删除（应用层；sqflite 默认不开外键）。
+      await txn.delete('task_anchors',
+          where: "target_type = 'message' AND target_id IN ($placeholders)",
+          whereArgs: ids);
+      await txn.delete('messages', where: 'id IN ($placeholders)', whereArgs: ids);
+    });
   }
 
   /// 撤销删除用：整体回插（replace 覆盖同 id 残留）。
@@ -832,6 +1015,9 @@ class AppDatabase {
   /// 2026-10-20 性能修复：原确认流对每条消息做 6~8 次独立 SQL（预取旧关联、
   /// 逐条建任务、改优先级/状态、解绑、逐条建关联），上千条时是上万次串行 await，
   /// 界面在点「确认」后会明显卡住。现在统一攒好再一次性提交。
+  ///
+  /// v8：关联落点从 message_task_links 改为锚点——每条消息的旧锚点清掉、
+  /// 按 linkIds 重建（marker 追加到正文末尾，edited_at 留痕、content_hash 重算）。
   Future<void> applyAiConfirmBatch(
       List<
               ({
@@ -843,7 +1029,6 @@ class AppDatabase {
           items) async {
     if (items.isEmpty) return;
     final db = await database;
-    final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction((txn) async {
       final batch = txn.batch();
       for (final it in items) {
@@ -856,24 +1041,12 @@ class AppDatabase {
           where: 'id = ?',
           whereArgs: [it.messageId],
         );
-        batch.delete('message_task_links',
-            where: 'message_id = ?', whereArgs: [it.messageId]);
-        for (final taskId in it.linkIds) {
-          batch.insert(
-            'message_task_links',
-            {
-              'message_id': it.messageId,
-              'task_id': taskId,
-              'created_at': now,
-            },
-            conflictAlgorithm: ConflictAlgorithm.ignore,
-          );
-        }
-        batch.rawUpdate(
-            'UPDATE messages SET linked_task_id = ? WHERE id = ?',
-            [it.linkIds.isEmpty ? null : it.linkIds.first, it.messageId]);
       }
       await batch.commit(noResult: true);
+      for (final it in items) {
+        await replaceMessageAnchorsInto(txn, it.messageId, it.linkIds,
+            createdBy: AnchorCreatedBy.ai);
+      }
     });
     _rescheduleReminders();
   }
@@ -989,11 +1162,18 @@ class AppDatabase {
     _rescheduleReminders();
   }
 
+  /// 删除任务：先把该任务所有锚点残迹化（正文 marker 替换为 label 纯文本，
+  /// 删除锚点行，details §1.5），再删任务行，同一事务。
   Future<void> deleteTasks(List<String> ids) async {
     if (ids.isEmpty) return;
     final db = await database;
     final placeholders = List.filled(ids.length, '?').join(',');
-    await db.delete('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
+    await db.transaction((txn) async {
+      for (final id in ids) {
+        await residualizeAnchorsForTaskInto(txn, id);
+      }
+      await txn.delete('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
+    });
     _rescheduleReminders();
   }
 
@@ -1049,10 +1229,15 @@ class AppDatabase {
         where: 'id = ?', whereArgs: [id]);
   }
 
-  /// 级联删除：笔记本 + 其下全部章节 + 章节下全部笔记，一个事务。
+  /// 级联删除：笔记本 + 其下全部章节 + 章节下全部笔记（含笔记锚点行），一个事务。
   Future<void> deleteNotebook(String id) async {
     final db = await database;
     await db.transaction((txn) async {
+      const noteIds =
+          'SELECT id FROM notes WHERE chapter_id IN (SELECT id FROM chapters WHERE notebook_id = ?)';
+      await txn.delete('task_anchors',
+          where: "target_type = 'note' AND target_id IN ($noteIds)",
+          whereArgs: [id]);
       await txn.delete('notes',
           where:
               'chapter_id IN (SELECT id FROM chapters WHERE notebook_id = ?)',
@@ -1080,10 +1265,14 @@ class AppDatabase {
         .update('chapters', {'name': name}, where: 'id = ?', whereArgs: [id]);
   }
 
-  /// 级联删除：章节 + 其下全部笔记。
+  /// 级联删除：章节 + 其下全部笔记（含笔记锚点行）。
   Future<void> deleteChapter(String id) async {
     final db = await database;
     await db.transaction((txn) async {
+      await txn.delete('task_anchors',
+          where:
+              "target_type = 'note' AND target_id IN (SELECT id FROM notes WHERE chapter_id = ?)",
+          whereArgs: [id]);
       await txn.delete('notes', where: 'chapter_id = ?', whereArgs: [id]);
       await txn.delete('chapters', where: 'id = ?', whereArgs: [id]);
     });
@@ -1123,6 +1312,233 @@ class AppDatabase {
 
   Future<void> deleteNote(String id) async {
     final db = await database;
-    await db.delete('notes', where: 'id = ?', whereArgs: [id]);
+    await db.transaction((txn) async {
+      await txn.delete('task_anchors',
+          where: "target_type = 'note' AND target_id = ?", whereArgs: [id]);
+      await txn.delete('notes', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  // ---- v8：文件区（files，design-v3 §1.3） ----
+
+  Future<void> insertFile(LibraryFile file) async {
+    final db = await database;
+    await db.insert('files', file.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<LibraryFile>> getFiles() async {
+    final db = await database;
+    final rows = await db.query('files', orderBy: 'created_at DESC');
+    return rows.map(LibraryFile.fromRow).toList();
+  }
+
+  Future<LibraryFile?> getFileById(String id) async {
+    final db = await database;
+    final rows =
+        await db.query('files', where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : LibraryFile.fromRow(rows.first);
+  }
+
+  Future<void> renameFile(String id, String name) async {
+    final db = await database;
+    await db.update('files', {'name': name}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 删除文件元数据（引用检查在 UI 层做）；其锚点行级联删除（应用层）。
+  Future<void> deleteFile(String id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('task_anchors',
+          where: "target_type = 'file' AND target_id = ?", whereArgs: [id]);
+      await txn.delete('files', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  // ---- v8：助理对话（conversations / chat_messages，design-v3 §1.4） ----
+
+  Future<void> insertConversation(Conversation conversation) async {
+    final db = await database;
+    await db.insert('conversations', conversation.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<Conversation>> getConversations() async {
+    final db = await database;
+    final rows = await db.query('conversations', orderBy: 'updated_at DESC');
+    return rows.map(Conversation.fromRow).toList();
+  }
+
+  Future<Conversation?> getConversationById(String id) async {
+    final db = await database;
+    final rows = await db.query('conversations',
+        where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : Conversation.fromRow(rows.first);
+  }
+
+  Future<void> renameConversation(String id, String title) async {
+    final db = await database;
+    await db.update(
+        'conversations',
+        {'title': title, 'updated_at': DateTime.now().millisecondsSinceEpoch},
+        where: 'id = ?',
+        whereArgs: [id]);
+  }
+
+  Future<void> setConversationModel(String id, String? modelConfigId) async {
+    final db = await database;
+    await db.update('conversations', {'model_config_id': modelConfigId},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 刷新 updated_at（有新消息时把对话顶到列表前）。
+  Future<void> touchConversation(String id) async {
+    final db = await database;
+    await db.update('conversations',
+        {'updated_at': DateTime.now().millisecondsSinceEpoch},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 删除对话：chat_messages 级联删（应用层）；change_proposals 松耦合，
+  /// conversation_id 置空保留在待确认区（design-v3 §1.4）。
+  Future<void> deleteConversation(String id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('chat_messages',
+          where: 'conversation_id = ?', whereArgs: [id]);
+      await txn.update('change_proposals', {'conversation_id': null},
+          where: 'conversation_id = ?', whereArgs: [id]);
+      await txn.delete('conversations', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  Future<void> insertChatMessage(ChatMessage message) async {
+    final db = await database;
+    await db.insert('chat_messages', message.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<ChatMessage?> getChatMessageById(String id) async {
+    final db = await database;
+    final rows = await db.query('chat_messages',
+        where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : ChatMessage.fromRow(rows.first);
+  }
+
+  Future<List<ChatMessage>> getChatMessages(String conversationId) async {
+    final db = await database;
+    final rows = await db.query('chat_messages',
+        where: 'conversation_id = ?',
+        whereArgs: [conversationId],
+        orderBy: 'created_at ASC');
+    return rows.map(ChatMessage.fromRow).toList();
+  }
+
+  /// 流式输出结束/编辑时整份覆盖内容。
+  Future<void> updateChatMessageContent(String id, String content) async {
+    final db = await database;
+    await db.update('chat_messages', {'content': content},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> updateChatMessageStatus(String id, String status) async {
+    final db = await database;
+    await db.update('chat_messages', {'status': status},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  // ---- v8：变更提案（change_proposals，待确认区，design-v3 §1.4） ----
+
+  static ChangeProposal _proposalFromRow(Map<String, Object?> r) =>
+      ChangeProposal(
+        id: r['id'] as String,
+        conversationId: r['conversation_id'] as String?,
+        batchId: r['batch_id'] as String?,
+        tool: r['tool'] as String,
+        summary: r['summary'] as String,
+        payload:
+            (jsonDecode(r['payload'] as String) as Map).cast<String, dynamic>(),
+        status: r['status'] as String,
+        createdAt: (r['created_at'] as num).toInt(),
+        resolvedAt: (r['resolved_at'] as num?)?.toInt(),
+      );
+
+  static Map<String, Object?> _proposalToRow(ChangeProposal p) => {
+        'id': p.id,
+        'conversation_id': p.conversationId,
+        'batch_id': p.batchId,
+        'tool': p.tool,
+        'summary': p.summary,
+        'payload': jsonEncode(p.payload),
+        'status': p.status,
+        'created_at': p.createdAt,
+        'resolved_at': p.resolvedAt,
+      };
+
+  Future<void> insertProposal(ChangeProposal proposal) async {
+    final db = await database;
+    await db.insert('change_proposals', _proposalToRow(proposal),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<ChangeProposal?> getProposalById(String id) async {
+    final db = await database;
+    final rows = await db.query('change_proposals',
+        where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : _proposalFromRow(rows.first);
+  }
+
+  /// 按状态过滤（null = 全部），按创建时间升序。
+  Future<List<ChangeProposal>> getProposals({String? status}) async {
+    final db = await database;
+    final rows = await db.query('change_proposals',
+        where: status != null ? 'status = ?' : null,
+        whereArgs: status != null ? [status] : null,
+        orderBy: 'created_at ASC');
+    return rows.map(_proposalFromRow).toList();
+  }
+
+  Future<List<ChangeProposal>> proposalsForConversation(
+      String conversationId) async {
+    final db = await database;
+    final rows = await db.query('change_proposals',
+        where: 'conversation_id = ?',
+        whereArgs: [conversationId],
+        orderBy: 'created_at ASC');
+    return rows.map(_proposalFromRow).toList();
+  }
+
+  /// 同一 AI 回合（batch）的全部提案（待确认区分组用，details §3.2）。
+  Future<List<ChangeProposal>> proposalsForBatch(String batchId) async {
+    final db = await database;
+    final rows = await db.query('change_proposals',
+        where: 'batch_id = ?', whereArgs: [batchId], orderBy: 'created_at ASC');
+    return rows.map(_proposalFromRow).toList();
+  }
+
+  /// 提案状态流转（design-v3 §1.4）：pending→approved/rejected→applied/failed。
+  /// 非法流转或不存在的 id 返回 false；流转成功打 resolved_at。
+  Future<bool> transitionProposal(String id, String to) async {
+    const allowed = {
+      ProposalStatus.pending: {ProposalStatus.approved, ProposalStatus.rejected},
+      ProposalStatus.approved: {ProposalStatus.applied, ProposalStatus.failed},
+    };
+    final db = await database;
+    return db.transaction((txn) async {
+      final rows = await txn.query('change_proposals',
+          columns: ['status'], where: 'id = ?', whereArgs: [id], limit: 1);
+      if (rows.isEmpty) return false;
+      final from = rows.first['status'] as String;
+      if (!(allowed[from]?.contains(to) ?? false)) return false;
+      await txn.update(
+          'change_proposals',
+          {
+            'status': to,
+            'resolved_at': DateTime.now().millisecondsSinceEpoch,
+          },
+          where: 'id = ?',
+          whereArgs: [id]);
+      return true;
+    });
   }
 }

@@ -66,7 +66,7 @@ class _TaskDetailPanelState extends State<TaskDetailPanel> {
     final parent =
         t.parentId == null ? null : await db.getTaskById(t.parentId!);
     final children = await db.getChildTasks(t.id);
-    // N1：一个任务可能有多个来源消息；旧列只剩主来源时回退用它。
+    // v8：一个任务可能有多个来源锚点；无锚点时回退历史只读的 source_message_id。
     var sources = await db.messagesForTask(t.id);
     if (sources.isEmpty && t.sourceMessageId != null) {
       final legacy = await db.getMessageById(t.sourceMessageId!);
