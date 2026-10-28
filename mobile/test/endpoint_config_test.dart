@@ -1,7 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/services/ai_client.dart';
+import 'package:msgrepo_mobile/services/secret_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// N2 诊断回归：Base URL 拼接与常见配置错误的前置提示。
+/// v3 阶段 6：端点管理 UI 从设置页平移到助理页 model_picker，
+/// CRUD 仍由 AiClient 承载（本文件末尾的平移回归组）。
 void main() {
   group('joinEndpointUrl', () {
     test('去掉尾部斜杠，避免 //', () {
@@ -73,6 +77,38 @@ void main() {
       expect(AiClient.shouldRetryPerMessage('HTTP 401 @ https://x.com/models：invalid key'), isFalse);
       expect(AiClient.shouldRetryPerMessage('SocketException: Failed host lookup'), isFalse);
       expect(AiClient.shouldRetryPerMessage('TimeoutException after 0:03:00'), isFalse);
+    });
+  });
+
+  group('端点 CRUD 平移回归（设置页 → model_picker，v3 阶段 6）', () {
+    setUp(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      AiClient.secretStore = InMemorySecretStore();
+    });
+
+    test('upsert/默认/删除的往返不变，密钥走安全存储', () async {
+      final ai = AiClient.instance;
+      final e1 = AiEndpoint(
+          id: ai.newEndpointId(),
+          name: '远程A',
+          baseUrl: 'https://a.example.com/v1',
+          apiKey: 'sk-a',
+          model: 'm1');
+      await ai.upsertEndpoint(e1);
+      await ai.setDefaultEndpointId(e1.id);
+
+      final remotes = await ai.getRemoteEndpoints();
+      expect(remotes.single.apiKey, 'sk-a', reason: '读取时从安全存储回填');
+      // SharedPreferences 里不留明文 key
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('ai_endpoints'), isNot(contains('sk-a')));
+      expect((await ai.defaultRemoteEndpoint())?.id, e1.id);
+
+      await ai.deleteEndpoint(e1.id);
+      expect(await ai.getRemoteEndpoints(), isEmpty);
+      expect(await ai.getDefaultEndpointId(), isNull,
+          reason: '删默认接口时清默认指针');
     });
   });
 }

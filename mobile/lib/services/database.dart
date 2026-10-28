@@ -1537,11 +1537,14 @@ class AppDatabase {
   }
 
   /// 提案状态流转（design-v3 §1.4）：pending→approved/rejected→applied/failed。
+  /// applied→pending 为「撤销已应用的变更」（details §3.2 历史区撤销入口）：
+  /// 逆操作由 proposal_executor 先执行，再把提案退回待确认区。
   /// 非法流转或不存在的 id 返回 false；流转成功打 resolved_at。
   Future<bool> transitionProposal(String id, String to) async {
     const allowed = {
       ProposalStatus.pending: {ProposalStatus.approved, ProposalStatus.rejected},
       ProposalStatus.approved: {ProposalStatus.applied, ProposalStatus.failed},
+      ProposalStatus.applied: {ProposalStatus.pending},
     };
     final db = await database;
     return db.transaction((txn) async {

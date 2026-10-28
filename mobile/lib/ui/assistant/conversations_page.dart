@@ -1,0 +1,175 @@
+import 'package:flutter/material.dart';
+
+import '../../models/conversation.dart';
+import '../../services/assistant/assistant_service.dart';
+import '../../services/database.dart';
+import '../settings_page.dart';
+import 'approvals_page.dart';
+import 'chat_page.dart';
+import 'model_picker.dart';
+
+/// 助理主 Tab（design-v3 §5.1）：对话列表（新建/改名/删除），
+/// AppBar 一级入口：待确认区、模型配置；设置入口也降级在这里
+/// （v3 阶段 6：设置从底部导航移出，取成本最低的 AppBar 图标方案）。
+class ConversationsPage extends StatefulWidget {
+  const ConversationsPage({super.key});
+
+  @override
+  State<ConversationsPage> createState() => ConversationsPageState();
+}
+
+class ConversationsPageState extends State<ConversationsPage> {
+  List<Conversation> _conversations = [];
+
+  @override
+  void initState() {
+    super.initState();
+    reload();
+  }
+
+  Future<void> reload() async {
+    final list = await AppDatabase.instance.getConversations();
+    if (mounted) setState(() => _conversations = list);
+  }
+
+  Future<void> _newConversation() async {
+    final conv = await AssistantService.instance.createConversation();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => ChatPage(conversation: conv)),
+    );
+    await reload();
+  }
+
+  Future<void> _rename(Conversation conv) async {
+    final controller = TextEditingController(text: conv.title);
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重命名对话'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '标题'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved == null || saved.isEmpty) return;
+    await AppDatabase.instance.renameConversation(conv.id, saved);
+    await reload();
+  }
+
+  Future<void> _delete(Conversation conv) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除对话'),
+        content: Text('删除「${conv.title}」？其待确认提案会保留在待确认区。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await AppDatabase.instance.deleteConversation(conv.id);
+    await reload();
+  }
+
+  String _fmtTime(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    return '${d.month}-${d.day} ${d.hour.toString().padLeft(2, '0')}:'
+        '${d.minute.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('助理'),
+        actions: [
+          IconButton(
+            tooltip: '待确认区',
+            icon: const Icon(Icons.fact_check_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ApprovalsPage()),
+            ),
+          ),
+          IconButton(
+            tooltip: '模型配置',
+            icon: const Icon(Icons.model_training),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ModelPickerPage()),
+            ),
+          ),
+          IconButton(
+            tooltip: '设置',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const SettingsPage()),
+            ),
+          ),
+        ],
+      ),
+      body: _conversations.isEmpty
+          ? Center(
+              child: Text('还没有对话，点右下角新建',
+                  style: TextStyle(color: cs.onSurfaceVariant)),
+            )
+          : ListView.builder(
+              itemCount: _conversations.length,
+              itemBuilder: (_, i) {
+                final c = _conversations[i];
+                return ListTile(
+                  leading: const Icon(Icons.chat_bubble_outline),
+                  title: Text(c.title,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(_fmtTime(c.updatedAt),
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (v) {
+                      if (v == 'rename') _rename(c);
+                      if (v == 'delete') _delete(c);
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'rename', child: Text('重命名')),
+                      PopupMenuItem(value: 'delete', child: Text('删除')),
+                    ],
+                  ),
+                  onTap: () async {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => ChatPage(conversation: c)),
+                    );
+                    await reload();
+                  },
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton(
+        tooltip: '新建对话',
+        onPressed: _newConversation,
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}

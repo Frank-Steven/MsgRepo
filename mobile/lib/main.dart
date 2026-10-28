@@ -11,9 +11,9 @@ import 'services/ai_processing.dart';
 import 'services/app_ui_state.dart';
 import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
+import 'ui/assistant/conversations_page.dart';
 import 'ui/library/library_page.dart';
 import 'ui/messages/ai_panel.dart';
-import 'ui/settings_page.dart';
 import 'ui/splash_gate.dart';
 import 'ui/tasks/tasks_page.dart';
 import 'ui/theme_fader.dart';
@@ -233,8 +233,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
 
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
-  final _tasksKey = GlobalKey<TasksPageState>();
   final _libraryKey = GlobalKey<LibraryPageState>();
+  final _tasksKey = GlobalKey<TasksPageState>();
+  final _assistantKey = GlobalKey<ConversationsPageState>();
 
   // O10：页面懒构建。原来所有页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
   // 任何主题切换都要把这些树重新 build 一遍（真机实测单帧 build 达 924ms）。
@@ -244,9 +245,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Widget _pageAt(int i) {
     if (!_builtTabs.contains(i)) return const SizedBox.shrink();
     return switch (i) {
-      0 => TasksPage(key: _tasksKey),
-      1 => LibraryPage(key: _libraryKey),
-      _ => const SettingsPage(),
+      0 => LibraryPage(key: _libraryKey),
+      1 => TasksPage(key: _tasksKey),
+      _ => ConversationsPage(key: _assistantKey),
     };
   }
 
@@ -342,10 +343,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// 切到某个 tab 后按需刷新该页（IndexedStack 保活，不会重跑 initState）。
   void _reloadTab(int i) {
     switch (i) {
-      case AppUiState.tasksTabIndex:
-        _tasksKey.currentState?.reload();
       case AppUiState.libraryTabIndex:
         _libraryKey.currentState?.reload();
+      case AppUiState.tasksTabIndex:
+        _tasksKey.currentState?.reload();
+      case AppUiState.assistantTabIndex:
+        _assistantKey.currentState?.reload();
     }
   }
 
@@ -365,8 +368,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _reloadTab(i);
       },
       destinations: [
-        const NavigationDestination(
-            icon: Icon(Icons.check_circle_outline), label: '任务'),
         NavigationDestination(
             icon: Badge(
               isLabelVisible: pending > 0,
@@ -375,7 +376,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             ),
             label: '库'),
         const NavigationDestination(
-            icon: Icon(Icons.settings_outlined), label: '设置'),
+            icon: Icon(Icons.check_circle_outline), label: '任务'),
+        const NavigationDestination(
+            icon: Icon(Icons.smart_toy_outlined), label: '助理'),
       ],
     );
   }

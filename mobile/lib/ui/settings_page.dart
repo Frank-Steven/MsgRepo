@@ -36,7 +36,8 @@ AppFilterConfig? filterConfigAfterSelection({
       mode: AppFilterConfig.modeAllowlist, packages: merged.toList());
 }
 
-/// v2 设置页（设计 §9）：外观 / 自定义提示词 / AI 接口 / 连接 / 采集过滤。
+/// 设置页（design-v3 §3.5）：外观 / 自定义提示词 / 自动处理 / 数据 / 采集过滤 /
+/// 后台保活。「AI 接口配置 / 配对 / 端点管理」段已迁入助理页（model_picker）。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
@@ -55,22 +56,10 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _promptExpanded = true;
 
   String _themeMode = 'system';
-  AiEndpoint _desktop = const AiEndpoint(
-    id: AiClient.desktopEndpointId,
-    name: AiClient.desktopName,
-    baseUrl: AiClient.defaultDesktopBaseUrl,
-    isDesktop: true,
-  );
-  bool? _desktopOnline;
 
   /// U19 自动处理：开关 + 未处理阈值（用户可调，合作者 2026-10-18 建议）
   bool _autoProcessEnabled = true;
   int _autoThreshold = kAutoProcessThreshold;
-  String _token = '';
-  String? _desktopDeviceName;
-  List<AiEndpoint> _remotes = [];
-  String? _defaultEndpointId;
-  final Set<String> _testing = {};
 
   bool _listenerEnabled = false;
   bool _exporting = false;
@@ -99,13 +88,6 @@ class _SettingsPageState extends State<SettingsPage> {
     final prefs = await SharedPreferences.getInstance();
     final autoEnabled = await AutoProcessState.enabled();
     final autoThreshold = await AutoProcessState.threshold();
-    final ai = AiClient.instance;
-    final desktop = await ai.desktopEndpoint();
-    final remotes = await ai.getRemoteEndpoints();
-    final defaultId = await ai.getDefaultEndpointId();
-    final token = await ai.getDesktopToken();
-    final deviceName = await ai.getDesktopDeviceName();
-    final online = await ai.isDesktopOnline();
     final listenerEnabled =
         await NotificationBridge.instance.isListenerEnabled();
     final batteryOptimized =
@@ -131,12 +113,6 @@ class _SettingsPageState extends State<SettingsPage> {
               treatment: TextEditingController(text: rule.treatment),
             ),
         ]);
-      _desktop = desktop;
-      _remotes = remotes;
-      _defaultEndpointId = defaultId;
-      _token = token;
-      _desktopDeviceName = deviceName.isEmpty ? null : deviceName;
-      _desktopOnline = online;
       _listenerEnabled = listenerEnabled;
       _batteryOptimized = batteryOptimized;
       _exactAlarms = exactAlarms;
@@ -145,18 +121,6 @@ class _SettingsPageState extends State<SettingsPage> {
       _autoProcessEnabled = autoEnabled;
       _autoThreshold = autoThreshold;
     });
-  }
-
-  Future<void> _refreshDesktopStatus() async {
-    final ai = AiClient.instance;
-    final online = await ai.isDesktopOnline(force: true);
-    final token = await ai.getDesktopToken();
-    if (mounted) {
-      setState(() {
-        _desktopOnline = online;
-        _token = token;
-      });
-    }
   }
 
   void _toast(String text) {
@@ -317,167 +281,6 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
-  }
-
-  // ---- AI 接口 ----
-
-  Future<void> _testEndpoint(AiEndpoint endpoint) async {
-    setState(() => _testing.add(endpoint.id));
-    try {
-      final msg = await AiClient.instance.testEndpoint(endpoint);
-      _toast('${endpoint.name}：$msg');
-    } catch (e) {
-      _toast('${endpoint.name}：$e');
-    } finally {
-      await _refreshDesktopStatus();
-      if (mounted) setState(() => _testing.remove(endpoint.id));
-    }
-  }
-
-  Future<void> _editEndpoint([AiEndpoint? existing]) async {
-    final ai = AiClient.instance;
-    final nameController = TextEditingController(text: existing?.name ?? '');
-    final baseUrlController =
-        TextEditingController(text: existing?.baseUrl ?? '');
-    final apiKeyController =
-        TextEditingController(text: existing?.apiKey ?? '');
-    final modelController = TextEditingController(text: existing?.model ?? '');
-    final saved = await showDialog<AiEndpoint>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(existing == null ? '添加接口' : '编辑接口'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(labelText: '名称'),
-              ),
-              TextField(
-                controller: baseUrlController,
-                decoration: const InputDecoration(
-                  labelText: 'Base URL',
-                  hintText: 'https://api.example.com/v1',
-                ),
-              ),
-              TextField(
-                controller: apiKeyController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'API Key（可空）',
-                ),
-              ),
-              TextField(
-                controller: modelController,
-                decoration: const InputDecoration(labelText: '模型'),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              var baseUrl = baseUrlController.text.trim();
-              if (baseUrl.endsWith('/')) {
-                baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-              }
-              if (nameController.text.trim().isEmpty ||
-                  baseUrl.isEmpty ||
-                  modelController.text.trim().isEmpty) {
-                return;
-              }
-              Navigator.of(context).pop(
-                (existing ??
-                        AiEndpoint(
-                          id: ai.newEndpointId(),
-                          name: '',
-                          baseUrl: '',
-                        ))
-                    .copyWith(
-                  name: nameController.text.trim(),
-                  baseUrl: baseUrl,
-                  apiKey: apiKeyController.text.trim(),
-                  model: modelController.text.trim(),
-                ),
-              );
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (saved == null) return;
-    await ai.upsertEndpoint(saved);
-    // 第一个远程接口自动设为默认
-    if (await ai.getDefaultEndpointId() == null) {
-      await ai.setDefaultEndpointId(saved.id);
-    }
-    await _load();
-  }
-
-  Future<void> _deleteEndpoint(AiEndpoint endpoint) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除接口'),
-        content: Text('删除「${endpoint.name}」？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
-    await AiClient.instance.deleteEndpoint(endpoint.id);
-    await _load();
-  }
-
-  // ---- 连接 ----
-
-  String get _maskedToken {
-    if (_token.isEmpty) return '未配对（首次处理时自动配对）';
-    final head = _token.length <= 6 ? _token : _token.substring(0, 6);
-    return '$head••••••';
-  }
-
-  Future<void> _resetPairing() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('重置配对'),
-        content: const Text('电脑端将重新签发 token，本机自动完成重新配对。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('重置'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
-    try {
-      final (_, deviceName) = await AiClient.instance.pairDesktop(reset: true);
-      _desktopDeviceName = deviceName;
-      _toast('已重新配对${deviceName.isNotEmpty ? '：$deviceName' : ''}');
-    } catch (e) {
-      _toast('重置配对失败：$e');
-    }
-    await _refreshDesktopStatus();
   }
 
   // ---- 采集过滤 ----
@@ -703,89 +506,9 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _buildEndpointTile(AiEndpoint endpoint) {
-    final cs = Theme.of(context).colorScheme;
-    final testing = _testing.contains(endpoint.id);
-    if (endpoint.isDesktop) {
-      final online = _desktopOnline == true;
-      return Row(
-        children: [
-          Icon(Icons.computer, color: cs.onSurfaceVariant),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('电脑端（自动）'),
-                Text(
-                  '${endpoint.baseUrl} · '
-                  '${_desktopOnline == null ? '探测中' : online ? '已连接' : '未连接'}'
-                  ' · 模型由电脑端管理',
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                ),
-              ],
-            ),
-          ),
-          TextButton(
-            onPressed: testing ? null : () => _testEndpoint(endpoint),
-            child: testing
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('测试'),
-          ),
-        ],
-      );
-    }
-    final isDefault = endpoint.id == _defaultEndpointId;
-    return Row(
-      children: [
-        SizedBox(
-          width: 32,
-          child: Radio<String>(value: endpoint.id),
-        ),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(isDefault ? '${endpoint.name}（默认）' : endpoint.name),
-              Text(
-                '${endpoint.baseUrl} · ${endpoint.model}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-              ),
-            ],
-          ),
-        ),
-        TextButton(
-          onPressed: testing ? null : () => _testEndpoint(endpoint),
-          child: testing
-              ? const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('测试'),
-        ),
-        IconButton(
-          tooltip: '编辑',
-          icon: const Icon(Icons.edit_outlined, size: 20),
-          onPressed: () => _editEndpoint(endpoint),
-        ),
-        IconButton(
-          tooltip: '删除',
-          icon: const Icon(Icons.delete_outline, size: 20),
-          onPressed: () => _deleteEndpoint(endpoint),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final desktopOnline = _desktopOnline == true;
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
@@ -802,33 +525,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ]),
           const Divider(height: 32),
           _buildPromptSection(cs),
-          const Divider(height: 32),
-          _section('AI 接口', [
-            _buildEndpointTile(_desktop),
-            const SizedBox(height: 4),
-            Text('电脑端在线时自动优先；电脑端不在线时使用默认远程接口',
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-            const SizedBox(height: 8),
-            RadioGroup<String>(
-              groupValue: _defaultEndpointId,
-              onChanged: (v) async {
-                if (v == null) return;
-                await AiClient.instance.setDefaultEndpointId(v);
-                if (mounted) setState(() => _defaultEndpointId = v);
-              },
-              child: Column(
-                children: [for (final e in _remotes) _buildEndpointTile(e)],
-              ),
-            ),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () => _editEndpoint(),
-                icon: const Icon(Icons.add),
-                label: const Text('添加远程接口'),
-              ),
-            ),
-          ]),
           const Divider(height: 32),
           _section('自动处理', [
             SwitchListTile(
@@ -888,63 +584,6 @@ class _SettingsPageState extends State<SettingsPage> {
                       child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.chevron_right),
               onTap: _exporting ? null : _exportArchive,
-            ),
-          ]),
-          const Divider(height: 32),
-          _section('连接', [
-            Row(
-              children: [
-                Icon(
-                  desktopOnline ? Icons.usb : Icons.usb_off,
-                  color: desktopOnline ? cs.primary : cs.onSurfaceVariant,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(desktopOnline ? '电脑端通道已连接' : '电脑端通道未连接'),
-                      if (!desktopOnline)
-                        Text('USB 连接后执行 adb reverse tcp:8765 tcp:8765',
-                            style: TextStyle(
-                                fontSize: 12, color: cs.onSurfaceVariant)),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  tooltip: '刷新',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: _refreshDesktopStatus,
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.key_outlined, color: cs.onSurfaceVariant),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('配对 token'),
-                      Text(
-                        _desktopDeviceName != null
-                            ? '$_maskedToken（$_desktopDeviceName）'
-                            : _maskedToken,
-                        style: TextStyle(
-                            fontSize: 12,
-                            fontFamily: 'monospace',
-                            color: cs.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
-                ),
-                TextButton(
-                  onPressed: desktopOnline ? _resetPairing : null,
-                  child: const Text('重置配对'),
-                ),
-              ],
             ),
           ]),
           const Divider(height: 32),

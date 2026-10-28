@@ -436,6 +436,13 @@ class AiClient {
   bool? _desktopOnlineCache;
   DateTime? _desktopOnlineAt;
 
+  /// 测试接口：清掉 30s 在线缓存（不同用例指向不同 mock server 时用）。
+  @visibleForTesting
+  void debugResetOnlineCache() {
+    _desktopOnlineCache = null;
+    _desktopOnlineAt = null;
+  }
+
   /// 电脑端在线探测：GET /v1/health，超时 2s，结果缓存 30s（设计 §8.1）。
   Future<bool> isDesktopOnline({bool force = false}) async {
     final cachedAt = _desktopOnlineAt;
