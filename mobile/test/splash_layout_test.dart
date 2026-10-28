@@ -80,7 +80,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     final name = tester.widget<Text>(find.byKey(const ValueKey('splash-name')));
-    expect(name.data, 'Manalist');
+    expect(name.data, 'ManaList');
     expect(name.style?.fontSize, 21);
     // 2026-10-28：默认浅色主题下为深色文字（深色主题下为白色，见背景用例）
     expect(name.style?.color, Colors.black87);

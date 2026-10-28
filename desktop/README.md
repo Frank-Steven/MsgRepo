@@ -1,13 +1,13 @@
-# AndroidLocAI Desktop（电脑端）
+# LinkModel Desktop（电脑端）
 
-AndroidLocAI 是本地 AI 统一接口（AI 网关，design-v3 §6）：macOS 状态栏托盘应用 + 内嵌 HTTP 服务（`127.0.0.1:8765`）。手机（Flutter）经 `adb reverse` 访问本服务；电脑端只做**模型路由与协议透传**——不解析、不执行模型输出中的工具块，无业务数据、无 dashboard。
+LinkModel 是本地 AI 统一接口（AI 网关，design-v3 §6）：macOS 状态栏托盘应用 + 内嵌 HTTP 服务（`127.0.0.1:8765`）。手机（Flutter）经 `adb reverse` 访问本服务；电脑端只做**模型路由与协议透传**——不解析、不执行模型输出中的工具块，无业务数据、无 dashboard。
 
 ## 日常使用：macOS 状态栏应用（无需终端）
 
 安装：
 
-1. `npm run dist` 产出 `release/AndroidLocAI-0.3.0-arm64.dmg`（或拿到 dmg 文件）。
-2. 打开 dmg，把 **AndroidLocAI.app** 拖入「应用程序」。
+1. `npm run dist` 产出 `release/LinkModel-0.3.0-arm64.dmg`（或拿到 dmg 文件）。
+2. 打开 dmg，把 **LinkModel.app** 拖入「应用程序」。
 3. 首次启动：应用未签名，需要在「应用程序」里**右键 → 打开**，在弹窗中确认。之后双击/开机自启均可直接运行。
 
 启动后没有任何窗口和 Dock 图标，只在状态栏出现一个气泡图标。启动即自动完成：内嵌 HTTP 服务（`127.0.0.1:8765`）→ 探测 adb → 手机接入自动识别 → 自动 `adb reverse` → 5 秒看护（断线重连、服务掉线重拉、逐模型连通性探测）。
@@ -40,9 +40,9 @@ brew install android-platform-tools
 
 ### 配置覆盖（模型列表等）
 
-托盘应用配置生效顺序：包内 `config/default.json` → `~/Library/Application Support/AndroidLocAI/config.json`（存在则覆盖合并）。合并语义：标量（host/port/defaultModelId）直接覆盖；`models` 数组**按 id 合并**——同 id 条目字段级浅合并（可只写要改的字段），新 id 追加。改完后托盘菜单点「重载模型配置」即可生效。
+托盘应用配置生效顺序：包内 `config/default.json` → `~/Library/Application Support/LinkModel/config.json`（存在则覆盖合并）。合并语义：标量（host/port/defaultModelId）直接覆盖；`models` 数组**按 id 合并**——同 id 条目字段级浅合并（可只写要改的字段），新 id 追加。改完后托盘菜单点「重载模型配置」即可生效。
 
-数据目录 `~/Library/Application Support/AndroidLocAI/`（pairing.json、config.json），与 CLI 的 `desktop/data/` 相互独立。v3 干净迁移：**不做旧 MsgRepo 目录迁移**，全新安装后重新配对即可。
+数据目录 `~/Library/Application Support/LinkModel/`（pairing.json、config.json），与 CLI 的 `desktop/data/` 相互独立。干净迁移：**不做旧目录迁移**，全新安装后重新配对即可。
 
 ## 开发（CLI）
 
@@ -67,7 +67,7 @@ npx tsx --test src/*.test.ts   # node:test 单元测试（同 CI）
 实现说明：
 
 - 主进程 `src/electron-main.ts`（编译为 `dist/electron-main.js`，package.json `main` 指向它；Electron 28+ 的 ESM 主进程）。
-- HTTP 服务进程内启动（复用 `server.ts`）；若 8765 已被其他 AndroidLocAI 进程占用则直接复用，不重复拉起。
+- HTTP 服务进程内启动（复用 `server.ts`）；若 8765 已被其他 LinkModel 进程占用则直接复用，不重复拉起。
 - 模型注册中心 `src/models.ts`（ModelManager）：持有模型列表与 provider 实例，逐模型连通性探测带 30s 缓存，`/v1/models` 与托盘看护共用。
 - adb 逻辑在 `src/adb.ts`，CLI（connect.ts）与托盘共用。
 - 打包配置在 package.json 的 `build` 字段：`shared/` 经 extraResources 拷入包内（`registry.ts` 有回退路径），不签名（`identity: null`）、asar 关闭、`LSUIElement` 隐藏 Dock 图标。

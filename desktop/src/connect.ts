@@ -88,7 +88,7 @@ async function tick(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  log(`AndroidLocAI 连接看护启动（端口 ${PORT}，Ctrl+C 退出）`);
+  log(`LinkModel 连接看护启动（端口 ${PORT}，Ctrl+C 退出）`);
   const timer = setInterval(() => {
     tick().catch((e) => log(`看护异常：${String(e)}`));
   }, 5000);

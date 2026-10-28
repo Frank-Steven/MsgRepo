@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     models,
   });
   server.listen(cfg.port, cfg.host, () => {
-    console.log(`AndroidLocAI desktop 已启动: http://${cfg.host}:${cfg.port}`);
+    console.log(`LinkModel desktop 已启动: http://${cfg.host}:${cfg.port}`);
     console.log(
       `模型：${models.models.map((m) => `${m.id}(${m.provider})`).join(", ")}；默认 ${models.defaultModelId}`,
     );

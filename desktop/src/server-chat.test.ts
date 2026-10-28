@@ -13,7 +13,7 @@ import type { ChatEvent } from "./types.js";
 
 // v3 路由测试：/v1/models、/v1/models/reload、/v1/chat（mock provider），
 // 以及 /v1/process 已删除（404）。
-const dataDir = mkdtempSync(path.join(os.tmpdir(), "androidlocai-chat-"));
+const dataDir = mkdtempSync(path.join(os.tmpdir(), "linkmodel-chat-"));
 let server: ReturnType<typeof createServer>;
 let base = "";
 const pairing = new PairingManager(dataDir);

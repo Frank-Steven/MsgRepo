@@ -182,7 +182,7 @@ String buildToolSpecPrompt(DateTime now) {
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} '
       '(周${'日一二三四五六'[d.weekday % 7]})';
   final buf = StringBuffer()
-    ..writeln('你是 Manalist 的个人助理。用户可以与你对话，你可以通过「工具调用块」操作应用。')
+    ..writeln('你是 ManaList 的个人助理。用户可以与你对话，你可以通过「工具调用块」操作应用。')
     ..writeln('当前本地时间：${fmt(now)}。解析相对日期（如"明天""本周五"）以此为基准。')
     ..writeln()
     ..writeln('## 工具调用块格式')

@@ -216,7 +216,7 @@ class _ModelPickerPageState extends State<ModelPickerPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('重置配对'),
-        content: const Text('电脑端将重新签发 token，本机自动完成重新配对。'),
+        content: const Text('LinkModel 将重新签发 token，本机自动完成重新配对。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -261,10 +261,10 @@ class _ModelPickerPageState extends State<ModelPickerPage> {
                     : Icons.radio_button_off,
                 size: 20,
               ),
-              title: const Text('默认（电脑端在线走电脑端，否则走默认远程接口）'),
+              title: const Text('默认（LinkModel 在线时走 LinkModel，否则走默认远程接口）'),
               onTap: () => _select(''),
             ),
-          Text('电脑端（自动置顶）',
+          Text('LinkModel 接口（自动置顶）',
               style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Row(
@@ -321,7 +321,7 @@ class _ModelPickerPageState extends State<ModelPickerPage> {
           const Divider(height: 32),
           Text('远程接口', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          Text('电脑端不在线时使用；对话也可直接绑定某个远程接口',
+          Text('LinkModel 不在线时使用；对话也可直接绑定某个远程接口',
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
           for (final e in _remotes) _buildRemoteTile(e, cs),
           Align(
@@ -337,7 +337,7 @@ class _ModelPickerPageState extends State<ModelPickerPage> {
     );
   }
 
-  String onlineStatusHint(bool online) => online ? '模型由电脑端管理' : '离线';
+  String onlineStatusHint(bool online) => online ? '模型由 LinkModel 管理' : '离线';
 
   Widget _buildDesktopModelTile(DesktopModelEntry m, ColorScheme cs) {
     final reachable = m.reachable;

@@ -22,9 +22,9 @@ import {
  * 用户可见的状态全部在托盘菜单与系统通知里呈现。
  */
 
-// 固定应用名，userData 目录为 ~/Library/Application Support/AndroidLocAI
-// （v3 干净迁移：不做旧 MsgRepo 目录迁移，全新安装、重新配对）
-app.setName("AndroidLocAI");
+// 固定应用名，userData 目录为 ~/Library/Application Support/LinkModel
+// （v3 干净迁移：不做旧目录迁移，全新安装、重新配对）
+app.setName("LinkModel");
 
 // 配置：包内 default.json → 包内 local.json（仅开发）→ userData/config.json（用户覆盖）
 const USER_CONFIG = path.join(app.getPath("userData"), "config.json");
@@ -64,7 +64,7 @@ function event(msg: string): void {
 
 function notify(body: string): void {
   try {
-    if (Notification.isSupported()) new Notification({ title: "AndroidLocAI", body }).show();
+    if (Notification.isSupported()) new Notification({ title: "LinkModel", body }).show();
   } catch {
     // 未签名应用通知可能不可用，状态仍以菜单为准
   }
@@ -169,7 +169,7 @@ function rebuildMenu(): void {
   if (!tray) return;
   const token = pairing.token;
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: "AndroidLocAI（电脑端 AI 网关）", enabled: false },
+    { label: "LinkModel（电脑端 AI 网关）", enabled: false },
     { type: "separator" },
     { label: `服务：${serverLabel()}`, enabled: false },
     { label: `模型：${aiLabel()}`, enabled: false },
@@ -246,7 +246,7 @@ function rebuildMenu(): void {
     { label: "退出", click: () => app.quit() },
   );
   tray.setContextMenu(Menu.buildFromTemplate(template));
-  tray.setToolTip(`AndroidLocAI · 手机${deviceLabel()}`);
+  tray.setToolTip(`LinkModel · 手机${deviceLabel()}`);
 }
 
 /** 5 秒看护：adb 探测 → 设备识别 → reverse 通道 → 逐模型连通性 → 服务掉线重拉。
@@ -330,7 +330,7 @@ async function main(): Promise<void> {
 
   // 数据目录独立于 CLI 的 desktop/data，避免打包后往只读位置写入
   pairing = new PairingManager(app.getPath("userData"));
-  event(`AndroidLocAI 托盘启动（数据目录 ${app.getPath("userData")}）`);
+  event(`LinkModel 托盘启动（数据目录 ${app.getPath("userData")}）`);
 
   tray = new Tray(trayIcon());
   rebuildMenu();

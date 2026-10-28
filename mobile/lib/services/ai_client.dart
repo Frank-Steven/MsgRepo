@@ -109,7 +109,7 @@ class AiClient {
   static final AiClient instance = AiClient._();
 
   static const desktopEndpointId = 'desktop';
-  static const desktopName = '电脑端';
+  static const desktopName = 'LinkModel 接口';
   static const defaultDesktopBaseUrl = 'http://127.0.0.1:8765';
 
   // 与 v1 SyncClient 共用同一组 key，旧配对 token / 地址直接兼容

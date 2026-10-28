@@ -9,7 +9,7 @@ import { loadConfig } from "./config.js";
 // v3 配置加载：default.json ← local.json ← 追加覆盖文件；models 按 id 合并（design-v3 §6.2）。
 // 注意：仓库里存在 config/local.json（local-gemma 覆盖），断言只关心相对变化，不假设其不存在。
 
-const tmp = mkdtempSync(path.join(os.tmpdir(), "androidlocai-config-"));
+const tmp = mkdtempSync(path.join(os.tmpdir(), "linkmodel-config-"));
 
 function writeOverride(name: string, obj: unknown): string {
   const p = path.join(tmp, name);

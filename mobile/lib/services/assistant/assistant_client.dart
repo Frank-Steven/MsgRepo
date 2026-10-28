@@ -150,7 +150,7 @@ class AssistantClient {
     // 3. 离线 → 默认远程端点
     final endpoint = await ai.defaultRemoteEndpoint();
     if (endpoint == null) {
-      yield const ChatError('电脑端不在线且未配置远程 AI 接口（助理 → 模型配置）');
+      yield const ChatError('LinkModel 不在线且未配置远程 AI 接口（助理 → 模型配置）');
       return;
     }
     yield* _chatViaRemote(endpoint, messages);
@@ -198,7 +198,7 @@ class AssistantClient {
       }
       if (streamed.statusCode != 200) {
         final errBody = await streamed.stream.bytesToString();
-        throw AiException('电脑端对话失败 HTTP ${streamed.statusCode}：$errBody');
+        throw AiException('LinkModel 对话失败 HTTP ${streamed.statusCode}：$errBody');
       }
       var sawDone = false;
       await for (final line
@@ -223,7 +223,7 @@ class AssistantClient {
       yield ChatError(e.message);
     } catch (e) {
       if (_activeClient == null || _cancelled) return; // 被 cancelActive 中断
-      yield ChatError('无法连接电脑端：$e');
+      yield ChatError('无法连接 LinkModel：$e');
     } finally {
       if (_activeClient == client) _activeClient = null;
     }

@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'theme_fader.dart';
 import '../main.dart' show themeModeNotifier, themeModeFromString;
+import 'about_page.dart';
 import 'shared/app_icon.dart';
 import 'shared/segmented_selector.dart';
 import '../services/app_filter_service.dart';
@@ -344,10 +345,10 @@ class _SettingsPageState extends State<SettingsPage> {
         content: const SingleChildScrollView(
           child: Text('未能直接跳转自启动设置，请手动操作：\n\n'
               'vivo / iQOO：\n'
-              'i 管家 → 应用管理 → 权限管理 → 自启动 → 允许 Manalist；\n'
-              '设置 → 电池 → 后台耗电管理 → Manalist → 允许后台高耗电。\n\n'
+              'i 管家 → 应用管理 → 权限管理 → 自启动 → 允许 ManaList；\n'
+              '设置 → 电池 → 后台耗电管理 → ManaList → 允许后台高耗电。\n\n'
               '其他机型：\n'
-              '系统设置 → 应用管理 → Manalist → 允许自启动 / 后台运行 / '
+              '系统设置 → 应用管理 → ManaList → 允许自启动 / 后台运行 / '
               '电池不优化（名称因厂商而异）。'),
         ),
         actions: [
@@ -654,6 +655,22 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: _showRecentErrors,
+            ),
+          ]),
+          const Divider(height: 32),
+          _section('关于', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.info_outline, color: cs.onSurfaceVariant),
+              title: const Text('关于 ${AboutPage.appName}'),
+              subtitle: Text(
+                '版本 ${ArchiveExportService.appVersion}',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const AboutPage()),
+              ),
             ),
           ]),
         ],

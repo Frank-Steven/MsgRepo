@@ -157,7 +157,7 @@ class MsgRepoApp extends StatelessWidget {
       valueListenable: themeModeNotifier,
       builder: (context, mode, _) {
         return MaterialApp(
-          title: 'Manalist',
+          title: 'ManaList',
           debugShowCheckedModeBanner: false,
           theme: _lightTheme,
           darkTheme: _darkTheme,

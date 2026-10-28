@@ -71,7 +71,7 @@ class ArchiveImportService {
     // 1. manifest 校验（§5.3-1）：格式/版本不支持即拒绝并明示。
     final manifestEntry = entries['manifest.json'];
     if (manifestEntry == null) {
-      throw ArchiveImportException('不是 Manalist 存档：缺少 manifest.json');
+      throw ArchiveImportException('不是 ManaList 存档：缺少 manifest.json');
     }
     final Map<String, dynamic> manifest;
     try {
@@ -82,7 +82,7 @@ class ArchiveImportService {
     }
     if (manifest['format'] != ArchiveExportService.archiveFormat) {
       throw ArchiveImportException(
-          '不是 Manalist 存档（format=${manifest['format']}）');
+          '不是 ManaList 存档（format=${manifest['format']}）');
     }
     if (manifest['version'] != ArchiveExportService.archiveVersion) {
       throw ArchiveImportException(
