@@ -127,4 +127,4 @@
 | 阶段 4（任务合并 + markdown + 手动锚点） | 426a9cc | 已完成 |
 | 阶段 5（AndroidLocAI） | 6afbd81 | 已完成 |
 | 阶段 6（助理 + 待确认区） | ee1758c | 已完成 |
-| 阶段 7（inbox.triage + 存档导入/导出重写 + 改名 Manalist + 收尾） | — | 已完成（待提交） |
+| 阶段 7（inbox.triage + 存档导入/导出重写 + 改名 Manalist + 收尾） | c8fa147 | 已完成 |
