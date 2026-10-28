@@ -76,9 +76,12 @@ void main() {
       expect((await h('task.update', {'id': 'ghost', 'title': 'x'})),
           isA<ProposalValidationFailure>(),
           reason: '目标存在性校验');
-      expect((await h('inbox.triage', {'scope': {}})),
+      expect((await h('inbox.triage', {'scope': {'limit': 51}})),
           isA<ProposalValidationFailure>(),
-          reason: '阶段 7 预留工具明确拒绝');
+          reason: 'inbox.triage 上限 50，超出报错让 AI 分批（details §4）');
+      expect((await h('inbox.triage', {'scope': {'status': 'archived'}})),
+          isA<ProposalValidationFailure>(),
+          reason: 'scope.status 首版仅支持 pending');
       expect(await appDb.getProposals(), isEmpty, reason: '失败不落库');
     });
 

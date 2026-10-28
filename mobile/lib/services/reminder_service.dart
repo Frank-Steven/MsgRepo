@@ -29,8 +29,8 @@ AndroidScheduleMode scheduleModeFor({required bool exactAllowed}) =>
 /// 任务增删改/完成/归档由 database.dart 的 tasks 写方法触发 [rescheduleAll]
 /// 全量重排；应用启动时也重排一次（main.dart）。
 ///
-/// P1-4 / P1-5（2026-10-17）：
-/// - 重排不再用 cancelAll()，只取消「上次排过的任务提醒」，AI 完成通知不再被误清；
+/// P1-4 / E06：
+/// - 重排不用 cancelAll()，只取消「上次排过的任务提醒」；
 /// - 精确闹钟权限先查询，未授予时降级为 inexactAllowWhileIdle（提醒仍会响，
 ///   可能延迟数分钟），状态由 [exactAlarmsAllowed] 暴露给设置页；
 /// - 整个重排包在 try/catch 中并记录 [lastError]，不再静默失效。
@@ -42,14 +42,6 @@ class ReminderService {
   static const _channelId = 'msgrepo_reminders';
   static const _channelName = '任务提醒';
   static const _channelDesc = '有开始时间的任务到点本地提醒';
-
-  static const _aiChannelId = 'msgrepo_ai';
-  static const _aiChannelName = 'AI 处理';
-  static const _aiChannelDesc = 'AI 后台处理完成提醒';
-  static const _aiNotificationId = 0xA1;
-
-  /// U19-A：自动处理开始/结束的独立 id（不与「处理完成待确认」互相覆盖）
-  static const _aiAutoNotificationId = 0xA2;
 
   /// 已排上的任务提醒 id 列表（重排时只取消这些，避免波及别的通知）。
   static const _keyScheduledIds = 'reminder_scheduled_ids';
@@ -259,9 +251,9 @@ class ReminderService {
   ///
   /// 旧实现直接用 `taskId.hashCode & 0x7fffffff`：两个任务撞上同一 id 时，
   /// 后者的提醒会把前者覆盖掉（表现为「某个任务永远不提醒」）。
-  /// 这里以 hashCode 为起点做线性探测，并避开 AI 完成通知占用的 id。
+  /// 这里以 hashCode 为起点做线性探测。
   Map<String, int> assignNotificationIds(Iterable<String> taskIds) {
-    final used = <int>{_aiNotificationId, _aiAutoNotificationId};
+    final used = <int>{};
     final out = <String, int>{};
     var probe = 1;
     for (final id in taskIds) {
@@ -371,84 +363,4 @@ class ReminderService {
           priority: Priority.high,
         ),
       );
-
-  /// U19-A：自动触发处理时告知用户（后台/非消息页时唯一能察觉的提示）。
-  Future<void> notifyAutoStarted(int count) async {
-    if (!_initialized) return;
-    await _plugin.show(
-      _aiAutoNotificationId,
-      '已自动处理消息',
-      '$count 条未处理消息已提交 AI 处理（可在消息页查看进度）',
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _aiChannelId,
-          _aiChannelName,
-          channelDescription: _aiChannelDesc,
-          importance: Importance.defaultImportance,
-        ),
-      ),
-    );
-  }
-
-  /// U19-A：自动确认完成后告知（后台场景下用户唯一的「钱花在哪」反馈）。
-  /// 文案按真实数量分支：一条消息可能建 0~3 个任务，命中已有任务时 0 个，
-  /// 所以不能笼统写「任务已写入日程」（子代理审查指出）。
-  Future<void> notifyAutoFinished(int confirmed,
-      {int createdTasks = 0, int failed = 0}) async {
-    if (!_initialized) return;
-    final buf = StringBuffer('已自动确认 $confirmed 条消息');
-    if (createdTasks > 0) buf.write('，新建 $createdTasks 个任务');
-    if (failed > 0) buf.write('，$failed 条处理失败');
-    await _plugin.show(
-      _aiAutoNotificationId,
-      '自动处理完成',
-      buf.toString(),
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _aiChannelId,
-          _aiChannelName,
-          channelDescription: _aiChannelDesc,
-          importance: Importance.defaultImportance,
-        ),
-      ),
-    );
-  }
-
-  /// U19-A：自动确认一条都没成功（本轮全失败）时告知，避免用户只看到「已提交」。
-  Future<void> notifyAutoFailed(int failed) async {
-    if (!_initialized) return;
-    await _plugin.show(
-      _aiAutoNotificationId,
-      '自动处理未产生结果',
-      failed > 0 ? '$failed 条消息处理失败，可在消息页查看' : '本轮没有可确认的结果',
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _aiChannelId,
-          _aiChannelName,
-          channelDescription: _aiChannelDesc,
-          importance: Importance.defaultImportance,
-        ),
-      ),
-    );
-  }
-
-  /// AI 后台处理完成的一次性通知（v2.6.2）：面板收起期间跑完时提醒回来确认结果。
-  /// 普通通知即可，不引入前台服务。
-  /// 注意：任务重排只取消任务提醒 id，不再 cancelAll，本条通知不会被误清（P1-4）。
-  Future<void> notifyAiProcessingDone(int pendingConfirm, int failed) async {
-    if (!_initialized) return;
-    await _plugin.show(
-      _aiNotificationId,
-      'AI 处理完成',
-      '$pendingConfirm 条结果待确认${failed > 0 ? '，$failed 条失败' : ''}',
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _aiChannelId,
-          _aiChannelName,
-          channelDescription: _aiChannelDesc,
-          importance: Importance.defaultImportance,
-        ),
-      ),
-    );
-  }
 }

@@ -7,13 +7,11 @@ import 'package:flutter/scheduler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'services/ai_processing.dart';
 import 'services/app_ui_state.dart';
 import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
 import 'ui/assistant/conversations_page.dart';
 import 'ui/library/library_page.dart';
-import 'ui/messages/ai_panel.dart';
 import 'ui/splash_gate.dart';
 import 'ui/tasks/tasks_page.dart';
 import 'ui/theme_fader.dart';
@@ -156,7 +154,7 @@ class MsgRepoApp extends StatelessWidget {
       valueListenable: themeModeNotifier,
       builder: (context, mode, _) {
         return MaterialApp(
-          title: 'MsgRepo',
+          title: 'Manalist',
           debugShowCheckedModeBanner: false,
           theme: _lightTheme,
           darkTheme: _darkTheme,
@@ -256,11 +254,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     return Scaffold(
       body: Column(
         children: [
-          AnimatedBuilder(
-            animation: AiProcessingService.instance,
-            builder: (context, _) => _buildAiBanner(),
-          ),
-          // O10：RepaintBoundary 把页面栈的重绘与横幅/导航栏隔开，
+          // O10：RepaintBoundary 把页面栈的重绘与导航栏隔开，
           // 主题过渡时不必带着整屏一起重绘。
           Expanded(
             child: RepaintBoundary(
@@ -275,67 +269,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       bottomNavigationBar: AnimatedBuilder(
         animation: MessageBadges.instance,
         builder: (context, _) => _buildNavBar(),
-      ),
-    );
-  }
-
-  /// 全局 AI 处理横幅（U19-G）：任何 tab 都能看到进度，点击回到消息页并打开面板。
-  Widget _buildAiBanner() {
-    final session = AiProcessingService.instance.session;
-    if (session == null) return const SizedBox.shrink();
-    final running = session.running;
-    final pending = session.pendingConfirmCount;
-    final failed = session.failCount;
-    if (!running && pending == 0 && failed == 0) return const SizedBox.shrink();
-    final cs = Theme.of(context).colorScheme;
-    final String text;
-    if (running) {
-      text = 'AI 处理消息中 ${session.settledCount}/${session.enqueuedCount}'
-          ' · 待确认 $pending';
-    } else if (pending > 0) {
-      text = 'AI 处理消息完成：$pending 条结果待确认'
-          '${failed > 0 ? '，$failed 条失败' : ''}';
-    } else {
-      text = 'AI 处理消息完成：$failed 条失败';
-    }
-    final topInset = MediaQuery.of(context).padding.top;
-    return Material(
-      color: cs.primaryContainer,
-      child: InkWell(
-        onTap: () async {
-          setState(() {
-            _index = AppUiState.libraryTabIndex;
-            _builtTabs.add(AppUiState.libraryTabIndex);
-          });
-          AppUiState.instance.openLibrary(AppUiState.librarySectionMessages);
-          await _libraryKey.currentState?.reloadMessages();
-          if (!mounted) return;
-          await showAiProcessPanel(context,
-              onChanged: () => _libraryKey.currentState?.reloadMessages());
-        },
-        child: Padding(
-          // 页面本身不带 SafeArea，横幅要自己避开状态栏（真机截图发现压在时间上）
-          padding: EdgeInsets.fromLTRB(12, 6 + topInset, 12, 6),
-          child: Row(
-            children: [
-              if (running)
-                const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-              else
-                Icon(Icons.check_circle_outline,
-                    size: 16, color: cs.onPrimaryContainer),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(text,
-                    style:
-                        TextStyle(fontSize: 12, color: cs.onPrimaryContainer)),
-              ),
-              Icon(Icons.chevron_right, size: 16, color: cs.onPrimaryContainer),
-            ],
-          ),
-        ),
       ),
     );
   }

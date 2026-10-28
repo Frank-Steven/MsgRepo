@@ -662,15 +662,6 @@ class AppDatabase {
     return {for (final r in rows) r['content_hash'] as String};
   }
 
-  /// 已处理消息的 content_hash 集（v2.6.1 省 Token：同内容已评估过的
-  /// pending 重复消息跳过送模型）。
-  Future<Set<String>> getProcessedContentHashes() async {
-    final db = await database;
-    final rows = await db.query('messages',
-        columns: ['content_hash'], where: "status = 'processed'");
-    return {for (final r in rows) r['content_hash'] as String};
-  }
-
   /// 批量插入消息（单事务；调用方负责 content_hash 预去重，v2.6 导入用）。
   Future<void> insertMessagesBatch(List<Message> messages) async {
     final db = await database;
@@ -1020,48 +1011,7 @@ class AppDatabase {
     return rows.map(Task.fromRow).toList();
   }
 
-  /// AI 确认批量落库：**一个事务 + batch**。
-  ///
-  /// 2026-10-20 性能修复：原确认流对每条消息做 6~8 次独立 SQL（预取旧关联、
-  /// 逐条建任务、改优先级/状态、解绑、逐条建关联），上千条时是上万次串行 await，
-  /// 界面在点「确认」后会明显卡住。现在统一攒好再一次性提交。
-  ///
-  /// v8：关联落点从 message_task_links 改为锚点——每条消息的旧锚点清掉、
-  /// 按 linkIds 重建（marker 追加到正文末尾，edited_at 留痕、content_hash 重算）。
-  Future<void> applyAiConfirmBatch(
-      List<
-              ({
-                String messageId,
-                String priority,
-                List<Task> newTasks,
-                List<String> linkIds,
-              })>
-          items) async {
-    if (items.isEmpty) return;
-    final db = await database;
-    await db.transaction((txn) async {
-      final batch = txn.batch();
-      for (final it in items) {
-        for (final task in it.newTasks) {
-          batch.insert('tasks', task.toRow());
-        }
-        batch.update(
-          'messages',
-          {'priority': it.priority, 'status': MessageStatus.processed},
-          where: 'id = ?',
-          whereArgs: [it.messageId],
-        );
-      }
-      await batch.commit(noResult: true);
-      for (final it in items) {
-        await replaceMessageAnchorsInto(txn, it.messageId, it.linkIds,
-            createdBy: AnchorCreatedBy.ai);
-      }
-    });
-    _rescheduleReminders();
-  }
-
-  /// 全部「进行中」任务（AI 确认前查重复用；写操作量小，不做分页）。
+  /// 全部「进行中」任务（任务复用查询；写操作量小，不做分页）。
   /// 已完成/已放弃的任务不参与复用：同一件事再次出现时应当新建。
   Future<List<Task>> getActiveTasks() async {
     final db = await database;

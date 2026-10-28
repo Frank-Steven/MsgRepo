@@ -1,8 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:msgrepo_mobile/services/categories.dart';
+import 'package:msgrepo_mobile/services/assistant/tools/inbox_triage.dart';
 
 /// 提示词词汇一致性守卫：分类提示必须用输出 schema 的词汇（red/yellow/green/junk），
 /// 不能再出现 v1 的 P0-P3 —— 两套词汇会让模型多一层无谓的映射负担。
+/// （分类表已随批管线删除迁移进 inbox_triage.dart，阶段 7。）
 void main() {
   test('所有分类 priorityHints 都不含 P0-P3', () {
     for (final c in kPromptCategories) {

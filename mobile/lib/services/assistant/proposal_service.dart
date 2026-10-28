@@ -7,6 +7,7 @@ import 'models.dart';
 import 'proposal_executor.dart';
 import 'tool_parser.dart';
 import 'tool_spec.dart';
+import 'tools/inbox_triage.dart';
 
 /// 工具块处理结果（design-v3-details §2.3）。
 sealed class ProposalOutcome {
@@ -72,7 +73,7 @@ class ProposalService {
       return ProposalValidationFailure('未知工具: $tool');
     }
     if (spec.reserved) {
-      // inbox.triage（阶段 7 提供）等预留工具：明确拒绝而不是静默忽略。
+      // 预留工具（当前无）：明确拒绝而不是静默忽略。
       return ProposalValidationFailure('工具 $tool 暂不可用（将在后续版本提供）');
     }
 
@@ -80,6 +81,17 @@ class ProposalService {
     if (error != null) return ProposalValidationFailure(error);
 
     if (spec.kind == ToolKind.read) {
+      // inbox.triage 是提案生成器（details §4）：只读执行免审批，
+      // 产出全部落待确认区（同一 batch_id），对话中回汇总文本。
+      if (tool == ToolNames.inboxTriage) {
+        final summary = await InboxTriage.instance.run(
+          conversationId: conversationId,
+          batchId: batchId,
+          idPrefix: proposalIdFor(batchId, block.index),
+          args: args,
+        );
+        return ReadToolResult(summary);
+      }
       // 只读工具：无需审批，直接执行，结果由上层回注对话。
       final text = await ProposalExecutor.instance.executeReadTool(tool, args);
       return ReadToolResult(text);
@@ -346,6 +358,9 @@ class ProposalService {
           return '消息不存在: ${args['messageId']}';
         }
         return null;
+
+      case ToolNames.inboxTriage:
+        return InboxTriage.validateScope(args);
 
       default:
         return '未知工具: $tool';

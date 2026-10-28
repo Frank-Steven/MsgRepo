@@ -157,7 +157,7 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
                     FadeTransition(
                       opacity: textFade,
                       child: const Text(
-                        'MsgRepo',
+                        'Manalist',
                         key: ValueKey('splash-name'),
                         textAlign: TextAlign.center,
                         style: TextStyle(

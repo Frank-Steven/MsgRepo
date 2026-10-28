@@ -82,7 +82,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     final name = tester.widget<Text>(find.byKey(const ValueKey('splash-name')));
-    expect(name.data, 'MsgRepo');
+    expect(name.data, 'Manalist');
     expect(name.style?.fontSize, 21);
     expect(name.style?.color, Colors.white);
     // 2026-10-24 用户：两行都不要下划线

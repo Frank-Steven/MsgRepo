@@ -70,6 +70,7 @@ class ArchiveExportService {
         notebooks: await txn.query('notebooks'),
         chapters: await txn.query('chapters'),
         notes: await txn.query('notes'),
+        files: await txn.query('files'),
       );
     });
 
@@ -103,11 +104,35 @@ class ArchiveExportService {
       addText('library/notes/${r['id']}.md', _noteMarkdown(r));
     }
 
-    // 5. 附件 → library/files/<fileId>__<safeName>（§5.2-3）：经
-    //    attachment_store 解析本地文件复制进 zip，files.json 记录 zip 内相对路径。
+    // 5. 文件 → library/files/<fileId>__<safeName>（§5.2-3）：
+    //    files 表（库·文件区）直读，path 重写为 zip 内相对路径；
+    //    消息附件（v2 Attachment 模型）同样经 attachment_store 打包，
+    //    source 标 'message_attachment'（导入侧据此不回填 files 表）。
     final filesJson = <Map<String, Object?>>[];
     final seenFileIds = <String>{};
     var skippedFiles = 0;
+    for (final r in snapshot.files) {
+      final id = r['id'] as String;
+      if (!seenFileIds.add(id)) continue;
+      final file = File(r['local_path'] as String);
+      if (!file.existsSync()) {
+        skippedFiles++;
+        continue;
+      }
+      final bytes = await file.readAsBytes();
+      final name = r['name'] as String;
+      final zipPath = 'library/files/${id}__${_safeFileName(name)}';
+      archive.addFile(ArchiveFile(zipPath, bytes.length, bytes));
+      filesJson.add({
+        'id': id,
+        'name': name,
+        'mime_type': r['mime_type'],
+        'size': r['size'] ?? bytes.length,
+        'path': zipPath,
+        'source': r['source'],
+        'created_at': (r['created_at'] as num).toInt(),
+      });
+    }
     for (final r in snapshot.messages) {
       final attachments =
           (jsonDecode(r['attachments'] as String) as List<dynamic>)

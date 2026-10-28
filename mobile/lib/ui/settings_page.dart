@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -5,13 +6,11 @@ import 'theme_fader.dart';
 import '../main.dart' show themeModeNotifier, themeModeFromString;
 import 'shared/app_icon.dart';
 import 'shared/segmented_selector.dart';
-import '../services/ai_client.dart';
 import '../services/app_filter_service.dart';
 import '../services/archive_export_service.dart';
+import '../services/archive_import_service.dart';
 import '../services/notification_bridge.dart';
 import '../services/reminder_service.dart';
-import '../services/auto_process.dart';
-import '../services/prompt_rules.dart';
 import '../../services/app_log.dart';
 
 /// B03：切到「仅指定应用」前是否需要先让用户选应用。
@@ -36,8 +35,10 @@ AppFilterConfig? filterConfigAfterSelection({
       mode: AppFilterConfig.modeAllowlist, packages: merged.toList());
 }
 
-/// 设置页（design-v3 §3.5）：外观 / 自定义提示词 / 自动处理 / 数据 / 采集过滤 /
-/// 后台保活。「AI 接口配置 / 配对 / 端点管理」段已迁入助理页（model_picker）。
+/// 设置页（design-v3 §3.5）：外观 / 数据 / 采集过滤 / 后台保活。
+/// 「AI 接口配置 / 配对 / 端点管理」段已迁入助理页（model_picker）；
+/// v2 的「自定义提示词」「自动处理」段随批处理管线删除（阶段 7），
+/// 批量评估由助理工具 inbox.triage 承担。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
@@ -46,23 +47,11 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  final _promptController = TextEditingController();
-
-  /// 「类型 → 处理方式」规则行（U2）：每行两个输入框
-  final List<({TextEditingController type, TextEditingController treatment})>
-      _ruleRows = [];
-
-  /// 提示词区是否展开（U2：整块可折叠）
-  bool _promptExpanded = true;
-
   String _themeMode = 'system';
-
-  /// U19 自动处理：开关 + 未处理阈值（用户可调，合作者 2026-10-18 建议）
-  bool _autoProcessEnabled = true;
-  int _autoThreshold = kAutoProcessThreshold;
 
   bool _listenerEnabled = false;
   bool _exporting = false;
+  bool _importing = false;
   bool _batteryOptimized = true; // true = 已加入白名单（不需要再优化）
   bool _exactAlarms = true; // 精确闹钟权限（Android 12+ 可能需要手动开启）
   AppFilterConfig _filterConfig = const AppFilterConfig();
@@ -74,20 +63,8 @@ class _SettingsPageState extends State<SettingsPage> {
     _load();
   }
 
-  @override
-  void dispose() {
-    _promptController.dispose();
-    for (final r in _ruleRows) {
-      r.type.dispose();
-      r.treatment.dispose();
-    }
-    super.dispose();
-  }
-
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    final autoEnabled = await AutoProcessState.enabled();
-    final autoThreshold = await AutoProcessState.threshold();
     final listenerEnabled =
         await NotificationBridge.instance.isListenerEnabled();
     final batteryOptimized =
@@ -95,31 +72,14 @@ class _SettingsPageState extends State<SettingsPage> {
     final exactAlarms = await ReminderService.instance.refreshExactAlarms();
     final filterConfig = await AppFilterService.instance.load();
     final seenApps = await AppFilterService.instance.getSeenApps();
-    final rules = await PromptRulesStore.load();
     if (!mounted) return;
     setState(() {
       _themeMode = prefs.getString('theme_mode') ?? 'system';
-      _promptController.text = prefs.getString(AiClient.keyCustomPrompt) ?? '';
-      for (final r in _ruleRows) {
-        r.type.dispose();
-        r.treatment.dispose();
-      }
-      _ruleRows
-        ..clear()
-        ..addAll([
-          for (final rule in rules)
-            (
-              type: TextEditingController(text: rule.type),
-              treatment: TextEditingController(text: rule.treatment),
-            ),
-        ]);
       _listenerEnabled = listenerEnabled;
       _batteryOptimized = batteryOptimized;
       _exactAlarms = exactAlarms;
       _filterConfig = filterConfig;
       _knownAppNames = {for (final a in seenApps) a.packageName: a.appName};
-      _autoProcessEnabled = autoEnabled;
-      _autoThreshold = autoThreshold;
     });
   }
 
@@ -141,146 +101,6 @@ class _SettingsPageState extends State<SettingsPage> {
       () => themeModeNotifier.value = themeModeFromString(mode),
     );
     if (mounted) setState(() => _themeMode = mode);
-  }
-
-  // ---- 自定义提示词 ----
-
-  Future<void> _savePrompt(String value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(AiClient.keyCustomPrompt, value.trim());
-  }
-
-  // ---- 分类规则（U2）：类型 → 处理方式 ----
-
-  Future<void> _saveRules() async {
-    await PromptRulesStore.save([
-      for (final r in _ruleRows)
-        PromptRule(type: r.type.text, treatment: r.treatment.text),
-    ]);
-  }
-
-  void _addRuleRow() {
-    setState(() => _ruleRows.add((
-          type: TextEditingController(),
-          treatment: TextEditingController(),
-        )));
-  }
-
-  void _removeRuleRow(int index) {
-    if (index < 0 || index >= _ruleRows.length) return;
-    final row = _ruleRows.removeAt(index);
-    row.type.dispose();
-    row.treatment.dispose();
-    setState(() {});
-    _saveRules();
-  }
-
-  /// 提示词区（U2）：可折叠；上半是规则表，下半是自由文本。
-  Widget _buildPromptSection(ColorScheme cs) {
-    final validCount = _ruleRows
-        .where((r) =>
-            r.type.text.trim().isNotEmpty && r.treatment.text.trim().isNotEmpty)
-        .length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        InkWell(
-          onTap: () => setState(() => _promptExpanded = !_promptExpanded),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Row(
-              children: [
-                Text('自定义提示词',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(width: 8),
-                if (validCount > 0)
-                  Text('$validCount 条规则',
-                      style:
-                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-                const Spacer(),
-                Icon(
-                    _promptExpanded ? Icons.expand_less : Icons.expand_more,
-                    color: cs.onSurfaceVariant),
-              ],
-            ),
-          ),
-        ),
-        if (_promptExpanded) ...[
-          Text('左列写消息类型，右列写处理方式；两列都填才生效，顺序即优先级。',
-              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-          const SizedBox(height: 8),
-          for (var i = 0; i < _ruleRows.length; i++) _buildRuleRow(i, cs),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: _addRuleRow,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('添加规则'),
-            ),
-          ),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _promptController,
-            minLines: 2,
-            maxLines: 5,
-            decoration: const InputDecoration(
-              labelText: '补充要求（自由文本，可选）',
-              hintText: '例：还能让 AI 识别学习委员是谁',
-              helperText: '两处都会原样附加到系统提示词之后，保存即生效',
-              helperMaxLines: 2,
-              border: OutlineInputBorder(),
-            ),
-            onChanged: _savePrompt,
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildRuleRow(int index, ColorScheme cs) {
-    final row = _ruleRows[index];
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 4,
-            child: TextField(
-              controller: row.type,
-              decoration: const InputDecoration(
-                labelText: '消息类型',
-                hintText: '广告 / 验证码',
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-              onChanged: (_) => _saveRules(),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            child: Icon(Icons.arrow_forward, size: 16, color: cs.onSurfaceVariant),
-          ),
-          Expanded(
-            flex: 5,
-            child: TextField(
-              controller: row.treatment,
-              decoration: const InputDecoration(
-                labelText: '处理方式',
-                hintText: '当作营销 / 忽略',
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-              onChanged: (_) => _saveRules(),
-            ),
-          ),
-          IconButton(
-            tooltip: '删除这一行',
-            icon: const Icon(Icons.close, size: 18),
-            onPressed: () => _removeRuleRow(index),
-          ),
-        ],
-      ),
-    );
   }
 
   // ---- 采集过滤 ----
@@ -354,7 +174,7 @@ class _SettingsPageState extends State<SettingsPage> {
     await _saveFilter(next);
   }
 
-  // ---- 数据（v2.9 过渡版本：存档导出）----
+  // ---- 数据（v3 存档导出/导入，design-v3-details §5）----
 
   Future<void> _exportArchive() async {
     if (_exporting) return;
@@ -393,6 +213,60 @@ class _SettingsPageState extends State<SettingsPage> {
       _toast('导出失败：$e');
     } finally {
       if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  /// 导入存档（design-v3-details §5.3）：选 zip → 格式校验 → 空库守卫 →
+  /// 单事务入库 → 展示统计与一致性警告。
+  Future<void> _importArchive() async {
+    if (_importing) return;
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['zip'],
+    );
+    final path = picked?.files.single.path;
+    if (path == null || !mounted) return;
+    setState(() => _importing = true);
+    try {
+      final result =
+          await ArchiveImportService.instance.importArchive(path);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('导入完成'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('任务 ${result.tasks} 条 · 消息 ${result.messages} 条 · '
+                  '笔记 ${result.notes} 篇 · 文件 ${result.files} 个 · '
+                  '锚点 ${result.anchors} 条'),
+              if (result.warnings.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text('警告（${result.warnings.length} 条，不阻断导入）：',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                for (final w in result.warnings)
+                  Text('· $w', style: const TextStyle(fontSize: 12)),
+              ],
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    } on ArchiveImportException catch (e) {
+      _toast(e.message);
+    } catch (e) {
+      _toast('导入失败：$e');
+    } finally {
+      if (mounted) setState(() => _importing = false);
     }
   }
 
@@ -470,10 +344,10 @@ class _SettingsPageState extends State<SettingsPage> {
         content: const SingleChildScrollView(
           child: Text('未能直接跳转自启动设置，请手动操作：\n\n'
               'vivo / iQOO：\n'
-              'i 管家 → 应用管理 → 权限管理 → 自启动 → 允许 MsgRepo；\n'
-              '设置 → 电池 → 后台耗电管理 → MsgRepo → 允许后台高耗电。\n\n'
+              'i 管家 → 应用管理 → 权限管理 → 自启动 → 允许 Manalist；\n'
+              '设置 → 电池 → 后台耗电管理 → Manalist → 允许后台高耗电。\n\n'
               '其他机型：\n'
-              '系统设置 → 应用管理 → MsgRepo → 允许自启动 / 后台运行 / '
+              '系统设置 → 应用管理 → Manalist → 允许自启动 / 后台运行 / '
               '电池不优化（名称因厂商而异）。'),
         ),
         actions: [
@@ -524,50 +398,6 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ]),
           const Divider(height: 32),
-          _buildPromptSection(cs),
-          const Divider(height: 32),
-          _section('自动处理', [
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('未处理达到阈值时自动处理'),
-              subtitle: const Text('不用手动点「自动处理」；跑完会自动确认结果'),
-              value: _autoProcessEnabled,
-              onChanged: (v) async {
-                await AutoProcessState.setEnabled(v);
-                if (mounted) setState(() => _autoProcessEnabled = v);
-              },
-            ),
-            Row(
-              children: [
-                const Text('阈值'),
-                Expanded(
-                  child: Slider(
-                    value: _autoThreshold.toDouble(),
-                    min: kAutoProcessThresholdMin.toDouble(),
-                    max: kAutoProcessThresholdMax.toDouble(),
-                    divisions:
-                        (kAutoProcessThresholdMax - kAutoProcessThresholdMin) ~/ 50,
-                    label: '$_autoThreshold 条',
-                    onChanged: _autoProcessEnabled
-                        ? (v) =>
-                            setState(() => _autoThreshold = (v / 50).round() * 50)
-                        : null,
-                    onChangeEnd: (v) async {
-                      final t = (v / 50).round() * 50;
-                      await AutoProcessState.setThreshold(t);
-                      if (mounted) setState(() => _autoThreshold = t);
-                    },
-                  ),
-                ),
-                Text('$_autoThreshold 条'),
-              ],
-            ),
-            Text(
-              '上限 500：消息页一次只加载 500 条，再高就数不到了',
-              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-            ),
-          ]),
-          const Divider(height: 32),
           _section('数据', [
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -584,6 +414,22 @@ class _SettingsPageState extends State<SettingsPage> {
                       child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.chevron_right),
               onTap: _exporting ? null : _exportArchive,
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.unarchive_outlined, color: cs.onSurfaceVariant),
+              title: const Text('导入存档'),
+              subtitle: Text(
+                '从 zip 存档还原全部数据（仅空库可导入，不合并）',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: _importing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.chevron_right),
+              onTap: _importing ? null : _importArchive,
             ),
           ]),
           const Divider(height: 32),

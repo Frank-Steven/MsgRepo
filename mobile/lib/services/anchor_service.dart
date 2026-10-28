@@ -97,7 +97,7 @@ Future<void> residualizeAnchorsForTaskInto(
 
 /// 重建某条消息的全部锚点（事务内实现）：清掉旧锚点行与正文 marker，
 /// 再按 [taskIds] 顺序在正文末尾以空格分隔追加新 marker 并建行。
-/// 悬挂任务 id（已不存在）跳过。供 AI 确认批（applyAiConfirmBatch）与其撤销用。
+/// 悬挂任务 id（已不存在）跳过。供 replaceMessageAnchors 与撤销路径用。
 Future<void> replaceMessageAnchorsInto(
     DatabaseExecutor db, String messageId, List<String> taskIds,
     {String createdBy = AnchorCreatedBy.user}) async {

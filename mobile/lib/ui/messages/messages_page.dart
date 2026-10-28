@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 
 import '../../models/message.dart';
 import '../../models/task.dart';
-import '../../services/ai_processing.dart';
 import '../../services/anchor_service.dart';
 import '../../services/assistant/models.dart';
 import '../../services/database.dart';
@@ -13,15 +12,12 @@ import '../../services/notification_bridge.dart';
 import '../../services/undo_service.dart';
 import '../add_message_page.dart';
 import '../tasks/task_editor.dart';
-import 'ai_panel.dart';
 import 'archived_page.dart';
 import 'message_detail_sheet.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
-import '../../services/fold_markers.dart';
 import '../../services/app_ui_state.dart';
-import '../../services/reminder_service.dart';
-import '../../services/auto_process.dart';
+import '../../services/fold_markers.dart';
 
 /// v2 消息主列表页（设计 §5.1）：分组吸顶列表 + Chip 筛选行 + 左滑块状菜单
 /// + 多选批量操作。归档消息在独立页面（ArchivedMessagesPage）。
@@ -65,48 +61,17 @@ class MessagesPageState extends State<MessagesPage> {
   /// 通知监听权限（v2.5：null=未知；false 时顶部显示恢复引导横幅）。
   bool? _listenerEnabled;
 
-  /// U19：自动处理正在执行（防止重入）
-  bool _autoProcessRunning = false;
-
   StreamSubscription<int>? _sub;
-
-  /// AI 处理服务的粗粒度版本号快照（v2.6.2）：token 高频事件不重建整页，
-  /// 只在会话状态变化（开始/逐条结果/完成/确认/清空）时 setState。
-  int _aiRevision = 0;
-
-  /// 自动处理的定时兜底（2026-10-20，真机验收发现）：
-  /// 原来只在 reload() 尾部判断，而 reload 只在「来新消息 / 下拉刷新 / 切回消息页」时发生。
-  /// 如果积压已过阈值但既没新消息也没人切 tab，就会一直不触发。
-  /// 这里每 5 分钟评估一次（_maybeAutoProcess 自带阈值/冷却/互斥保护）。
-  Timer? _autoTick;
 
   @override
   void initState() {
     super.initState();
-    _autoTick = Timer.periodic(const Duration(minutes: 5), (_) {
-      if (!mounted) return;
-      unawaited(_maybeAutoProcess());
-    });
     _sub = NotificationBridge.instance.onNewMessages.listen((_) => reload());
-    _aiRevision = AiProcessingService.instance.revision;
-    AiProcessingService.instance.addListener(_onAiProcessingChanged);
     reload();
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_aiPendingRebuild && AppUiState.instance.messagesVisible) {
-      _aiPendingRebuild = false;
-      _scheduleAiSetState();
-    }
-  }
-
-  @override
   void dispose() {
-    _aiSetStateTimer?.cancel();
-    _autoTick?.cancel();
-    AiProcessingService.instance.removeListener(_onAiProcessingChanged);
     _sub?.cancel();
     super.dispose();
   }
@@ -120,38 +85,6 @@ class MessagesPageState extends State<MessagesPage> {
     } catch (e, st) {
       AppLog.instance.warn('messages.badge', e, st);
     }
-  }
-
-  Timer? _aiSetStateTimer;
-  bool _aiPendingRebuild = false;
-
-  /// AI 事件驱动的重建。
-  ///
-  /// 2026-10-20（O09）：真机上 AI 处理进行中时，待办列表连续多次 swipe 完全无位移，
-  /// 处理结束即恢复。怀疑是「每条消息一个 revision → 本页 setState」在离屏时也
-  /// 每帧重建（IndexedStack 会构建全部子页），叠加大列表重建把输入事件挤掉。
-  /// 处置：① 合并到 200ms 一次；② 消息页不可见时**不重建**，等切回来再补。
-  void _onAiProcessingChanged() {
-    final rev = AiProcessingService.instance.revision;
-    if (!mounted || rev == _aiRevision) return;
-    _aiRevision = rev;
-    final s = AiProcessingService.instance.session;
-    final drained = s == null || (!s.running && s.outcomes.isEmpty);
-    if (drained) unawaited(_updateBadge());
-    if (!AppUiState.instance.messagesVisible) {
-      _aiPendingRebuild = true; // 离屏：攒着，切回来时再重建
-      return;
-    }
-    _scheduleAiSetState();
-  }
-
-  void _scheduleAiSetState() {
-    if (_aiSetStateTimer != null) return;
-    _aiSetStateTimer = Timer(const Duration(milliseconds: 200), () {
-      _aiSetStateTimer = null;
-      if (!mounted) return;
-      setState(() {});
-    });
   }
 
   /// 重新加载列表（供 GlobalKey 外部触发）。
@@ -212,8 +145,6 @@ class MessagesPageState extends State<MessagesPage> {
     } catch (e, st) { AppLog.instance.warn('messages.listener-state', e, st); }
     // U19-B：更新底部导航「消息」角标（取 DB 的未处理数，不受页面 500 条上限影响）
     await _updateBadge();
-    // U19：未处理堆到阈值时自动提交处理（放在 reload 末尾，避免与首帧竞争）
-    await _maybeAutoProcess();
   }
 
   /// 某条消息锚点连接的任务 id（v8）：优先锚点表，回退历史只读旧列。
@@ -373,143 +304,6 @@ class MessagesPageState extends State<MessagesPage> {
     }
     _conversationCache[source.key] = groups;
     return groups;
-  }
-
-  // ---- AI 处理（设计 §8：路由 + 流式面板）----
-
-  /// 发起 AI 处理。[reprocess]=true 仅用于单条左滑「重新处理」——
-  /// 已 processed 的消息只有这条路径允许再次发起（v2.6.2）。
-  /// v2.6.4 连续排队：随时可追加，挂到队列尾部按序处理，不等上一批跑完。
-  /// U19：未处理消息达到阈值时自动提交处理。
-  ///
-  /// **候选集取自数据库，不依赖页面列表**（2026-10-20 修）：此前用 `_messages`，
-  /// 而页面一次只加载 500 条，于是「DB 里 2000+ 未处理」只会送 500 条去处理。
-  /// 现在：阈值按 DB 的 pending 总数判断，每轮只取最早的一批（kAutoProcessBatchSize）。
-  Future<void> _maybeAutoProcess() async {
-    if (_autoProcessRunning) return;
-    if (!await AutoProcessState.enabled()) return;
-    final threshold = await AutoProcessState.threshold();
-    final pendingTotal = await _db.countMessages(status: MessageStatus.pending);
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final lastAt = await AutoProcessState.lastRunAt();
-    final svc = AiProcessingService.instance;
-    final ok = shouldAutoProcess(
-      pendingCount: pendingTotal,
-      alreadyProcessing: svc.running,
-      lastAutoAtMs: lastAt,
-      nowMs: nowMs,
-      threshold: threshold,
-    );
-    if (!ok || !mounted) return;
-
-    _autoProcessRunning = true;
-    AppLog.instance.warn('auto-process',
-        'DB 未处理 $pendingTotal 条 ≥ 阈值 $threshold，开始连续处理（每批 $kAutoProcessBatchSize）');
-    if (AppUiState.instance.messagesVisible) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('未处理 $pendingTotal 条（阈值 $threshold），开始自动处理')));
-    }
-
-    var pendingBefore = pendingTotal;
-    var batches = 0;
-    var totalSubmitted = 0;
-    try {
-      // 连续清积压：每批跑完（含自动确认）再取下一批，直到低于阈值或无进展
-      while (mounted && batches < kAutoProcessMaxBatches) {
-        final sessionIds = <String>{
-          for (final o in svc.session?.outcomes ?? const <AiOutcome>[])
-            o.message.id,
-        };
-        final candidates = (await _db.getMessages(
-          status: MessageStatus.pending,
-          limit: kAutoProcessBatchSize,
-          oldestFirst: true, // 先清最早的积压
-        ))
-            .where((m) =>
-                !sessionIds.contains(m.id) && !svc.isProcessing(m.id))
-            .toList();
-        if (candidates.isEmpty) break;
-
-        final ids = [for (final m in candidates) m.id];
-        // 只对本次自动提交的这些消息自动确认（用户手动追加的不受影响）
-        svc.armAutoConfirm(ids);
-        final added = await _processWithAi(ids, auto: true, openPanel: batches == 0);
-        if (added == 0) {
-          svc.disarmAutoConfirm();
-          break;
-        }
-        totalSubmitted += added;
-        batches++;
-        // 等这一批跑完（排空 + 自动确认）再决定要不要继续
-        await svc.idle;
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-        await AutoProcessState.markRun(DateTime.now().millisecondsSinceEpoch);
-
-        final after = await _db.countMessages(status: MessageStatus.pending);
-        AppLog.instance.warn('auto-process',
-            '第 $batches 批完成：提交 $totalSubmitted 条，剩余未处理 $after 条（阈值 $threshold）');
-        if (after >= pendingBefore) break; // 没有进展，别硬跑
-        pendingBefore = after;
-        if (after < threshold) break; // 已降到阈值以下，收工
-      }
-    } catch (e, st) {
-      svc.disarmAutoConfirm();
-      AppLog.instance.warn('auto-process', e, st);
-    } finally {
-      _autoProcessRunning = false;
-    }
-  }
-  /// 返回实际入队条数（0 表示全部被过滤/跳过）。
-  Future<int> _processWithAi(List<String> ids,
-      {bool reprocess = false, bool auto = false, bool openPanel = true}) async {
-    final msgs = await _db.getMessagesByIds(ids);
-    if (msgs.isEmpty || !mounted) return 0;
-    // 保持传入顺序（多选时为用户点选顺序）
-    final order = {for (var i = 0; i < ids.length; i++) ids[i]: i};
-    msgs.sort(
-        (a, b) => (order[a.id] ?? ids.length).compareTo(order[b.id] ?? ids.length));
-    // v2.6.1/v2.6.2：选择集构建处统一过滤（不依赖面板拦截）——正在处理中/
-    // 已 processed（非显式重新处理）/同内容已有 processed 记录的重复消息跳过
-    final svc = AiProcessingService.instance;
-    final processedHashes = await _db.getProcessedContentHashes();
-    if (!mounted) return 0;
-    final (toProcess, skipped) = filterProcessable(
-      msgs,
-      reprocess: reprocess,
-      processingIds: svc.processingIds,
-      processedHashes: processedHashes,
-    );
-    // v2.6.4：追加进队列时再按会话内 id 去重（队列/处理中/待确认结果）
-    final (added, skippedInSession) = svc.enqueue(toProcess);
-    final parts = <String>[
-      if (skipped['processed'] case final n?) '$n 条已处理',
-      if (skipped['processing'] case final n?) '$n 条正在处理',
-      if (skipped['duplicate'] case final n?) '$n 条重复内容',
-      if (skippedInSession > 0) '$skippedInSession 条已在会话中',
-    ];
-    if (parts.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('跳过 ${parts.join('、')}')));
-    }
-    if (added == 0) return 0;
-    if (auto) {
-      // 自动触发：只有「用户正看着消息页」才弹面板（不阻塞等它关闭，
-      // 否则有失败条目时面板停在汇总页，自动流程与冷却记录都会被挂住）。
-      // 后台 / 不在消息页时弹面板没人看得见，改用系统通知告知（U19-A/C）。
-      if (AppUiState.instance.messagesVisible) {
-        unawaited(showAiProcessPanel(context, onChanged: reload, auto: true)
-            .catchError((Object e, StackTrace st) {
-          AppLog.instance.warn('ai.panel-auto', e, st);
-        }));
-      } else {
-        unawaited(ReminderService.instance.notifyAutoStarted(added));
-      }
-      await reload();
-    } else {
-      await showAiProcessPanel(context, onChanged: reload);
-      await reload();
-    }
-    return added;
   }
 
   Future<void> _addManually() async {
@@ -700,8 +494,6 @@ class MessagesPageState extends State<MessagesPage> {
   List<SwipeAction> _actionsFor(Message m) {
     final cs = Theme.of(context).colorScheme;
     final isJunk = m.priority == MessagePriority.junk;
-    // v2.6.2：pending 才是「自动处理」；已处理/其他状态 = 显式「重新处理」
-    final isPending = m.status == MessageStatus.pending;
     if (isJunk) {
       return [
         SwipeAction(
@@ -725,12 +517,6 @@ class MessagesPageState extends State<MessagesPage> {
       ];
     }
     return [
-      SwipeAction(
-        icon: Icons.auto_awesome,
-        label: isPending ? '自动处理' : '重新处理',
-        color: cs.tertiary,
-        onTap: () => _processWithAi([m.id], reprocess: !isPending),
-      ),
       if (_linkedTaskIds(m).isEmpty)
         SwipeAction(
           icon: Icons.add_task,
@@ -954,15 +740,11 @@ class MessagesPageState extends State<MessagesPage> {
 
   /// 单条消息行（多选 / 左滑 / 点开详情，能力与改动前一致）。
   Widget _buildTile(Message m) {
-    // v2.6.2：正在 AI 处理中的消息显示处理中标记并禁用左滑
-    final processing = AiProcessingService.instance.isProcessing(m.id);
     return MessageTile(
       key: ValueKey(m.id),
       message: m,
       selecting: _selecting,
       selected: _selected.contains(m.id),
-      processing: processing,
-      swipeEnabled: !processing,
       linkedTaskDone: _isLinkedDone(m),
       linkedTaskPriority: _linkedTaskPriority(m),
       linkedTaskCount: _linkedTaskIds(m).length,
@@ -1066,7 +848,6 @@ class MessagesPageState extends State<MessagesPage> {
         targets.every((m) => m.priority == MessagePriority.junk);
     final allLinked = hasSelection &&
         targets.every((m) => _linkedTaskIds(m).isNotEmpty);
-    final selectedIds = [for (final m in targets) m.id];
     return SelectionActionBar(
       actions: [
         SelectionAction(
@@ -1101,15 +882,6 @@ class MessagesPageState extends State<MessagesPage> {
             final m = targets.first;
             _exitSelection();
             _createTask(m);
-          },
-        ),
-        SelectionAction(
-          icon: Icons.auto_awesome,
-          tooltip: '自动处理',
-          enabled: hasSelection,
-          onTap: () {
-            _exitSelection();
-            _processWithAi(selectedIds);
           },
         ),
       ],

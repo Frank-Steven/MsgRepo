@@ -1,6 +1,8 @@
 # MsgRepo v2 设计文档
 
-> 本文档是 MsgRepo 的现行设计（v2），取代 v1 系列文档（`architecture.md` / `data-model.md` 等，保留作历史参考）。
+> **已废弃（superseded）**：v3 起应用改名 Manalist，现行设计见 [design-v3.md](design-v3.md)（配套机制定稿 [design-v3-details.md](design-v3-details.md)，重构手册 [refactor-v3.md](refactor-v3.md）。本文档保留作历史参考。
+>
+> 本文档原为 MsgRepo 的现行设计（v2），取代 v1 系列文档（`architecture.md` / `data-model.md` 等，保留作历史参考）。
 > 核心理念：**日程表与待办清单的结合是应用本体，消息只是数据源，AI 是可从手机端插拔的处理服务。**
 > 文末附修订记录（v2.1：任务时间尺度 + 待办分页 + 日视图缩放 + 交互修正；v2.2：年度粒度视图 + 尺度过滤 + 子任务系统）。
 

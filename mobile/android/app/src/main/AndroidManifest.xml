@@ -12,7 +12,7 @@
     <!-- 短信导入的 READ_SMS 已随 v3 阶段 3 移除（design-v3 §3.2） -->
 
     <application
-        android:label="MsgRepo"
+        android:label="Manalist"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

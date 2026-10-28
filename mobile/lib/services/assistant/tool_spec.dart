@@ -1,9 +1,6 @@
 /// 原子工具说明书（design-v3 §5.2、design-v3-details §2.4）：
 /// 工具名、参数、示例与纪律说明的**单一事实源**，由 mobile 组装进 system prompt
 /// （desktop /v1/chat 只透传、不持有说明书；双端提示词同步惯例已终结）。
-///
-/// inbox.triage 属阶段 7（details §4），这里只预留条目（reserved=true）：
-/// 不进提示词的可调用清单，模型若调用会被 proposal_service 拒为「暂不可用」。
 library;
 
 /// 工具类型：写工具一律落待确认区审批；只读工具直接执行并回注结果。
@@ -157,14 +154,16 @@ const List<ToolSpec> kToolSpecs = [
     example:
         '{"tool":"message.set_priority","args":{"messageId":"<消息id>","priority":"junk"}}',
   ),
-  // 阶段 7 预留（details §4）：批量优先级评估与任务草拟的提案生成器。
+  // 提案生成器（details §4）：只读执行免审批，产出落到待确认区。
   ToolSpec(
     name: ToolNames.inboxTriage,
     kind: ToolKind.read,
-    description: '（预留，阶段 7 提供）对指定范围消息批量评估，产出一组原子提案',
-    paramsDoc: 'scope: {status, limit<=50}',
+    description: '对指定范围的未处理消息批量评估（垃圾规则本地预过滤 + 模型分批评估），'
+        '产出一组 message.set_priority / task.create 提案到待确认区；'
+        '本身不直接改任何数据',
+    paramsDoc: 'scope(必填): {status: 仅支持 "pending", limit: 1..50（默认50，'
+        '超过50会报错，请分批调用）}',
     example: '{"tool":"inbox.triage","args":{"scope":{"status":"pending","limit":50}}}',
-    reserved: true,
   ),
 ];
 
@@ -183,7 +182,7 @@ String buildToolSpecPrompt(DateTime now) {
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} '
       '(周${'日一二三四五六'[d.weekday % 7]})';
   final buf = StringBuffer()
-    ..writeln('你是 MsgRepo 的个人助理。用户可以与你对话，你可以通过「工具调用块」操作应用。')
+    ..writeln('你是 Manalist 的个人助理。用户可以与你对话，你可以通过「工具调用块」操作应用。')
     ..writeln('当前本地时间：${fmt(now)}。解析相对日期（如"明天""本周五"）以此为基准。')
     ..writeln()
     ..writeln('## 工具调用块格式')
@@ -198,6 +197,8 @@ String buildToolSpecPrompt(DateTime now) {
     ..writeln('2. 全量审批：写工具的调用不直接生效，会进入「待确认区」由用户人工审批；'
         '你只负责生成提案，不要声称已生效。')
     ..writeln('3. 只读工具（task.list/task.search/note.read/library.search）会直接执行并把结果回给你。')
+    ..writeln('   inbox.triage 也会直接执行：它只读消息、产出提案到待确认区，'
+        '执行后你会收到提案数量汇总，不要声称消息已被标记或任务已创建。')
     ..writeln('4. 已归档任务不可修改/删除；没有删除笔记/文件的工具；不要触碰设置与密钥。')
     ..writeln('5. 引用库中实体时使用其真实 id（附件以 [#note:标题] 等形式给出上下文）。')
     ..writeln()

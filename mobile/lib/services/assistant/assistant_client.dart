@@ -51,6 +51,11 @@ class AssistantClient {
 
   static final AssistantClient instance = AssistantClient._();
 
+  /// 独立通道实例（inbox.triage 子调用用，details §4）：与共享 [instance]
+  /// 的在途请求/取消标记互不影响——子调用在回合流中途发起，
+  /// 若共用单例会踩掉主对话的 _activeClient 簿记。
+  AssistantClient.independent();
+
   http.Client? _http;
   http.Client? _activeClient;
   bool _cancelled = false;
