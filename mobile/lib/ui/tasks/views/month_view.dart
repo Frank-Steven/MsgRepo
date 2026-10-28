@@ -142,7 +142,7 @@ class MonthViewState extends State<MonthView> {
     });
   }
 
-  void scrollTo(DateTime target) => _jumpToMonth(_monthIndexOf(target));
+  void scrollTo(DateTime target) => _jumpToDay(target);
 
   void scrollToTask(Task t) {
     final s = t.startAt;

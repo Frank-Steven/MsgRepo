@@ -21,7 +21,9 @@ enum _DragMode { move, resizeStart, resizeEnd }
 /// 有选中时点空白 = 取消选中，无选中时点空白 = 下钻该年的年视图。
 ///
 /// R01 重做（2026-10-20，Frank 算法，用户拍板）：
-/// - **行分配**：不再按优先级分泳道。所有任务按**开始时间**排序，逐个从第 1 行
+/// - **行分配**：不再按优先级分泳道。填充顺序 = 优先级优先
+///   （important 红靠上 → normal 居中 → minor 绿靠下，2026-10-28 分行规则），
+///   同优先级内按开始时间；逐个从第 1 行
 ///   开始试；该行已有任务与它的**投影间距 < 130px**（≈20 字标签宽）就算占用，
 ///   换下一行；**行数不限**，按需向下增长（行区可纵向平移）。
 /// - **标签**：单行、**不合并不换行**、先到先得；贴在任务节点**正上方**的本行
@@ -674,11 +676,14 @@ static const _rowGapPx = 18.0;
 
     double xOf(double yf) => (yf - scrollYf) * ppy;
 
-    // ---- R01 行分配：按开始时间排序，行内「投影间距 < 130px」算占用 ----
+    // ---- R01 行分配：优先级优先（红靠上、绿靠下、normal 居中，
+    // 2026-10-28 分行优先级规则），同优先级按开始时间；行内「标记不重叠」判定 ----
     final sorted = [
       for (final t in tasks)
         if (t.startAt != null) t,
     ]..sort((a, b) {
+        final r = taskLabelPriorityRank(a).compareTo(taskLabelPriorityRank(b));
+        if (r != 0) return r;
         final c = a.startAt!.compareTo(b.startAt!);
         return c != 0 ? c : a.id.compareTo(b.id);
       });

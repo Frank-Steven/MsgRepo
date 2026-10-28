@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/task.dart';
 import '../../services/database.dart';
@@ -99,53 +98,28 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
   final _monthKey = GlobalKey<MonthViewState>();
   final _dayKey = GlobalKey<DayViewState>();
 
-  // ---- F13②：图表区 / 任务栏 / 标签带 三段独立高度（2026-10-21）----
+  // ---- 甘特 / 底部任务列表分栏：展开/收起双模态（2026-10-28）----
   //
-  // 设计原则（用户要求：拖其中一条时另一部分不许跟着动）：
-  //  · `_barH`（任务栏）与 `_nameBandH`（45° 标签带）**互相独立**，各自持久化；
-  //  · **顶部抓手** = 图表内部那条（day_view 自绘自收手势）：它跟着手指走，
-  //    改的是「标签带高度」`_nameBandH` —— 抓手自己移动、任务栏纹丝不动，行区相应增减；
-  //  · **底部抓手** = 页面里那条：只改 `_barH`（任务栏高度），图表随之变高/变矮；
-  //  · 图表高度 = 视口 − 底部抓手 − 任务栏（永远铺满，无页面滚动）。
-  static const _barPrefsKey = 'schedule_bar_height';
-  static const _nameBandPrefsKey = 'schedule_name_band_h';
-  static const _chartMinH = 250.0; // 行程 = avail − 图表下限 − 任务栏下限（该式对两侧恒等）。三轮调参：250/250→97（太小）→200/200→197（翻倍）→250/60→≈287（约三倍）
-  // 2026-10-21：310/60 → 250/250（行程≈97，用户嫌太小）→ 200/200（行程≈197，约翻倍）
-  // 2026-10-21 用户要求「任务栏可拖范围 = 日程表可拖范围」，故两者都取 250（图表固定 chrome 236 + 余量）
-  static const _barMinH = 60.0;
+  // 取消手动拖拽调高（原 F13② 的拖动手柄 + 高度持久化全部下线）：
+  //  · 期导航工具条上的展开/收起按钮两态切换；
+  //  · 展开态 = 分栏视口的 [_barExpandedRatio]（约屏高 35%）；
+  //  · 收起态 = 只留列表标题行（[_barCollapsedH]，含该期任务数）；
+  //  · 状态按粒度记忆在 State 内（[_barExpandedByGranularity]），不持久化。
+  static const _barCollapsedH = 40.0;
+  static const _barExpandedRatio = 0.35;
 
-  /// 45° 标签带高度的下限 / 默认值（default 与 day_view 的 nameLayerH 保持一致）。
-  static const _nameBandMin = 70.0;
-  static const _nameBandDefault = 160.0;
+  /// 各粒度下底部任务列表是否展开（缺省 = 展开）。
+  final Map<int, bool> _barExpandedByGranularity = {};
 
-  /// 图表内部固定的两条带高（与 day_view 的常量对齐）：
-  /// 刻度带 44 + 行高 34。标签带上限要留出「空槽 + 刻度带 + 至少 2 行 + 余量」。
-  static const _dayHeaderH = 44.0;
-  static const _dayLaneH = 34.0;
+  bool get _barExpanded =>
+      _barExpandedByGranularity[widget.granularity] ?? true;
 
-  /// 两条手柄共用的高度（可见的灰色拖动条 + 短横条）。
-  static const _handleH = 32.0; // 拖动手柄高度：加大热区，手指更容易按住（2026-10-21）
-
-  double? _barH; // 任务栏高度；null = 用默认比例
-
-  /// 45° 标签带（顶部抓手拖出来的那段）高度，持久化。
-  double _nameBandH = _nameBandDefault;
-  double? _nameBandStart; // 按下瞬间的标签带高度（绝对映射用）
-
-  /// 底部手柄的上一次指针 y（必须存在 State 上：拖动会触发 setState 重建，
-  /// 局部变量会被重置，导致「只有第一帧生效」。2026-10-21 踩过这个坑。）
-  /// 顶部抓手的起始 y 现在由 day_view 自己持有（方案 1b：图表自绘自收手势）。
-  double? _dragLastYBar;
-  double? _barDragStart; // 按下瞬间的任务栏高度（绝对映射用）
-
-  /// 分栏区域的视口高度（_splitBody 布局时记录）：抓手拖动回调靠它换算边界，
-  /// 这样顶部抓手（在 day_view 内部）也能共用同一套逻辑，不必互传坐标。
-  double _splitVp = 0;
+  void _toggleBar() => setState(
+      () => _barExpandedByGranularity[widget.granularity] = !_barExpanded);
 
   @override
   void initState() {
     super.initState();
-    _loadHeights();
     reload();
   }
 
@@ -166,139 +140,8 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     _afterTwoFrames(() => _scrollCurrentTo(_anchor));
   }
 
-  /// 读回上次拖好的高度（读不到就用默认值）。
-  Future<void> _loadHeights() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final bar = prefs.getDouble(_barPrefsKey);
-      final nameBand = prefs.getDouble(_nameBandPrefsKey);
-      setState(() {
-        if (bar != null) _barH = bar;
-        if (nameBand != null) _nameBandH = nameBand;
-      });
-    } catch (_) {
-      // 读失败用默认布局，不影响使用
-    }
-  }
-
-  Future<void> _saveHeights() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final bar = _barH;
-      if (bar != null) await prefs.setDouble(_barPrefsKey, bar);
-      await prefs.setDouble(_nameBandPrefsKey, _nameBandH);
-    } catch (_) {
-      // fire-and-forget：写失败只影响下次进入的默认值
-    }
-  }
-
-  /// 拖动手柄：`Listener` 直接吃原始指针（不走手势竞技场），
-  /// 并用「按下点 → 当前点」的累计位移换算新尺寸 —— 绝对映射才跟手，
-  /// 逐帧增量会因丢帧显得滞后。
-  Widget _handle({
-    required String id,
-    required double? Function() startYRead,
-    required void Function(double?) startYWrite,
-    required void Function(double dyFromPress) onDrag,
-    required VoidCallback onEnd,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    return Listener(
-      key: ValueKey('schedule-handle-$id'),
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: (e) {
-        startYWrite(e.position.dy);
-        onDrag(0);
-      },
-      onPointerMove: (e) {
-        final s = startYRead();
-        if (s == null) return;
-        onDrag(e.position.dy - s);
-      },
-      onPointerUp: (_) {
-        startYWrite(null);
-        onEnd();
-      },
-      onPointerCancel: (_) => startYWrite(null),
-      child: Container(
-        height: _handleH,
-        width: double.infinity,
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
-        alignment: Alignment.center,
-        child: Container(
-          width: 56,
-          height: 4,
-          decoration: BoxDecoration(
-            color: scheme.outlineVariant,
-            borderRadius: BorderRadius.circular(2),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 安全版 clamp：当窗口太矮导致「下限 > 上限」时**返回上限**，
-  /// 而不是抛 `Invalid argument(s)`（2026-10-21 年度视图下崩溃即此原因）。
-  double _safeClamp(double v, double lo, double hi) =>
-      lo <= hi ? v.clamp(lo, hi) : hi;
-
-  /// 视口高度 → 任务栏允许的最大高度（图表至少保留 _chartMinH）。
-  double _barMaxAt(double vp) {
-    final avail = vp - _handleH;
-    return _safeClamp(avail - _chartMinH, _barMinH, avail);
-  }
-
-  /// 视口高度 → 当前任务栏高度（未拖过时按 40% 默认比例）。
-  double _barHAt(double vp) {
-    final avail = vp - _handleH;
-    return _safeClamp(_barH ?? avail * 0.40, _barMinH, _barMaxAt(vp));
-  }
-
-  /// 抓手拖动（顶部/底部共用）：绝对映射 —— 按下瞬间记起始高度，
-  /// 之后一律用「当前指针 y − 按下指针 y」的累计位移换算，跟手不滞后。
-  void _dragBoundary(double dyFromPress) {
-    final vp = _splitVp;
-    if (!vp.isFinite || vp <= 0) return;
-    final barMax = _barMaxAt(vp);
-    final barH = _barHAt(vp);
-    final start = _barDragStart ??= barH;
-    final next = _safeClamp(start - dyFromPress, _barMinH, barMax);
-    if (next != (_barH ?? barH)) setState(() => _barH = next);
-  }
-
-  /// 视口高度 → 标签带允许的最大高度。
-  ///
-  /// 关键：**标签带行程要与分界线行程一致**，否则用户会觉得「任务栏能拖的比日程表少」。
-  /// 分界线行程 = avail − 图表下限 − 任务栏下限；这里让 标签带上限 = 下限 + 同一行程，
-  /// 再用「至少留 1 行」的布局上限夹一次，保证图表不会把行挤没。
-  double _nameBandMaxAt(double vp) {
-    if (!vp.isFinite || vp <= 0) return _nameBandMin;
-    final avail = vp - _handleH;
-    final travel = avail - _chartMinH - _barMinH;
-    final chartH = _safeClamp(avail - _barHAt(vp), _chartMinH, avail);
-    final byLayout = chartH - _handleH - _dayHeaderH - _dayLaneH;
-    return _safeClamp(_nameBandMin + travel, _nameBandMin, byLayout);
-  }
-
-  /// 顶部抓手拖动：**绝对映射** —— 按下记起始标签带高度，之后用累计位移换算。
-  /// 向下拖 = 标签带变高（抓手跟着手指走）、行区变矮；**任务栏高度完全不参与**。
-  void _dragNameBand(double dyFromPress) {
-    final vp = _splitVp;
-    if (!vp.isFinite || vp <= 0) return;
-    final start = _nameBandStart ??= _nameBandH;
-    final next = _safeClamp(start + dyFromPress, _nameBandMin, _nameBandMaxAt(vp));
-    if (next != _nameBandH) setState(() => _nameBandH = next);
-  }
-
-  /// 布局：**永远铺满屏幕**，自由度只有「任务栏高度」与「标签带高度」。
-  ///
-  /// 2026-10-21 用户反馈：拖红色（图表）→ 蓝色（任务栏）被拖着走、拖绿色（任务栏标题）→ 整页滚动、
-  /// 在红色里滚动 → 也变成整页滚动。根因是上一版把整页放进 `SingleChildScrollView` 并允许两段各自独立
-  /// 设高（会溢出/留白，手势全被页面滚动吃掉）。
-  ///
-  /// 现在改成标准分栏：`图表 = 视口 - 手柄 - 任务栏` 自动铺满，**不再有页面滚动**；
-  /// 两个抓手（顶部那条在图表内、图表与任务栏之间那条在页面里）都是同一个边界的抓点：
-  /// 往下拖 = 图表变高、任务栏变矮；往上拖反之。
+  /// 布局：**永远铺满屏幕**，自由度只有「底部任务列表展开 / 收起」两态。
+  /// 图表 = 视口 − 列表区，不再有页面滚动，也不再有手动拖拽分割线。
   Widget _splitBody(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
       final vp = constraints.maxHeight;
@@ -308,31 +151,10 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
           Expanded(flex: 2, child: _bottomSection(context)),
         ]);
       }
-      final avail = vp - _handleH;
-      final barH = _barHAt(vp);
-      final chartH = _safeClamp(avail - barH, _chartMinH, avail);
-      // 记录视口高度：底部抓手 + day_view 内部那条抓手都靠它换算边界
-      _splitVp = vp;
-      // 标签带高度按当前分栏几何夹紧：任务栏被拖大后，标签带不会把行区挤没
-      _nameBandH = _safeClamp(_nameBandH, _nameBandMin, _nameBandMaxAt(vp));
-
-      // F13②-方案1b：顶部抓手由 DayView 自己画、自己收指针（位置与图表几何
-      // 天然对齐），页面侧不再叠 Positioned 抓手，否则两层会抢指针。
+      var barH = _barExpanded ? vp * _barExpandedRatio : _barCollapsedH;
+      if (barH < _barCollapsedH) barH = _barCollapsedH;
       return Column(children: [
-        SizedBox(
-          height: chartH,
-          child: _ganttView(),
-        ),
-        _handle(
-          id: 'bar',
-          startYRead: () => _dragLastYBar,
-          startYWrite: (v) => _dragLastYBar = v,
-          onDrag: _dragBoundary,
-          onEnd: () {
-            _barDragStart = null;
-            _saveHeights();
-          },
-        ),
+        Expanded(child: _ganttView()),
         SizedBox(height: barH, child: _bottomSection(context)),
       ]);
     });
@@ -557,6 +379,7 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
       _selectedTask = t;
       _detailMode = true;
       _anchor = DateTime.fromMillisecondsSinceEpoch(s);
+      _barExpandedByGranularity[g] = true; // 详情需要列表区空间，强制展开
     });
     if (g != widget.granularity) {
       _pendingJump = true;
@@ -776,18 +599,6 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
           ),
           onVisibleWindowChanged: _onWindowChanged,
           onCenterChanged: (c) => setState(() => _anchor = c),
-          // F13②：名称带高度由页面持久化并下发（抓手拖动改的就是它）；
-          // 抓手空槽仍由图表自绘自收手势，页面只拿「累计位移」回调。
-          handleSlotH: _handleH,
-          showHandle: widget.granularity == 3,
-          nameBandH: _nameBandH,
-          // 顶部抓手 → 标签带高度（抓手自己跟着手指走，任务栏不动）
-          onHandleDrag: _dragNameBand,
-          onHandleDragEnd: () {
-            _nameBandStart = null;
-            _barDragStart = null;
-            _saveHeights();
-          },
         );
       default:
         return YearView(
@@ -817,9 +628,16 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     }
   }
 
-  /// 底部板块（v2.5 双模式）：详情模式 = TaskDetailPanel（带返回按钮）；
-  /// 列表模式 = 可视范围任务列表（选中行高亮，点击行进详情）。
+  /// 底部板块（v2.5 双模式 + 2026-10-28 展开/收起）：收起态只留列表标题行
+  ///（含该期任务数）；展开态 = 详情模式 TaskDetailPanel（带返回按钮）或
+  /// 可视范围任务列表（选中行高亮，点击行进详情）。
   Widget _bottomSection(BuildContext context) {
+    if (!_barExpanded) {
+      return Column(children: [
+        const Divider(height: 1),
+        _listHeader(_bottomTasks.length),
+      ]);
+    }
     final selected = _selectedTask;
     if (_detailMode && selected != null) {
       return Column(children: [
@@ -841,50 +659,56 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     return Column(
       children: [
         const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
-            child: Row(
-              children: [
-                Text('任务', style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(width: 8),
-                Text('${tasks.length}',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color:
-                            Theme.of(context).colorScheme.onSurfaceVariant)),
-              ],
-            ),
-          ),
-          Expanded(
-            child: tasks.isEmpty
-                ? Center(
-                    child: Text('无',
-                        style: TextStyle(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant)),
-                  )
-                : ListView.builder(
-                    itemCount: tasks.length,
-                    itemBuilder: (context, i) {
-                      final task = tasks[i];
-                      return TaskTile(
-                        key: _bottomRowKeys.putIfAbsent(
-                            task.id, () => GlobalKey()),
-                        task: task,
-                        selected: task.id == _selectedTask?.id,
-                        onTap: () => setState(() {
-                          _selectedTask = task;
-                          _detailMode = true;
-                        }),
-                        onToggleDone: () => _toggleDone(task),
-                        onShowSource: task.sourceMessageId == null
-                            ? null
-                            : () => _showSourceMessage(task.sourceMessageId!),
-                      );
-                    },
-                  ),
+        _listHeader(tasks.length),
+        Expanded(
+          child: tasks.isEmpty
+              ? Center(
+                  child: Text('无',
+                      style: TextStyle(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurfaceVariant)),
+                )
+              : ListView.builder(
+                  itemCount: tasks.length,
+                  itemBuilder: (context, i) {
+                    final task = tasks[i];
+                    return TaskTile(
+                      key: _bottomRowKeys.putIfAbsent(
+                          task.id, () => GlobalKey()),
+                      task: task,
+                      selected: task.id == _selectedTask?.id,
+                      onTap: () => setState(() {
+                        // 详情需要列表区空间：若当前收起则顺手展开
+                        _barExpandedByGranularity[widget.granularity] = true;
+                        _selectedTask = task;
+                        _detailMode = true;
+                      }),
+                      onToggleDone: () => _toggleDone(task),
+                      onShowSource: task.sourceMessageId == null
+                          ? null
+                          : () => _showSourceMessage(task.sourceMessageId!),
+                    );
+                  },
+                ),
         ),
       ],
+    );
+  }
+
+  /// 列表标题行：「任务」+ 该期任务数（收起态下底部只留这一行）。
+  Widget _listHeader(int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+      child: Row(
+        children: [
+          Text('任务', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(width: 8),
+          Text('$count',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant)),
+        ],
+      ),
     );
   }
 
@@ -906,7 +730,8 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
     );
   }
 
-  /// 期导航首行工具条（原 AppBar 标题 Row 降级而来）：上一期/标题/下一期。
+  /// 期导航首行工具条（原 AppBar 标题 Row 降级而来）：上一期/标题/下一期 +
+  /// 底部任务列表展开/收起切换（2026-10-28 双模态，替代原拖拽分割线）。
   /// 「现在」已上收任务页 AppBar actions（ui-structure §6.2）。
   Widget _buildPeriodHeader() {
     return SizedBox(
@@ -924,6 +749,13 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
           visualDensity: VisualDensity.compact,
           onPressed: () => _shiftPeriod(1),
           icon: const Icon(Icons.chevron_right),
+        ),
+        IconButton(
+          tooltip: _barExpanded ? '收起任务列表' : '展开任务列表',
+          visualDensity: VisualDensity.compact,
+          onPressed: _toggleBar,
+          icon: Icon(
+              _barExpanded ? Icons.expand_more : Icons.expand_less),
         ),
       ]),
     );
@@ -943,7 +775,7 @@ class TaskScheduleViewState extends State<TaskScheduleView> {
           if (_loading)
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else
-            // F13②：图表区 + 可拖动分割线 + 底部面板。
+            // 甘特图 + 底部任务列表（展开/收起双模态，无拖拽分割线）。
             Expanded(child: _splitBody(context)),
         ],
       ),

@@ -65,9 +65,6 @@ class YearViewState extends State<YearView> {
   (int, int)? _pulse;
   Timer? _pulseTimer;
 
-  int get _currentItemIndex =>
-      itemIndexForUnit(DateTime.now().year - _baseYear);
-
   /// 可视中心的年（由滚动位置推导）。
   int get _centerYear {
     if (!_scroll.hasClients || _itemExtent <= 0) return DateTime.now().year;
@@ -133,8 +130,9 @@ class YearViewState extends State<YearView> {
     widget.onCenterChanged(now);
   }
 
-  /// 滚动到指定年并居中（期移箭头用）。
-  void scrollTo(DateTime anchor) => _jumpToYear(anchor.year);
+  /// 滚动到指定年并把锚点所在月块在可视区垂直居中（期移箭头用；
+  /// 2026-10-28：原先是顶对齐年初，期移后当月块常被顶出屏幕）。
+  void scrollTo(DateTime anchor) => _jumpToMonthBlock(anchor.year, anchor.month);
 
   /// 滚动到任务所在年（详情面板跳转用）。
   void scrollToTask(Task t) {
@@ -182,13 +180,12 @@ class YearViewState extends State<YearView> {
             2 * _YearLayout.pad;
         _itemExtent = gridH + _yearLabelH + 8;
         if (!_scroll.hasClients) {
-          // 首帧前定位到当前年（顶对齐，与 _jumpToYear 一致）
-          final initial = _currentItemIndex * _itemExtent - 4;
+          // 首帧前定位到当前月块（垂直居中，与 scrollToNow 同一套公式；
+          // 2026-10-28：原先是顶对齐当前年，即「年初位置」）
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_scroll.hasClients) {
-              _scroll.jumpTo(initial.clamp(
-                  0.0, _scroll.position.maxScrollExtent));
-              _reportWindow();
+              final now = DateTime.now();
+              _jumpToMonthBlock(now.year, now.month);
             }
           });
         }

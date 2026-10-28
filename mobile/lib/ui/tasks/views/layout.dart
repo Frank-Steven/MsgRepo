@@ -35,8 +35,11 @@ class YearLaneItem {
 }
 
 /// 年视图单条优先级泳道的槽位填充（设计 §2.1）：
-/// 按开始时间升序，从 slot 0 起找第一个月份区间无重叠的槽位放下；
-/// 被更早任务占据的槽位跳过继续往下。跨年任务按钳制后的范围占位
+/// 槽位先到先得，填充顺序 = **优先级优先**（important 红 → normal → minor 绿），
+/// 同优先级内按开始时间升序 —— 同一槽位可放多个任务竞争时，红色靠上、
+/// 绿色靠下、normal 居中（2026-10-28 分行优先级规则，日/年度视图行分配同）。
+/// 每个任务从 slot 0 起找第一个月份区间无重叠的槽位放下；
+/// 被先放任务占据的槽位跳过继续往下。跨年任务按钳制后的范围占位
 /// （每年独立调用本函数，跨年部分自然落到相邻年泳道的最上面槽位）。
 /// 子任务（parent_id 非空）在其父任务位于本泳道时占用与父相同的槽位
 /// （isSubtask=true，叠加绘制更小节点/更细线段，不做冲突检查）；
@@ -58,6 +61,7 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
     entries.add(_LaneEntry(
       taskId: t.id,
       parentId: t.parentId,
+      priorityRank: taskLabelPriorityRank(t),
       startMs: s,
       startMonth: DateTime.fromMillisecondsSinceEpoch(cs).month,
       endMonth: DateTime.fromMillisecondsSinceEpoch(ce).month,
@@ -66,6 +70,9 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
     ));
   }
   int byStart(_LaneEntry a, _LaneEntry b) {
+    // 优先级优先（红靠上、绿靠下），同优先级再按开始时间
+    final r = a.priorityRank.compareTo(b.priorityRank);
+    if (r != 0) return r;
     final c = a.startMs.compareTo(b.startMs);
     return c != 0 ? c : a.taskId.compareTo(b.taskId);
   }
@@ -123,6 +130,7 @@ List<YearLaneItem> layoutYearLane(List<Task> tasks, int year) {
 class _LaneEntry {
   final String taskId;
   final String? parentId;
+  final int priorityRank;
   final int startMs;
   final int startMonth;
   final int endMonth;
@@ -132,6 +140,7 @@ class _LaneEntry {
   const _LaneEntry({
     required this.taskId,
     required this.parentId,
+    required this.priorityRank,
     required this.startMs,
     required this.startMonth,
     required this.endMonth,
