@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 
-/// 启动页品牌色 —— **单档，不分昼夜**。
+/// 启动页背景色 —— **跟随深浅模式**（2026-10-28 用户拍板，取代 B07/Q13② 的统一品牌蓝）。
 ///
-/// B07（2026-10-24 复核）：原生侧跟系统夜间模式、Flutter 侧跟 App 主题设置，
-/// 「系统浅色 + App 深色」时会从 `#3F51B5` 跳到 `#283593`，交接处出现色相跳变。
-/// Q13② 拍板统一品牌蓝，因此这里和 `android res values/values-night/colors.xml` 的
-/// `splash_bg` 都必须是这**一个**色值，改一处就要同步另一处。
-const Color splashBrandBlue = Color(0xFF3F51B5);
+/// 两档与 `android res/values/colors.xml`、`values-night/colors.xml` 的 `splash_bg`
+/// 一一对应，改一处就要同步另一处。已知边界：原生阶段跟系统夜间模式、Flutter 阶段跟
+/// App 主题设置，「系统浅 + App 深」的混合档在交接瞬间会有一次深浅跳变，属接受范围。
+const Color splashBackgroundLight = Color(0xFFFAFAFA);
+const Color splashBackgroundDark = Color(0xFF121212);
+
+/// 按当前主题亮度取启动页背景色。
+Color splashBackgroundFor(Brightness brightness) => brightness == Brightness.dark
+    ? splashBackgroundDark
+    : splashBackgroundLight;
 
 /// 图标边长（dp）。1080px 屏 / 2.75 密度 ≈ 320px，屏宽 29.6%（设计稿口径）。
 const double splashIconSize = 116;
@@ -25,10 +30,10 @@ const double splashNameFontSize = 21;
 
 /// F15（2026-10-22 用户）+ Q13②（2026-10-24 用户拍板）启动动画。
 ///
-/// 设计（版式取自图标方案稿的启动页，按 Q13②「保留品牌蓝、按原稿比例重算」落地）：
+/// 设计（版式取自图标方案稿的启动页，按原稿比例重算；2026-10-28 起背景改为跟随深浅模式）：
 /// 1. 图标从**完全透明**渐变到**完全不透明**（600ms，easeOut）。B05 要求「交接处不缩放」，
 ///    所以这里**不做**原来的 0.96 → 1.0 轻微放大，只保留透明度淡入。
-///    Q13-A（2026-10-24 用户选 A）后，**原生阶段只铺品牌蓝、不画任何图标**
+///    Q13-A（2026-10-24 用户选 A）后，**原生阶段只铺背景色、不画任何图标**
 ///    （`windowSplashScreenAnimatedIcon` 显式指向透明占位），因此这次 0 → 1 淡入
 ///    是图标的**首次出现**，不存在「原生图标消失再重现」的交接闪烁；
 /// 2. 名称延后 150ms 淡入（500ms），避免两块同时跳到脸上（2026-10-28 用户：标语小字移除）；
@@ -126,8 +131,9 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
         final iconTop = height * splashIconCenterRatio - splashIconSize / 2;
         final iconFade = CurvedAnimation(parent: _icon, curve: Curves.easeOut);
         final textFade = CurvedAnimation(parent: _text, curve: Curves.easeOut);
+        final brightness = Theme.of(context).colorScheme.brightness;
         return ColoredBox(
-          color: splashBrandBlue,
+          color: splashBackgroundFor(brightness),
           child: Stack(
             children: [
               Positioned(
@@ -147,16 +153,19 @@ class _SplashGateState extends State<SplashGate> with TickerProviderStateMixin {
                 right: 0,
                 child: FadeTransition(
                   opacity: textFade,
-                  child: const Text(
+                  child: Text(
                     'Manalist',
-                    key: ValueKey('splash-name'),
+                    key: const ValueKey('splash-name'),
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: splashNameFontSize,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 0.5,
-                      color: Colors.white,
-                      // 2026-10-24 用户：开屏文字纯白、不要下划线
+                      // 2026-10-28：背景跟随深浅模式，文字色随之自适应
+                      color: brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black87,
+                      // 2026-10-24 用户：开屏文字不要下划线
                       decoration: TextDecoration.none,
                     ),
                   ),
