@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 
-import '../../models/task.dart';
+import '../../../models/task.dart';
 import 'layout.dart';
 import 'schedule_shared.dart';
 

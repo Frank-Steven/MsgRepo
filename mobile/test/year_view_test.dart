@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:msgrepo_mobile/ui/schedule/year_view.dart';
+import 'package:msgrepo_mobile/ui/tasks/views/year_view.dart';
 
 /// v2.6 回归：年视图「现在」定位加深——滚动到当前月所在块并在可视区垂直居中。
 void main() {

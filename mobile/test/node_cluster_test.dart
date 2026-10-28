@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/models/task.dart';
-import 'package:msgrepo_mobile/ui/schedule/layout.dart';
+import 'package:msgrepo_mobile/ui/tasks/views/layout.dart';
 
 /// U11 回归：时间几乎重合的节点要聚成一组（画一个点 + 合并标题）。
 void main() {

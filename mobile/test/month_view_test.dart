@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/models/task.dart';
-import 'package:msgrepo_mobile/ui/schedule/month_view.dart';
+import 'package:msgrepo_mobile/ui/tasks/views/month_view.dart';
 
 /// v2.5 回归：月视图 index↔月份换算全链路，永不出负数年份。
 /// 根因：v2.4 可变行高改造混用了两套坐标系——itemBuilder 按索引空间

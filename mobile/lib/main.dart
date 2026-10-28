@@ -13,10 +13,9 @@ import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
 import 'ui/library/library_page.dart';
 import 'ui/messages/ai_panel.dart';
-import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/splash_gate.dart';
-import 'ui/todos/todos_page.dart';
+import 'ui/tasks/tasks_page.dart';
 import 'ui/theme_fader.dart';
 import 'services/app_log.dart';
 
@@ -208,7 +207,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// 把 AppUiState 里的切页请求同步成真正的页面切换（F08）。
   ///
   /// 以前 _index 只被本地写、AppUiState 只被写不被读，于是
-  /// message_detail_sheet 的 setTab(1)（跳「待办」）没有任何效果。
+  /// message_detail_sheet 的 setTab（跳「待办」，现为「任务」tab）没有任何效果。
   void _syncTab() {
     if (!mounted) return;
     final next =
@@ -234,21 +233,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
 
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
-  final _scheduleKey = GlobalKey<SchedulePageState>();
-  final _todosKey = GlobalKey<TodosPageState>();
+  final _tasksKey = GlobalKey<TasksPageState>();
   final _libraryKey = GlobalKey<LibraryPageState>();
 
-  // O10：页面懒构建。原来 5 个页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
-  // 任何主题切换都要把这 5 棵树重新 build 一遍（真机实测单帧 build 达 924ms）。
+  // O10：页面懒构建。原来所有页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
+  // 任何主题切换都要把这些树重新 build 一遍（真机实测单帧 build 达 924ms）。
   // 现在只构建「用户访问过」的页面，没访问过的放占位，切过去时再创建（GlobalKey 保状态）。
   final Set<int> _builtTabs = {0};
 
   Widget _pageAt(int i) {
     if (!_builtTabs.contains(i)) return const SizedBox.shrink();
     return switch (i) {
-      0 => SchedulePage(key: _scheduleKey),
-      1 => TodosPage(key: _todosKey),
-      2 => LibraryPage(key: _libraryKey),
+      0 => TasksPage(key: _tasksKey),
+      1 => LibraryPage(key: _libraryKey),
       _ => const SettingsPage(),
     };
   }
@@ -345,10 +342,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// 切到某个 tab 后按需刷新该页（IndexedStack 保活，不会重跑 initState）。
   void _reloadTab(int i) {
     switch (i) {
-      case AppUiState.scheduleTabIndex:
-        _scheduleKey.currentState?.reload();
-      case AppUiState.todosTabIndex:
-        _todosKey.currentState?.reload();
+      case AppUiState.tasksTabIndex:
+        _tasksKey.currentState?.reload();
       case AppUiState.libraryTabIndex:
         _libraryKey.currentState?.reload();
     }
@@ -371,9 +366,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       },
       destinations: [
         const NavigationDestination(
-            icon: Icon(Icons.calendar_month_outlined), label: '日程'),
-        const NavigationDestination(
-            icon: Icon(Icons.check_circle_outline), label: '待办'),
+            icon: Icon(Icons.check_circle_outline), label: '任务'),
         NavigationDestination(
             icon: Badge(
               isLabelVisible: pending > 0,

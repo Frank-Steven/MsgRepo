@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../../models/task.dart';
+import '../../../models/task.dart';
 import 'layout.dart';
 import 'schedule_shared.dart';
 

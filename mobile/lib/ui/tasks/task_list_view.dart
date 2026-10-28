@@ -7,12 +7,13 @@ import '../../services/task_scale.dart';
 import '../../services/undo_service.dart';
 import '../messages/message_widgets.dart';
 import '../shared/segmented_selector.dart';
-import '../tasks/task_detail_panel.dart';
-import '../tasks/task_editor.dart';
-import '../tasks/task_tile.dart';
+import 'task_detail_panel.dart';
+import 'task_editor.dart';
+import 'task_tile.dart';
 
-/// 待办页（设计 §3，v2.3；v2.5 内嵌详情）：顶部尺度页签（含计数徽标）+ PageView 滑动翻页。
-/// 点击任务行进入详情模式：页面下部内嵌 TaskDetailPanel（与日程页共用），
+/// 任务页·列表视图（原待办页 TodosPage，v3 阶段 4 迁入并更名；设计 §3，v2.3；
+/// v2.5 内嵌详情）：顶部尺度页签（含计数徽标）+ PageView 滑动翻页。
+/// 点击任务行进入详情模式：页面下部内嵌 TaskDetailPanel（与甘特视图共用），
 /// 返回按钮/切换页签回列表模式；仅面板右上角编辑图标进编辑器；
 /// 有子任务的行尾显示「已完成数/总数」；面板中点击父/子任务跳转到对应
 /// 尺度页签并高亮定位。
@@ -21,14 +22,14 @@ import '../tasks/task_tile.dart';
 /// 任务状态交集：全部已归档 → 删除/取出；全部未归档且全部 active → 归档/完成；
 /// 全部未归档且全部 done → 归档/取消完成；混合（active+done）→ 仅归档。
 /// 所有批量操作走 UndoService 可撤销。
-class TodosPage extends StatefulWidget {
-  const TodosPage({super.key});
+class TaskListView extends StatefulWidget {
+  const TaskListView({super.key});
 
   @override
-  State<TodosPage> createState() => TodosPageState();
+  State<TaskListView> createState() => TaskListViewState();
 }
 
-class TodosPageState extends State<TodosPage> {
+class TaskListViewState extends State<TaskListView> {
   static const _recentWindow = Duration(hours: 24);
 
   /// 页签顺序（设计 §3）：年度/季度/月度/整周/整日/定时/不定时/已完成/已归档。

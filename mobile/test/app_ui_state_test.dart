@@ -23,7 +23,7 @@ void main() {
     expect(s.messagesVisible, isFalse, reason: '切到后台就不算可见');
 
     s.setForeground(true);
-    s.setTab(AppUiState.scheduleTabIndex);
+    s.setTab(AppUiState.tasksTabIndex);
     expect(s.messagesVisible, isFalse, reason: '前台但在日程页也不算');
 
     s.openLibrary(AppUiState.librarySectionMessages);
@@ -42,7 +42,7 @@ void main() {
     expect(s.tabIndex, AppUiState.libraryTabIndex);
     expect(s.librarySection, AppUiState.librarySectionFiles);
 
-    s.setTab(AppUiState.todosTabIndex);
+    s.setTab(AppUiState.tasksTabIndex);
     expect(s.librarySection, AppUiState.librarySectionFiles,
         reason: '切走再切回时应保留上次分区');
 

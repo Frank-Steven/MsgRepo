@@ -994,6 +994,16 @@ class AppDatabase {
     return rows.isEmpty ? null : Task.fromRow(rows.first);
   }
 
+  /// 按 id 批量取任务（锚点 chip 联查标题/状态用）。
+  Future<List<Task>> tasksByIds(List<String> ids) async {
+    if (ids.isEmpty) return [];
+    final db = await database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    final rows =
+        await db.query('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
+    return rows.map(Task.fromRow).toList();
+  }
+
   Future<List<Task>> getTasks(
       {String? status,
       int limit = defaultTaskLimit,
@@ -1338,6 +1348,16 @@ class AppDatabase {
     final rows =
         await db.query('files', where: 'id = ?', whereArgs: [id], limit: 1);
     return rows.isEmpty ? null : LibraryFile.fromRow(rows.first);
+  }
+
+  /// 按 id 批量取文件（笔记 `![name](file://id)` 渲染联查用）。
+  Future<List<LibraryFile>> filesByIds(List<String> ids) async {
+    if (ids.isEmpty) return [];
+    final db = await database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    final rows =
+        await db.query('files', where: 'id IN ($placeholders)', whereArgs: ids);
+    return rows.map(LibraryFile.fromRow).toList();
   }
 
   Future<void> renameFile(String id, String name) async {

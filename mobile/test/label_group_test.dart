@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/models/task.dart';
-import 'package:msgrepo_mobile/ui/schedule/layout.dart';
+import 'package:msgrepo_mobile/ui/tasks/views/layout.dart';
 
 /// R1-A 回归：标签分组 + 唯一一次贪心（点任务与时段任务一视同仁）。
 void main() {

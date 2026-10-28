@@ -6,20 +6,30 @@ import 'package:flutter/services.dart';
 
 import '../../models/message.dart';
 import '../../models/task.dart';
+import '../../services/anchor_service.dart';
 import '../../services/app_ui_state.dart';
+import '../../services/assistant/models.dart';
 import '../../services/attachment_store.dart';
 import '../../services/database.dart';
 import '../../services/fold_markers.dart';
 import '../../services/system_intent.dart';
+import '../shared/anchored_markdown.dart';
+import '../tasks/task_navigation.dart';
+import '../tasks/task_picker.dart';
 
-/// 消息详情面板（P3-2 → F07/F08/F09/F10/F11）。
+/// 消息详情面板（P3-2 → F07/F08/F09/F10/F11；v3 阶段 4 锚点化）。
 ///
 /// - 看图（缩略图点击放大）；
 /// - F07 编辑正文 / 增删附件（写 messages.body / attachments，并打 edited_at）；
-/// - F08 展示关联待办（v8 起走 task_anchors），点击跳到待办页；
+/// - F08 展示关联待办（v8 起走 task_anchors），点击跳到任务页；
 /// - F09 附件里的链接可「打开」「复制」；
 /// - F10 附件里的文件可「导出到下载」（MediaStore，不需要存储权限）；
 /// - F11 小程序附件如实说明暂不支持打开，并允许复制路径。
+///
+/// v3 阶段 4（design-v3 §3.4）：
+/// - 正文改用统一 markdown 渲染管线（[AnchoredMarkdownBody]，只读）：
+///   锚点 marker 显示为可点击 chip（跳任务详情）；
+/// - 长按选段上下文菜单「添加任务锚点」（受限写入，走 edited_at）。
 Future<void> showMessageDetail(BuildContext context, Message m) {
   return showModalBottomSheet<void>(
     context: context,
@@ -58,6 +68,9 @@ class _MessageDetailState extends State<_MessageDetail> {
       List<Attachment>.of(widget.message.attachments);
   List<Task>? _linkedTasks;
   bool _loadingTasks = true;
+
+  /// SelectionArea 当前选中的正文片段（「添加任务锚点」菜单用）。
+  String? _selectedText;
 
   Message get message => widget.message;
 
@@ -197,9 +210,39 @@ class _MessageDetailState extends State<_MessageDetail> {
     return file.uri.pathSegments.last;
   }
 
-  void _jumpToTodos() {
+  void _jumpToTasks() {
     Navigator.of(context).pop();
-    AppUiState.instance.setTab(AppUiState.todosTabIndex);
+    AppUiState.instance.setTab(AppUiState.tasksTabIndex);
+  }
+
+  /// 长按选段「添加任务锚点」（design-v3 §3.4）：选/建任务 →
+  /// AnchorService 受限写入消息正文（marker + edited_at 留痕）。
+  /// 选中文本经 SelectionArea.onSelectionChanged 捕获在 [_selectedText]。
+  Future<void> _addAnchorFromSelection() async {
+    final text = _selectedText?.trim();
+    if (!mounted || text == null || text.isEmpty) return;
+    final task = await showTaskPicker(context, seedTitle: text);
+    if (task == null || !mounted) return;
+    final result = await AnchorService.instance.insertAnchor(
+      taskId: task.id,
+      targetType: AnchorTargetType.message,
+      targetId: message.id,
+      anchorText: text,
+    );
+    if (!mounted) return;
+    if (!result.ok) {
+      _toast(result.error ?? '添加锚点失败');
+      return;
+    }
+    // 正文已被受限写入（含 marker），回读同步展示与关联列表。
+    final fresh = await AppDatabase.instance.getMessageById(message.id);
+    if (!mounted) return;
+    setState(() {
+      if (fresh != null) _body = fresh.body;
+      _loadingTasks = true;
+    });
+    _loadLinkedTasks();
+    _toast(result.multipleMatches ? '已添加锚点（多处出现，定位在第一处）' : '已添加锚点');
   }
 
   void _toast(String msg) {
@@ -246,9 +289,28 @@ class _MessageDetailState extends State<_MessageDetail> {
             ),
           ],
         ),
-        SelectableText(
-          _body.isEmpty ? '（无正文）' : _body,
-          style: tt.bodyMedium,
+        SelectionArea(
+          onSelectionChanged: (content) =>
+              _selectedText = content?.plainText,
+          contextMenuBuilder: (context, selectableRegionState) {
+            return AdaptiveTextSelectionToolbar.buttonItems(
+              anchors: selectableRegionState.contextMenuAnchors,
+              buttonItems: [
+                ...selectableRegionState.contextMenuButtonItems,
+                ContextMenuButtonItem(
+                  label: '添加任务锚点',
+                  onPressed: () {
+                    ContextMenuController.removeAny();
+                    _addAnchorFromSelection();
+                  },
+                ),
+              ],
+            );
+          },
+          child: AnchoredMarkdownBody(
+            data: _body.isEmpty ? '（无正文）' : _body,
+            onOpenTask: (t) => showTaskDetailSheet(context, t),
+          ),
         ),
         const SizedBox(height: 16),
         Row(
@@ -301,7 +363,7 @@ class _MessageDetailState extends State<_MessageDetail> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: InkWell(
-        onTap: _jumpToTodos,
+        onTap: _jumpToTasks,
         child: Row(
           children: [
             Icon(

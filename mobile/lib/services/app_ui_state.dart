@@ -5,21 +5,20 @@ import 'package:flutter/foundation.dart';
 /// 后台或不在消息页时弹 Modal 面板毫无意义（用户看不到，还会在切回来时突兀出现），
 /// 这种情况改用系统通知告知。
 ///
-/// v3 阶段 3：底部导航由 5 tab 收缩为 4 tab（日程/待办/库/设置），消息与笔记
-/// 合并进「库」页的三分区。「消息页可见」因此还要库页停在消息分区。
+/// v3 阶段 4：底部导航由 4 tab 收缩为 3 tab（任务/库/设置），待办与日程
+/// 合并进「任务」页。「消息页可见」仍要求库页停在消息分区。
 class AppUiState extends ChangeNotifier {
   AppUiState._();
 
   static final AppUiState instance = AppUiState._();
 
-  /// HomeShell 里页面顺序：日程 / 待办 / 库 / 设置
-  static const int scheduleTabIndex = 0;
-  static const int todosTabIndex = 1;
-  static const int libraryTabIndex = 2;
-  static const int settingsTabIndex = 3;
+  /// HomeShell 里页面顺序：任务 / 库 / 设置
+  static const int tasksTabIndex = 0;
+  static const int libraryTabIndex = 1;
+  static const int settingsTabIndex = 2;
 
   /// 底部导航/IndexedStack 的页面总数（下标 0..count-1）。
-  static const int tabCount = 4;
+  static const int tabCount = 3;
 
   /// 库页（LibraryPage）三分区下标，与 library_page.dart 的 TabController 一致。
   static const int librarySectionNotes = 0;

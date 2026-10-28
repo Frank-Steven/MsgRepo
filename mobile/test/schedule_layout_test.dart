@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:msgrepo_mobile/models/task.dart';
-import 'package:msgrepo_mobile/ui/schedule/layout.dart';
+import 'package:msgrepo_mobile/ui/tasks/views/layout.dart';
 
 Task _task(String id, int startMs,
         {int? endMs, String title = '任务', String? parentId}) =>

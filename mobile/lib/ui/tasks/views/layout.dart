@@ -2,8 +2,8 @@ import 'dart:math' as math;
 
 import 'package:characters/characters.dart';
 
-import '../../models/task.dart';
-import '../../services/text_width.dart';
+import '../../../models/task.dart';
+import '../../../services/text_width.dart';
 
 /// 年视图泳道布局项（设计 §2.1 填充算法）。
 class YearLaneItem {

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../models/task.dart';
+import '../../../models/task.dart';
 
 /// 优先级配色（设计 §10.3：自绘视图颜色随深色模式适配）。
 Color priorityColor(ColorScheme scheme, String priority) {
