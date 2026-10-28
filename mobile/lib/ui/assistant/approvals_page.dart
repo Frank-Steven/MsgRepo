@@ -5,6 +5,7 @@ import '../../services/assistant/models.dart';
 import '../../services/assistant/proposal_executor.dart';
 import '../../services/assistant/proposal_service.dart';
 import '../../services/database.dart';
+import 'widgets/proposal_card.dart';
 
 /// 待确认区（design-v3 §5.1、details §3）：
 /// pending 提案按 batch 分组（可折叠、组头全选/清空、工具类型过滤 chip），
@@ -141,7 +142,7 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
                     ),
                   ),
                 for (final g in groups) ..._buildGroup(g, cs),
-                _buildHistory(cs),
+                _buildHistory(),
               ],
             ),
           ),
@@ -219,12 +220,12 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
         ),
       ),
       if (!collapsed)
-        for (final p in visible) _buildProposalTile(p, cs),
+        for (final p in visible) _buildProposalTile(p),
       const SizedBox(height: 8),
     ];
   }
 
-  Widget _buildProposalTile(ChangeProposal p, ColorScheme cs) {
+  Widget _buildProposalTile(ChangeProposal p) {
     return Row(
       children: [
         Checkbox(
@@ -233,29 +234,18 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
               v == true ? _selected.add(p.id) : _selected.remove(p.id)),
         ),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(p.summary, maxLines: 2, overflow: TextOverflow.ellipsis),
-              Text(
-                  '${kToolCategoryLabels[ProposalService.toolCategory(p.tool)] ?? p.tool} · ${p.tool}',
-                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-            ],
+          child: ProposalCard(
+            proposal: p,
+            density: ProposalCardDensity.full,
+            onApprove: _busy ? null : () => _approve(p),
+            onReject: _busy ? null : () => _reject(p),
           ),
-        ),
-        TextButton(
-          onPressed: _busy ? null : () => _approve(p),
-          child: const Text('通过'),
-        ),
-        TextButton(
-          onPressed: _busy ? null : () => _reject(p),
-          child: const Text('拒绝'),
         ),
       ],
     );
   }
 
-  Widget _buildHistory(ColorScheme cs) {
+  Widget _buildHistory() {
     if (_history.isEmpty) return const SizedBox.shrink();
     return Column(
       children: [
@@ -270,37 +260,11 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
         ),
         if (_historyExpanded)
           for (final p in _history)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                switch (p.status) {
-                  ProposalStatus.applied => Icons.check_circle_outline,
-                  ProposalStatus.rejected => Icons.block,
-                  _ => Icons.error_outline,
-                },
-                size: 18,
-                color: switch (p.status) {
-                  ProposalStatus.applied => cs.primary,
-                  ProposalStatus.failed => cs.error,
-                  _ => cs.onSurfaceVariant,
-                },
-              ),
-              title: Text(p.summary,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(
-                  '${p.tool} · ${switch (p.status) {
-                    ProposalStatus.applied => '已生效',
-                    ProposalStatus.rejected => '已拒绝',
-                    ProposalStatus.failed => '失败',
-                    _ => p.status,
-                  }}',
-                  style:
-                      TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-              trailing: p.status == ProposalStatus.applied
-                  ? TextButton(
-                      onPressed: _busy ? null : () => _undo(p),
-                      child: const Text('撤销'),
-                    )
+            ProposalCard(
+              proposal: p,
+              density: ProposalCardDensity.full,
+              onUndo: p.status == ProposalStatus.applied && !_busy
+                  ? () => _undo(p)
                   : null,
             ),
       ],

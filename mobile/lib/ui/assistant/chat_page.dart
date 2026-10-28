@@ -7,6 +7,7 @@ import '../../services/database.dart';
 import 'approvals_page.dart';
 import 'attachment_picker.dart';
 import 'model_picker.dart';
+import 'widgets/proposal_card.dart';
 
 /// 对话页（design-v3 §5.1）：流式渲染、附件 chip、工具调用提案卡片内联
 /// （摘要 + 跳待确认区）、streaming/error 状态展示。
@@ -253,42 +254,22 @@ class _ChatPageState extends State<ChatPage> {
     final proposals = _proposalsByBatch[m.id];
     if (proposals != null) {
       for (final p in proposals) {
-        widgets.add(_buildProposalCard(p, cs));
+        widgets.add(_buildProposalCard(p));
       }
     }
     return widgets;
   }
 
-  Widget _buildProposalCard(ChangeProposal p, ColorScheme cs) {
-    final (icon, label) = switch (p.status) {
-      ProposalStatus.pending => (Icons.hourglass_top, '待审批'),
-      ProposalStatus.applied => (Icons.check_circle_outline, '已生效'),
-      ProposalStatus.rejected => (Icons.block, '已拒绝'),
-      ProposalStatus.failed => (Icons.error_outline, '失败'),
-      _ => (Icons.hourglass_top, p.status),
-    };
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: ListTile(
-        dense: true,
-        leading: Icon(icon, size: 20),
-        title: Text(p.summary,
-            maxLines: 2, overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 13)),
-        subtitle: Text('${p.tool} · $label',
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-        trailing: p.status == ProposalStatus.pending
-            ? TextButton(
-                onPressed: () async {
-                  await Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const ApprovalsPage()),
-                  );
-                  await _reload();
-                },
-                child: const Text('去审批'),
-              )
-            : null,
-      ),
+  Widget _buildProposalCard(ChangeProposal p) {
+    return ProposalCard(
+      proposal: p,
+      density: ProposalCardDensity.compact,
+      onGoToApprovals: () async {
+        await Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const ApprovalsPage()),
+        );
+        await _reload();
+      },
     );
   }
 
