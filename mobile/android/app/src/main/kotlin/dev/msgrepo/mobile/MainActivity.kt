@@ -1,9 +1,7 @@
 package dev.msgrepo.mobile
 
-import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
@@ -11,7 +9,6 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
-import android.provider.Telephony
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -27,28 +24,10 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         const val CHANNEL = "dev.msgrepo.mobile/bridge"
-        const val REQ_SMS_PERMISSION = 4101
 
         /** 采集服务（独立组件）通过它把「队列有新数据」推给 Dart 侧（P3-3）。 */
         @Volatile
         var bridgeChannel: MethodChannel? = null
-    }
-
-    /** 进行中的运行时权限请求回调（短信导入，v2.6）。 */
-    private var pendingPermissionResult: MethodChannel.Result? = null
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_SMS_PERMISSION) {
-            val granted = grantResults.isNotEmpty() &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
-            pendingPermissionResult?.success(granted)
-            pendingPermissionResult = null
-        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -187,39 +166,7 @@ class MainActivity : FlutterActivity() {
                         result.success(opened)
                     }
 
-                    // ---- 短信导入（v2.6）：READ_SMS 运行时权限 + 系统短信库读取 ----
-
-                    "hasSmsPermission" -> result.success(hasSmsPermission())
-
-                    "requestSmsPermission" -> {
-                        if (hasSmsPermission()) {
-                            result.success(true)
-                        } else if (pendingPermissionResult != null) {
-                            result.success(false) // 已有进行中的授权请求
-                        } else {
-                            pendingPermissionResult = result
-                            requestPermissions(
-                                arrayOf(Manifest.permission.READ_SMS),
-                                REQ_SMS_PERMISSION,
-                            )
-                        }
-                    }
-
-                    // 系统短信库全部短信（收件箱+已发），按时间升序；
-                    // 上限 20000 条防 OOM。后台线程执行，Result 可跨线程回调。
-                    "readSmsMessages" -> {
-                        if (!hasSmsPermission()) {
-                            result.success("[]")
-                        } else {
-                            Thread {
-                                try {
-                                    result.success(readSmsJson())
-                                } catch (t: Throwable) {
-                                    result.success("[]")
-                                }
-                            }.start()
-                        }
-                    }
+                    // ---- 短信导入已随 v3 阶段 3 整体移除（design-v3 §3.2）----
 
                     else -> result.notImplemented()
                 }
@@ -391,45 +338,5 @@ class MainActivity : FlutterActivity() {
             }
         }
         return false
-    }
-
-    private fun hasSmsPermission(): Boolean {
-        return checkSelfPermission(Manifest.permission.READ_SMS) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-    /**
-     * 读取系统短信库（content://sms）：收件箱 + 已发，按时间升序。
-     * 输出 [{address, body, date, type}]，type=1 收件 / 2 已发；上限 20000 条。
-     */
-    private fun readSmsJson(): String {
-        val arr = JSONArray()
-        val cursor = contentResolver.query(
-            Telephony.Sms.CONTENT_URI,
-            arrayOf(
-                Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY,
-                Telephony.Sms.DATE,
-                Telephony.Sms.TYPE,
-            ),
-            null,
-            null,
-            "${Telephony.Sms.DATE} ASC",
-        ) ?: return "[]"
-        cursor.use {
-            var count = 0
-            while (it.moveToNext() && count < 20000) {
-                val body = it.getString(1)?.trim().orEmpty()
-                if (body.isEmpty()) continue
-                val obj = JSONObject()
-                obj.put("address", it.getString(0) ?: "")
-                obj.put("body", body)
-                obj.put("date", it.getLong(2))
-                obj.put("type", it.getInt(3))
-                arr.put(obj)
-                count++
-            }
-        }
-        return arr.toString()
     }
 }

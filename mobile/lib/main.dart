@@ -11,9 +11,8 @@ import 'services/ai_processing.dart';
 import 'services/app_ui_state.dart';
 import 'services/notification_bridge.dart';
 import 'services/reminder_service.dart';
+import 'ui/library/library_page.dart';
 import 'ui/messages/ai_panel.dart';
-import 'ui/messages/messages_page.dart';
-import 'ui/notes/notes_page.dart';
 import 'ui/schedule/schedule_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/splash_gate.dart';
@@ -237,8 +236,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   // IndexedStack 保活页面不会随切页重跑 initState，切入时用 GlobalKey 主动刷新
   final _scheduleKey = GlobalKey<SchedulePageState>();
   final _todosKey = GlobalKey<TodosPageState>();
-  final _notesKey = GlobalKey<NotesPageState>();
-  final _messagesKey = GlobalKey<MessagesPageState>();
+  final _libraryKey = GlobalKey<LibraryPageState>();
 
   // O10：页面懒构建。原来 5 个页面在 initState 就全部创建，IndexedStack 又会构建全部子页 ——
   // 任何主题切换都要把这 5 棵树重新 build 一遍（真机实测单帧 build 达 924ms）。
@@ -250,8 +248,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     return switch (i) {
       0 => SchedulePage(key: _scheduleKey),
       1 => TodosPage(key: _todosKey),
-      2 => NotesPage(key: _notesKey),
-      3 => MessagesPage(key: _messagesKey),
+      2 => LibraryPage(key: _libraryKey),
       _ => const SettingsPage(),
     };
   }
@@ -271,7 +268,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             child: RepaintBoundary(
                 child: IndexedStack(
                   index: _index,
-                  children: [for (var i = 0; i < 5; i++) _pageAt(i)],
+                  children: [for (var i = 0; i < AppUiState.tabCount; i++) _pageAt(i)],
                 ),
             ),
           ),
@@ -308,11 +305,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       color: cs.primaryContainer,
       child: InkWell(
         onTap: () async {
-          setState(() => _index = AppUiState.messagesTabIndex);
-          AppUiState.instance.setTab(AppUiState.messagesTabIndex);
-          _messagesKey.currentState?.reload();
+          setState(() {
+            _index = AppUiState.libraryTabIndex;
+            _builtTabs.add(AppUiState.libraryTabIndex);
+          });
+          AppUiState.instance.openLibrary(AppUiState.librarySectionMessages);
+          await _libraryKey.currentState?.reloadMessages();
+          if (!mounted) return;
           await showAiProcessPanel(context,
-              onChanged: () => _messagesKey.currentState?.reload());
+              onChanged: () => _libraryKey.currentState?.reloadMessages());
         },
         child: Padding(
           // 页面本身不带 SafeArea，横幅要自己避开状态栏（真机截图发现压在时间上）
@@ -348,14 +349,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _scheduleKey.currentState?.reload();
       case AppUiState.todosTabIndex:
         _todosKey.currentState?.reload();
-      case AppUiState.notesTabIndex:
-        _notesKey.currentState?.reload();
-      case AppUiState.messagesTabIndex:
-        _messagesKey.currentState?.reload();
+      case AppUiState.libraryTabIndex:
+        _libraryKey.currentState?.reload();
     }
   }
 
-  /// U19-B：底部导航；「消息」带未处理数角标（页面常驻，后台也会刷新）
+  /// U19-B：底部导航；「库」带消息未处理数角标（页面常驻，后台也会刷新）
   Widget _buildNavBar() {
     final pending = MessageBadges.instance.pending;
     return NavigationBar(
@@ -375,15 +374,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             icon: Icon(Icons.calendar_month_outlined), label: '日程'),
         const NavigationDestination(
             icon: Icon(Icons.check_circle_outline), label: '待办'),
-        const NavigationDestination(
-            icon: Icon(Icons.notes_outlined), label: '笔记'),
         NavigationDestination(
             icon: Badge(
               isLabelVisible: pending > 0,
               label: Text(pending > 99 ? '99+' : '$pending'),
-              child: const Icon(Icons.mail_outline),
+              child: const Icon(Icons.inventory_2_outlined),
             ),
-            label: '消息'),
+            label: '库'),
         const NavigationDestination(
             icon: Icon(Icons.settings_outlined), label: '设置'),
       ],

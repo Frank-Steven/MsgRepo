@@ -9,14 +9,12 @@ import '../../services/ai_processing.dart';
 import '../../services/anchor_service.dart';
 import '../../services/assistant/models.dart';
 import '../../services/database.dart';
-import '../../services/import_service.dart';
 import '../../services/notification_bridge.dart';
 import '../../services/undo_service.dart';
 import '../add_message_page.dart';
 import '../tasks/task_editor.dart';
 import 'ai_panel.dart';
 import 'archived_page.dart';
-import 'import_page.dart';
 import 'message_detail_sheet.dart';
 import 'message_widgets.dart';
 import '../../services/app_log.dart';
@@ -762,41 +760,7 @@ class MessagesPageState extends State<MessagesPage> {
     ];
   }
 
-  // ---- 导入 / 归档入口 ----
-
-  Future<void> _openImport(String source) async {
-    final imported = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => ImportPage(source: source)));
-    if (imported == true) await reload();
-  }
-
-  void _showImportSheet() {
-    const entries = [
-      (Icons.chat_bubble_outline, '微信', ImportSource.wechat),
-      (Icons.forum_outlined, 'QQ', ImportSource.qq),
-      (Icons.sms_outlined, '短信', ImportSource.sms),
-    ];
-    showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final (icon, name, source) in entries)
-              ListTile(
-                leading: Icon(icon),
-                title: Text('从$name导入'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _openImport(source);
-                },
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+  // ---- 归档入口 ----
 
   Future<void> _openArchived() async {
     await Navigator.of(context).push(
@@ -837,11 +801,6 @@ class MessagesPageState extends State<MessagesPage> {
           tooltip: '手动添加',
           icon: const Icon(Icons.add),
           onPressed: _addManually,
-        ),
-        IconButton(
-          tooltip: '导入',
-          icon: const Icon(Icons.move_to_inbox_outlined),
-          onPressed: _showImportSheet,
         ),
         IconButton(
           tooltip: '已归档',

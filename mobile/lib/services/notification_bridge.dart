@@ -92,40 +92,7 @@ class NotificationBridge {
     }
   }
 
-  // ---- 短信导入（v2.6）----
-
-  Future<bool> hasSmsPermission() async {
-    try {
-      return await _channel.invokeMethod<bool>('hasSmsPermission') ?? false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
-
-  /// 弹系统运行时授权框，返回是否授予。
-  Future<bool> requestSmsPermission() async {
-    try {
-      return await _channel.invokeMethod<bool>('requestSmsPermission') ??
-          false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
-
-  /// 读系统短信库（收件箱+已发，时间升序）；无权限/失败返回空表。
-  Future<List<Map<String, dynamic>>> readSmsMessages() async {
-    try {
-      final json =
-          await _channel.invokeMethod<String>('readSmsMessages') ?? '[]';
-      return [
-        for (final e in jsonDecode(json) as List)
-          (e as Map).cast<String, dynamic>(),
-      ];
-    } catch (e, st) {
-      AppLog.instance.warn('bridge.read-queue', e, st);
-      return const [];
-    }
-  }
+  // ---- 短信导入已随 v3 阶段 3 整体移除（design-v3 §3.2）----
 
   /// 打开附件访问方式（http 链接 / content:// / 应用 deeplink）。
   Future<bool> openDeeplink(String url) async {

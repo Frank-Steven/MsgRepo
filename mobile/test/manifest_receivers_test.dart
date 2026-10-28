@@ -81,4 +81,10 @@ void main() {
     expect(manifest, contains('android.permission.RECEIVE_BOOT_COMPLETED'),
         reason: '缺 RECEIVE_BOOT_COMPLETED：BootReceiver 收不到开机广播');
   });
+
+  test('短信导入已移除：READ_SMS 权限声明不再出现（v3 阶段 3）', () {
+    expect(manifest, isNot(contains('android.permission.READ_SMS')),
+        reason: 'READ_SMS 已随消息导入功能整体移除（design-v3 §3.2），'
+            '重新加回意味着短信读取代码死灰复燃');
+  });
 }
